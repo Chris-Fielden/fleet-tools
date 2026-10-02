@@ -256,3 +256,31 @@ def test_redirects_are_not_followed_so_the_key_is_not_forwarded(kaneo):
         assert other.requests == []
     finally:
         other.stop()
+
+
+@pytest.mark.parametrize("key", [API_KEY + "\n", "has space", "tab\there", ""])
+def test_malformed_api_key_is_refused_without_echoing_it(kaneo, key):
+    write_config(kaneo.url, key=key)
+    for r in (run("sync"), run("new", *new_args())):
+        assert r.returncode in (0, 1)
+        assert "Traceback" not in r.stderr
+        assert "api_key" in r.stderr
+        assert key.strip() == "" or key.strip() not in r.stdout + r.stderr
+    assert kaneo.requests == []
+
+
+def test_malformed_url_is_a_plain_error(kaneo):
+    write_config("http://[bad/api")
+    r = run("sync")
+    assert r.returncode == 1 and "Traceback" not in r.stderr and "url" in r.stderr
+
+
+def test_card_in_the_wrong_project_is_moved_back(kaneo):
+    tid = new_ticket()
+    task = only_task(kaneo)
+    right = task["projectId"]
+    task["projectId"] = "somewhere-else"
+    r = run("sync")
+    assert f"{tid}  updated" in r.stdout
+    assert only_task(kaneo)["projectId"] == right
+    assert f"{tid}  unchanged" in run("sync").stdout

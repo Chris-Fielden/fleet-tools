@@ -81,7 +81,13 @@ def load_config() -> dict:
     for name in ("url", "workspace_id", "api_key"):
         if not isinstance(data.get(name), str) or not data[name]:
             raise KaneoError(f"{path} needs a non-empty '{name}'")
-    parsed = urllib.parse.urlsplit(data["url"])
+    if not re.fullmatch(r"[\x21-\x7e]+", data["api_key"]):
+        raise KaneoError(f"'api_key' in {path} must be printable text with no spaces or "
+                         "line breaks (check for a trailing newline)")
+    try:
+        parsed = urllib.parse.urlsplit(data["url"])
+    except ValueError:
+        raise KaneoError(f"'url' in {path} is not a valid URL") from None
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise KaneoError(f"'url' in {path} must start with http:// or https://")
     return {"url": data["url"].rstrip("/"), "workspace_id": data["workspace_id"],
@@ -128,6 +134,9 @@ class Client:
             raise KaneoError(f"Kaneo unreachable ({_reason(exc.reason)})") from None
         except TimeoutError:
             raise KaneoError(f"Kaneo timed out after {TIMEOUT}s on {what}") from None
+        except ValueError:
+            # e.g. a malformed URL; the message could quote the header, so say nothing of it
+            raise KaneoError(f"Kaneo request could not be made ({what})") from None
         except (OSError, http.client.HTTPException) as exc:
             raise KaneoError(f"Kaneo request failed ({type(exc).__name__}) on {what}") from None
         if not raw.strip():
@@ -264,7 +273,8 @@ def _mirror(t: dict, board: _Board, tasks: dict, dry_run: bool) -> str:
         tasks[t["id"]] = made["id"]
         return "created"
 
-    if (slug is not None and existing.get("title") == title
+    if (slug is not None and existing.get("projectId") == pid
+            and existing.get("title") == title
             and existing.get("description") == desc and existing.get("status") == slug):
         return "unchanged"
     if dry_run:
@@ -293,6 +303,9 @@ def sync(tickets: list[dict], dry_run: bool = False):
                     tk._write_atomic(map_path(), tasks)
             except KaneoError as exc:
                 outcome = f"error: {exc}"
+            except OSError as exc:
+                outcome = (f"error: could not save {map_path().name} ({exc.strerror or 'I/O error'}); "
+                           "a card may be duplicated on the next sync")
             except (KeyError, TypeError, AttributeError):
                 outcome = "error: Kaneo sent a reply in an unexpected shape"
             yield t["id"], outcome
