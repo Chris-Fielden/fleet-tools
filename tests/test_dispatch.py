@@ -296,9 +296,9 @@ def snapshot(repo):
 def test_dry_run_changes_nothing(projects, capsys):
     repo = make_repo(projects)
     a, b = mk(branch="task/a"), mk(branch="task/b", type="question", parent=None)
-    before = ({p.name: p.read_text() for p in tk.tickets_dir().glob("T-*.json")}, snapshot(repo))
+    before = ({p.name: p.read_text() for p in tk.tickets_dir().glob("[A-Z]*.json")}, snapshot(repo))
     dry(capsys)
-    after = ({p.name: p.read_text() for p in tk.tickets_dir().glob("T-*.json")}, snapshot(repo))
+    after = ({p.name: p.read_text() for p in tk.tickets_dir().glob("[A-Z]*.json")}, snapshot(repo))
     assert before == after
     log = (projects.parent / "fleet" / "dispatch.log").read_text().splitlines()
     assert len(log) == 2 and all(line[:4].isdigit() and "DECISION" in line for line in log)

@@ -25,7 +25,7 @@ FIELDS = (
     "created_by", "assignee", "status", "verdict", "created_at", "updated_at",
 )
 # Optional fields: may be absent from a stored ticket.
-OPTIONAL_FIELDS = ("close_note", "base_commit")
+OPTIONAL_FIELDS = ("close_note", "base_commit", "seq")
 CLOSE_NOTE_MAX = 500
 BODY_MAX = 4000
 AGENTS = ("claude", "codex")
@@ -34,7 +34,22 @@ CLOSE_OUTCOMES = {"done": "done", "failed": "failed", "cancelled": "cancelled"}
 # FIELDS is set by the tool.
 CALLER_FIELDS = ("type", "repo", "branch", "title", "body", "commit", "parent")
 
-ID_RE = re.compile(r"T-\d{8}-\d{3,}")
+# Short ids like BD12 (new) and legacy ids like T-20250101-001 (kept as is).
+ID_RE = re.compile(r"T-\d{8}-\d{3,}|[A-Z]{2}[1-9]\d*")
+ID_EXAMPLE = "BD12 or T-20250101-001"
+
+# Id prefix by ticket type. Add a type here (and to TYPES) and it gets its
+# prefix. EMERGENCY_PREFIX wins over the type for any ticket whose priority
+# field is "urgent"; tickets without a priority field never get it.
+TYPE_PREFIX = {
+    "build": "BD",
+    "fix": "FX",
+    "review": "RV",
+    "question": "QN",
+    "investigate": "ID",
+}
+EMERGENCY_PREFIX = "EM"
+COUNTERS_FILE = ".counters"
 REPO_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 BRANCH_RE = re.compile(r"task/[a-z0-9-]{1,64}")
 TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
@@ -150,7 +165,7 @@ def _check_common(f: dict, errors: list[str]) -> None:
     elif t == "build" and parent is not None:
         errors.append("a build ticket must not have a parent")
     elif parent is not None and (not _is_str(parent) or not ID_RE.fullmatch(parent)):
-        errors.append("parent must be a ticket id like T-20250101-001")
+        errors.append("parent must be a ticket id like BD12 or T-20250101-001")
 
     title = f.get("title")
     if not _is_str(title) or not 1 <= len(title) <= 100:
@@ -205,6 +220,9 @@ def validate_stored(data) -> list[str]:
     base = data.get("base_commit")
     if "base_commit" in data and (not _is_str(base) or not COMMIT_RE.fullmatch(base)):
         errors.append("base_commit must be a git commit id (7 to 40 hex characters)")
+    seq = data.get("seq")
+    if "seq" in data and (not isinstance(seq, int) or isinstance(seq, bool) or seq < 1):
+        errors.append("seq must be a whole number, 1 or more")
     for name in ("created_at", "updated_at"):
         if not _is_time(data[name]):
             errors.append(f"{name} must be a UTC ISO 8601 time like 2025-01-01T00:00:00Z")
@@ -251,7 +269,7 @@ def _write_atomic(path: Path, data: dict) -> None:
 
 def load_ticket(ticket_id: str) -> dict:
     if not ID_RE.fullmatch(ticket_id):
-        raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like T-20250101-001)"])
+        raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
     return _load_path(_ticket_path(ticket_id), ticket_id)
 
 
@@ -274,28 +292,60 @@ def _load_path(path: Path, label: str) -> dict:
     return data
 
 
-def _sort_key(t: dict):
-    day, seq = t["id"].split("-")[1:]
-    return (t["created_at"], day, int(seq))
+def oldest_first_key(t: dict):
+    """Sort key, oldest first: creation time, then the stored creation
+    sequence. Tickets from before `seq` existed count as 0, and the id is
+    only a last tie-break so the order is stable; nothing is read from it."""
+    return (t["created_at"], t.get("seq", 0), t["id"])
 
 
 def list_tickets() -> list[dict]:
     d = tickets_dir()
     if not d.is_dir():
         return []
-    tickets = [_load_path(p, p.stem) for p in d.glob("T-*.json")]
-    tickets.sort(key=_sort_key, reverse=True)
+    tickets = [_load_path(p, p.stem) for p in d.glob("*.json") if ID_RE.fullmatch(p.stem)]
+    tickets.sort(key=oldest_first_key, reverse=True)
     return tickets
 
 
-def _next_id(day: str) -> str:
-    prefix = f"T-{day}-"
-    highest = 0
+def id_prefix(fields: dict) -> str:
+    """The id prefix for a new ticket: urgent wins, otherwise by type."""
+    if fields.get("priority") == "urgent":
+        return EMERGENCY_PREFIX
+    return TYPE_PREFIX[fields["type"]]
+
+
+def _read_counters() -> dict:
+    try:
+        data = json.loads((tickets_dir() / COUNTERS_FILE).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        raise TicketError(f"cannot read the id counters: {exc}") from None
+    ok = isinstance(data, dict) and all(
+        _is_str(k) and isinstance(v, int) and not isinstance(v, bool) and v >= 0
+        for k, v in data.items())
+    if not ok:
+        raise TicketError("the id counters file is damaged; fix or delete it")
+    return data
+
+
+def _assign_ids(prefix: str) -> tuple[str, int]:
+    """Next id for `prefix` and the next creation sequence. Caller holds the
+    lock. Counters never go below what is already on disk, so a lost counter
+    file cannot cause a duplicate."""
+    counters = _read_counters()
+    highest = counters.get(prefix, 0)
+    seq = counters.get("seq", 0)
+    pat = re.compile(re.escape(prefix) + r"([1-9]\d*)")
     for p in tickets_dir().glob(f"{prefix}*.json"):
-        tail = p.stem[len(prefix):]
-        if tail.isdigit():
-            highest = max(highest, int(tail))
-    return f"{prefix}{highest + 1:03d}"
+        m = pat.fullmatch(p.stem)
+        if m:
+            highest = max(highest, int(m.group(1)))
+    counters[prefix] = highest + 1
+    counters["seq"] = seq + 1
+    _write_atomic(tickets_dir() / COUNTERS_FILE, counters)
+    return f"{prefix}{highest + 1}", seq + 1
 
 
 def create_ticket(fields: dict) -> dict:
@@ -323,8 +373,9 @@ def create_ticket(fields: dict) -> dict:
             except TicketError:
                 raise TicketInvalid([f"parent ticket {parent} does not exist or is unreadable"]) from None
         now = _now()
+        new_id, seq = _assign_ids(id_prefix(fields))
         ticket = {
-            "id": _next_id(datetime.now(timezone.utc).strftime("%Y%m%d")),
+            "id": new_id,
             "type": t,
             "repo": fields["repo"],
             "branch": fields["branch"],
@@ -338,7 +389,10 @@ def create_ticket(fields: dict) -> dict:
             "verdict": None,
             "created_at": now,
             "updated_at": now,
+            "seq": seq,
         }
+        if fields.get("priority") is not None:
+            ticket["priority"] = fields["priority"]
         _write_atomic(_ticket_path(ticket["id"]), ticket)
     return ticket
 
@@ -349,7 +403,7 @@ def approve_ticket(ticket_id: str) -> dict:
     if creator != "human":
         raise TicketError(f"only a human can approve tickets (running as {creator})")
     if not ID_RE.fullmatch(ticket_id):
-        raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like T-20250101-001)"])
+        raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
     with _locked():
         ticket = load_ticket(ticket_id)
         if ticket["type"] != "build" or ticket["status"] != "proposed":
@@ -400,7 +454,7 @@ def close_ticket(ticket_id: str, outcome: str, note: str | None = None) -> dict:
     if creator != "human":
         raise TicketError(f"only a human can close tickets (running as {creator})")
     if not ID_RE.fullmatch(ticket_id):
-        raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like T-20250101-001)"])
+        raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
     if outcome not in CLOSE_OUTCOMES:
         raise TicketInvalid([f"outcome must be one of: {', '.join(CLOSE_OUTCOMES)}"])
     if note is not None:

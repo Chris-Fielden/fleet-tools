@@ -97,8 +97,8 @@ def test_creator_and_status(monkeypatch, envvars, who, build_status):
 
 def test_id_format_and_sequence():
     a, b = make(), make()
-    assert re.fullmatch(r"T-\d{8}-001", a["id"])
-    assert b["id"].endswith("-002")
+    assert a["id"] == "BD1"
+    assert b["id"] == "BD2"
 
 
 # 3. Caller can't set tool-owned fields --------------------------------------
@@ -331,14 +331,15 @@ def test_agent_cannot_become_human_through_library(monkeypatch):
     assert make()["status"] == "proposed"
 
 
-def test_newest_first_beyond_999_same_second():
+def test_same_second_ordered_by_stored_seq_not_id():
     d = tk.tickets_dir()
     d.mkdir(parents=True)
     base = make()
-    for seq in (999, 1000):
-        t = dict(base, id=f"T-20250101-{seq:03d}", created_at="2025-01-01T00:00:00Z",
+    # ids that would sort the wrong way if anything read meaning from them
+    for tid, seq in (("T-20250101-999", 5), ("T-20250101-1000", 6)):
+        t = dict(base, id=tid, seq=seq, created_at="2025-01-01T00:00:00Z",
                  updated_at="2025-01-01T00:00:00Z")
-        (d / f"{t['id']}.json").write_text(json.dumps(t))
+        (d / f"{tid}.json").write_text(json.dumps(t))
     ids = [t["id"] for t in tk.list_tickets()]
     assert ids.index("T-20250101-1000") < ids.index("T-20250101-999")
 
@@ -356,3 +357,137 @@ def test_invalid_utf8_and_bad_timestamp_rejected_on_read():
         tk.load_ticket(tid)
     r = run("show", tid)
     assert r.returncode == 1 and "Traceback" not in r.stderr
+
+
+# Short ids -------------------------------------------------------------------
+
+@pytest.mark.parametrize("over, prefix", [
+    ({"type": "build"}, "BD"),
+    ({"type": "fix", "parent": "BD1"}, "FX"),
+    ({"type": "review", "parent": "BD1", "commit": "abc1234"}, "RV"),
+    ({"type": "question"}, "QN"),
+])
+def test_prefix_for_each_type(over, prefix):
+    make()  # BD1, the parent
+    t = make(**over)
+    assert re.fullmatch(prefix + r"\d+", t["id"])
+    assert tk.load_ticket(t["id"])["id"] == t["id"]
+
+
+def test_counters_count_up_per_prefix_without_padding():
+    ids = [make()["id"], make(type="question")["id"], make()["id"], make(type="question")["id"]]
+    assert ids == ["BD1", "QN1", "BD2", "QN2"]
+    for _ in range(9):
+        last = make()["id"]
+    assert last == "BD11"
+
+
+def test_lost_counter_file_cannot_duplicate_an_id():
+    make(), make()
+    (tk.tickets_dir() / tk.COUNTERS_FILE).unlink()
+    assert make()["id"] == "BD3"
+
+
+def test_damaged_counter_file_is_refused():
+    make()
+    (tk.tickets_dir() / tk.COUNTERS_FILE).write_text("[1]")
+    with pytest.raises(tk.TicketError):
+        make()
+
+
+def test_counter_file_is_not_a_ticket():
+    make()
+    assert [t["id"] for t in tk.list_tickets()] == ["BD1"]
+
+
+def test_concurrent_new_short_ids_unique_and_counted():
+    import os
+    procs = [subprocess.Popen([sys.executable, str(BIN), "new", *new_args(title=f"t{i}")],
+                              stdout=subprocess.PIPE, text=True, env=dict(os.environ))
+             for i in range(12)]
+    ids = sorted(p.communicate()[0].strip() for p in procs)
+    assert all(p.returncode == 0 for p in procs)
+    assert sorted(ids, key=lambda i: int(i[2:])) == [f"BD{n}" for n in range(1, 13)]
+    assert sorted(t["seq"] for t in tk.list_tickets()) == list(range(1, 13))
+
+
+def test_old_ids_keep_working(monkeypatch):
+    d = tk.tickets_dir()
+    d.mkdir(parents=True)
+    old = dict(make(), id="T-20250101-001", created_at="2025-01-01T00:00:00Z",
+               updated_at="2025-01-01T00:00:00Z")
+    del old["seq"]
+    (d / "T-20250101-001.json").write_text(json.dumps(old))
+    assert tk.load_ticket("T-20250101-001")["id"] == "T-20250101-001"
+    child = make(type="fix", parent="T-20250101-001")
+    assert child["parent"] == "T-20250101-001"
+    assert run("show", "T-20250101-001").returncode == 0
+    monkeypatch.setenv("CLAUDECODE", "1")
+    prop = make(branch="task/prop")
+    monkeypatch.delenv("CLAUDECODE")
+    assert tk.approve_ticket(prop["id"])["status"] == "open"
+    assert tk.close_ticket("T-20250101-001", "done")["status"] == "done"
+    assert tk.close_ticket(child["id"], "cancelled")["status"] == "cancelled"
+
+
+def test_bad_ids_refused():
+    for bad in ("bd1", "BD0", "BD01", "BDX", "T-1-1", "../BD1", "B1"):
+        assert run("show", bad).returncode == 2
+
+
+def test_ordering_by_created_at_then_seq_old_first():
+    from fleet import dispatch
+    old = {"id": "T-20990101-009", "created_at": "2025-01-01T00:00:00Z"}
+    same_a = {"id": "ZZ9", "created_at": "2025-01-02T00:00:00Z", "seq": 1}
+    same_b = {"id": "AA1", "created_at": "2025-01-02T00:00:00Z", "seq": 2}
+    later = {"id": "AA2", "created_at": "2025-01-03T00:00:00Z", "seq": 1}
+    got = sorted([later, same_b, same_a, old], key=tk.oldest_first_key)
+    assert got == [old, same_a, same_b, later]
+    assert not hasattr(dispatch, "_oldest_first_key")
+
+
+def test_dispatcher_picks_by_seq_when_same_second(monkeypatch):
+    monkeypatch.setattr(tk, "_now", lambda: "2025-01-01T00:00:00Z")
+    first, second = make(branch="task/one"), make(branch="task/two")
+    from fleet import dispatch
+    got = sorted([second, first], key=dispatch.tk.oldest_first_key)
+    assert [t["id"] for t in got] == [first["id"], second["id"]]
+
+
+def test_kaneo_title_uses_new_id():
+    from fleet import kaneo
+    assert kaneo.card_title(make()).startswith("[BD1] ")
+
+
+# Lookup table: investigate and priority arrive later ------------------------
+
+def test_prefix_table_has_every_entry():
+    assert tk.TYPE_PREFIX == {"build": "BD", "fix": "FX", "review": "RV",
+                              "question": "QN", "investigate": "ID"}
+    assert tk.EMERGENCY_PREFIX == "EM"
+
+
+def test_investigate_and_urgent_take_effect_once_they_exist(monkeypatch):
+    # Not there yet: investigate is refused, and no ticket carries a priority.
+    assert "investigate" not in tk.TYPES and "priority" not in tk.CALLER_FIELDS
+    with pytest.raises(tk.TicketInvalid):
+        make(type="investigate")
+    assert make()["id"] == "BD1"
+    # Stand-in for the later ticket: add the type and the priority field.
+    monkeypatch.setattr(tk, "TYPES", tk.TYPES + ("investigate",))
+    monkeypatch.setattr(tk, "OPTIONAL_FIELDS", tk.OPTIONAL_FIELDS + ("priority",))
+    monkeypatch.setattr(tk, "CALLER_FIELDS", tk.CALLER_FIELDS + ("priority",))
+    assert make(type="investigate")["id"] == "ID1"
+    assert make(type="investigate")["id"] == "ID2"
+    urgent = make(priority="urgent")
+    assert urgent["id"] == "EM1"
+    assert tk.load_ticket("EM1")["priority"] == "urgent"
+    assert make(type="fix", parent="BD1", priority="urgent")["id"] == "EM2"
+    assert make(type="investigate", priority="urgent")["id"] == "EM3"
+    assert make(priority="normal")["id"] == "BD2"
+    # The prefix is fixed at creation: changing priority later keeps the id.
+    path = tk._ticket_path("EM1")
+    data = json.loads(path.read_text())
+    data["priority"] = "normal"
+    path.write_text(json.dumps(data))
+    assert tk.load_ticket("EM1")["id"] == "EM1"
