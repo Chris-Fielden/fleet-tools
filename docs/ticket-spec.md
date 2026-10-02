@@ -42,6 +42,7 @@ launching, no hooks in this phase.
 | status | string | One of: proposed, open, claimed, done, failed, cancelled. |
 | verdict | object or null | Always null in phase 1. |
 | close_note | string, optional | 1 to 500 characters, gitleaks-checked. Set by `ticket close --note`. Absent otherwise. |
+| base_commit | string, optional | Git commit id (7 to 40 hex characters): main's tip when the dispatcher claimed the ticket. Reconcile only counts a `Merge <branch>` commit made after it. Absent on tickets claimed before this field existed (they count any merge in main's history). |
 | created_at | string | UTC time, ISO 8601, set by the tool. |
 | updated_at | string | UTC time, ISO 8601, set by the tool. |
 
