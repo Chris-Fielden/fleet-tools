@@ -5,11 +5,19 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from fleet import usage
 
 ROOT = Path(__file__).resolve().parent.parent
 SAMPLE = json.loads((ROOT / "tests/data/codex_rate_limits_sample.json").read_text())
 NOW = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_homes(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
 
 
 def z(dt):
@@ -95,3 +103,22 @@ def test_cli_json_uses_given_home(tmp_path):
     p = subprocess.run([sys.executable, str(ROOT / "bin/fleet"), "usage"],
                        capture_output=True, text=True, env=env)
     assert len(p.stdout.strip().splitlines()) == 2
+
+
+def test_codex_ignores_future_and_empty_records(tmp_path):
+    write_codex(tmp_path, NOW - timedelta(minutes=5))
+    d = tmp_path / ".codex/sessions/2026/10/02"
+    bad = [{"timestamp": z(NOW + timedelta(hours=1)), "payload": {"rate_limits": SAMPLE["rate_limits"]}},
+           {"timestamp": z(NOW - timedelta(minutes=1)), "payload": {"rate_limits": {}}}]
+    (d / "rollout-b.jsonl").write_text("\n".join(map(json.dumps, bad)) + "\n")
+    r = usage.codex_usage(tmp_path, NOW)
+    assert r["five_hour"]["recorded_at"] == z(NOW - timedelta(minutes=5))
+
+
+def test_malformed_values_do_not_crash(tmp_path):
+    d = tmp_path / ".claude/projects/p"
+    d.mkdir(parents=True)
+    row = {"type": "assistant", "timestamp": z(NOW - timedelta(hours=1)),
+           "message": {"id": "x", "usage": {"input_tokens": "lots", "output_tokens": 4}}}
+    (d / "s.jsonl").write_text(json.dumps(row) + "\n" + json.dumps({**row, "timestamp": 1e30}) + "\n")
+    assert usage.claude_usage(tmp_path, NOW)["five_hour"]["tokens"] == 4

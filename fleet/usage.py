@@ -35,7 +35,10 @@ WEEK = timedelta(days=7)
 
 def _ts(value) -> datetime | None:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return datetime.fromtimestamp(value, timezone.utc)
+        try:
+            return datetime.fromtimestamp(value, timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            return None
     if isinstance(value, str):
         try:
             dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -103,9 +106,10 @@ def claude_usage(home: Path, now: datetime) -> dict:
                 if key in seen:
                     continue
                 seen.add(key)
-            n = sum(usage.get(k) or 0 for k in (
+            n = sum(v for v in (usage.get(k) for k in (
                 "input_tokens", "output_tokens",
                 "cache_creation_input_tokens", "cache_read_input_tokens"))
+                    if isinstance(v, int) and not isinstance(v, bool))
             week += n
             if ts >= t5:
                 five += n
@@ -139,7 +143,10 @@ def codex_usage(home: Path, now: datetime) -> dict:
             payload = obj.get("payload")
             rl = payload.get("rate_limits") if isinstance(payload, dict) else None
             ts = _ts(obj.get("timestamp"))
-            if isinstance(rl, dict) and ts is not None and (best is None or ts > best[0]):
+            usable = isinstance(rl, dict) and any(
+                isinstance(rl.get(k), dict) and isinstance(rl[k].get("used_percent"), (int, float))
+                for k in ("primary", "secondary"))
+            if usable and ts is not None and ts <= now and (best is None or ts > best[0]):
                 best = (ts, rl)
     out = {"tool": "codex", "limit_known": False, "five_hour": _window(),
            "weekly": _window(),
