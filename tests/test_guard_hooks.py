@@ -328,3 +328,40 @@ def test_subshell_cd_does_not_hide_home_search(tmp_path, command):
 def test_plain_if_and_loops_still_allowed(tmp_path):
     assert bash("if test -f README.md; then cat README.md; fi", tmp_path) is None
     assert bash("for f in tests/*.py; do python3 -m py_compile $f; done", tmp_path) is None
+
+
+# --- fourth review round -----------------------------------------------------------
+
+@pytest.mark.parametrize("command", [
+    'echo "$(command ship BD-4)"',
+    'echo "`dispatch --once`"',
+    'echo "result: $(env idea x) done"',
+    'x="$(echo "$(ticket sync)")"',
+])
+def test_quoted_substitutions_are_scanned(tmp_path, command):
+    reason = bash(command, tmp_path)
+    assert reason and "Only the human runs" in reason
+
+
+def test_single_quoted_substitution_is_just_text(tmp_path):
+    assert bash("echo '$(date)' \"$(git rev-parse HEAD)\"", tmp_path) is None
+
+
+@pytest.mark.parametrize("command", [
+    "cd ~ && (cd /tmp); bash -c 'rg --hidden key'",
+    "cd ~ && (cd /tmp); echo \"$(grep -r key .)\"",
+])
+def test_nested_scans_get_every_folder(tmp_path, command):
+    reason = bash(command, tmp_path)
+    assert reason and "~/.fleet" in reason
+
+
+def test_many_cds_stay_fast_and_bounded(tmp_path):
+    import time
+    start = time.time()
+    assert bash("cd . && " * 60 + "ls", tmp_path) is None
+    assert time.time() - start < 5
+    # Too many possible folders to track: risky commands are refused.
+    dirs = " && ".join(f"(cd /tmp/d{i})" for i in range(20))
+    reason = bash(dirs + " && cd /tmp/x && rg key", tmp_path)
+    assert reason and "~/.fleet" in reason

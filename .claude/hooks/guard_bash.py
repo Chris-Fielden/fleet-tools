@@ -17,8 +17,9 @@ Known limits (by design; the separate-user setup is the fix for these):
   `source`/`.` of a file, shell functions and aliases, and programs started
   from inside another language (for example Python's subprocess).
 - Rarely used shell syntax: case statements, here-documents, arrays and
-  arithmetic. Simple if/while/for, subshells, $( ), backticks, eval and
-  bash -c are understood.
+  arithmetic. Simple if/while/for, subshells, $( ) and backticks (quoted or
+  not), eval and bash -c are understood. Past 16 possible folders or 6
+  levels of nesting, the rules stop guessing and refuse anything risky.
 - Mentions of ~/.fleet in plain text (for example a commit message) are
   refused too. That is deliberate: it is cheaper than telling text and paths
   apart, and the message says why.
@@ -186,25 +187,123 @@ def _is_ancestor_of_fleet(path):
     return fleet.startswith(path.rstrip(os.sep) + os.sep) or path == os.sep
 
 
-def scan_command(command, cwd, depth=0):
+MAX_PLACES = 16  # more possible folders than this and we stop guessing
+MAX_DEPTH = 6
+FLEET_WORDS = re.compile(r"\b(idea|alert|dispatch|ship|ticket)\b|\.fleet")
+_SUB = re.compile("\x01(\\d+)\x01")
+
+
+def _matching_paren(s, i):
+    """Index of the ) that closes a $( whose body starts at i."""
+    depth, n = 1, len(s)
+    while i < n:
+        c = s[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "'":
+            j = s.find("'", i + 1)
+            if j < 0:
+                raise ValueError("unbalanced quote")
+            i = j + 1
+            continue
+        if c == '"':
+            j = i + 1
+            while j < n and s[j] != '"':
+                j += 2 if s[j] == "\\" else 1
+            if j >= n:
+                raise ValueError("unbalanced quote")
+            i = j + 1
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    raise ValueError("unbalanced $(")
+
+
+def _pull_quoted_subs(command):
+    """Bash still runs $( ) and backticks inside double quotes. Swap each one
+    for a marker and return (new command, list of the commands inside), so
+    they can be checked on their own. Single-quoted text is left alone."""
+    out, subs, i, n, in_dq = [], [], 0, len(command), False
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        if c == "'" and not in_dq:
+            j = command.find("'", i + 1)
+            if j < 0:
+                raise ValueError("unbalanced quote")
+            out.append(command[i:j + 1])
+            i = j + 1
+            continue
+        if c == '"':
+            in_dq = not in_dq
+        elif in_dq and command.startswith("$(", i):
+            j = _matching_paren(command, i + 2)
+            subs.append(command[i + 2:j])
+            out.append(f"\x01{len(subs) - 1}\x01")
+            i = j + 1
+            continue
+        elif in_dq and c == "`":
+            j = i + 1
+            while j < n and command[j] != "`":
+                j += 2 if command[j] == "\\" else 1
+            if j >= n:
+                raise ValueError("unbalanced backtick")
+            subs.append(command[i + 1:j])
+            out.append(f"\x01{len(subs) - 1}\x01")
+            i = j + 1
+            continue
+        out.append(c)
+        i += 1
+    if in_dq:
+        raise ValueError("unbalanced quote")
+    return "".join(out), subs
+
+
+def _merge_places(places, new):
+    """Add folders without duplicates. Returns (places, still_known)."""
+    merged = list(dict.fromkeys(places + new))
+    if len(merged) > MAX_PLACES:
+        return places, False
+    return merged, True
+
+
+def scan_command(command, places, depth=0, cwd_known=True):
     """Return a reason to block, or None. Looks at every simple command in the
-    line, including ones behind wrappers, in $( ), backticks and bash -c."""
-    if depth > 3:
-        return None
+    line, including ones behind wrappers, in $( ) and backticks (quoted or
+    not), eval and bash -c. `places` is every folder the command might start in."""
+    if isinstance(places, str):
+        places = [places]
+    if depth > MAX_DEPTH:
+        return ("odd", None) if FLEET_WORDS.search(command) else None
     try:
+        command, subs = _pull_quoted_subs(command)
         segments = _segments(command)
     except ValueError:
         # Unbalanced quotes: too odd to analyse. Refuse if it mentions fleet
         # commands or the private folder at all; otherwise bash will reject it.
-        if re.search(r"\b(idea|alert|dispatch|ship|ticket)\b|\.fleet", command):
+        if FLEET_WORDS.search(command):
             return ("odd", None)
         return None
-    cwd_known = True
-    places = [cwd]  # every folder a later command might run in
+    places = list(dict.fromkeys(places))
     for words in segments:
+        # Commands inside quoted $( ) or backticks run first, from here.
+        for w in words:
+            for k in _SUB.findall(w):
+                reason = scan_command(subs[int(k)], places, depth + 1, cwd_known)
+                if reason:
+                    return reason
         name, args = _unwrap(words)
         if name == "-c":
-            reason = scan_command(args[0] if args else "", cwd if cwd_known else "/", depth + 1)
+            reason = scan_command(args[0] if args else "", places, depth + 1, cwd_known)
             if reason:
                 return reason
             continue
@@ -217,10 +316,9 @@ def scan_command(command, cwd, depth=0):
             expanded = _expand(target)
             if expanded is None:
                 cwd_known = False
-            else:
+            elif cwd_known:
                 # Keep the old folders too: a cd inside ( ) doesn't last.
-                places = places + [_resolve(expanded, p) for p in places]
-                cwd = places[-1]
+                places, cwd_known = _merge_places(places, [_resolve(expanded, p) for p in places])
             if cwd_known and any(is_under_fleet(p) for p in places):
                 return ("fleet", None)
             continue
@@ -298,7 +396,7 @@ def main():
     if ENV_WRITE.search(command):
         deny("Don't write .env files. Secrets never go in the repo; ask the human "
              "to put real values in place.")
-    found = scan_command(command, cwd)
+    found = scan_command(command, [cwd])
     m = FLEET_HUMAN_ONLY.search(command) or TICKET_HUMAN_ONLY.search(command)
     if (found and found[0] == "human") or m:
         what = found[1] if found and found[0] == "human" else (
