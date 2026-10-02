@@ -91,7 +91,10 @@ with no padding: `BD-1`, `BD-2`, `FX-1`, `EM-1`.
 ### Starting status
 
 - An investigate ticket always starts as `proposed`, whoever files it, and
-  waits for the human to approve it.
+  is not worked on until it is approved, with one exception: unless
+  `auto_investigate` is off, the dispatcher may start a read-only research
+  agent on a `proposed` investigate ticket without approval (see the
+  dispatcher spec).
 - Every other ticket (build, review, fix, question) starts as `open`, whoever
   files it. Agents start work freely; the human approves at merge.
 - Exception: a build ticket with a `parent` (a follow-up filed from an

@@ -353,6 +353,41 @@ def test_dry_run_log_has_no_worktree_for_investigations(projects):
     assert "worktree" not in dp.log_path().read_text() and ".worktrees" not in dp.log_path().read_text()
 
 
+def test_finish_uses_notes_saved_after_the_snapshot(projects, herdr_log, monkeypatch):
+    t = idea()
+    assert dispatch_main(["--once"]) == 0
+    stale = tk.list_tickets()          # no notes yet
+    tk.add_note(t["id"], "saved just now")
+    monkeypatch.setenv("FAKE_HERDR_STATE", "idle")
+    (done,) = list(lc.finish_investigations(stale, lambda m: None))
+    assert done["status"] == "done"
+
+
+def test_finish_ignores_an_unexpected_agent_list(projects, herdr_log, monkeypatch, env):
+    t = idea()
+    assert dispatch_main(["--once"]) == 0
+    odd = env / "odd-herdr"
+    odd.write_text("#!/bin/sh\necho '{\"result\": {\"oops\": 1}}'\n")
+    odd.chmod(0o755)
+    monkeypatch.setenv("FLEET_HERDR", str(odd))
+    warnings = []
+    assert list(lc.finish_investigations(tk.list_tickets(), warnings.append)) == []
+    assert warnings and tk.load_ticket(t["id"])["status"] == "claimed"
+
+
+def test_started_at_is_saved_with_the_claim(projects, herdr_log, monkeypatch):
+    t = idea()
+    seen = {}
+
+    def fail_after_claim(*a, **k):
+        seen["started"] = "started_at" in tk.load_ticket(t["id"])
+        raise lc.AgentMayBeRunning("tab stuck")
+    monkeypatch.setattr("fleet.launch.start_agent", fail_after_claim)
+    assert dispatch_main(["--once"]) == 1
+    got = tk.load_ticket(t["id"])
+    assert seen["started"] and got["status"] == "claimed" and "started_at" in got  # may be running: counts
+
+
 def test_finish_does_not_touch_other_tickets(projects, herdr_log, monkeypatch):
     build = mk(branch="task/job")
     tk.set_status(build["id"], "claimed", allowed_from=("open",), assignee="claude")

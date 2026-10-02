@@ -130,7 +130,10 @@ def find_workspace(name: str) -> str:
 
 def agent_listed(name: str, timeout: float = 120) -> tuple[bool, str | None]:
     """(is the agent listed, its state or None if it has no readable state)."""
-    for a in _dicts(herdr("agent", "list", timeout=timeout)):
+    data = herdr("agent", "list", timeout=timeout)
+    if not any(isinstance(v, list) for d in _dicts(data) for v in d.values()):
+        raise LaunchError("herdr agent list did not return a list of agents")
+    for a in _dicts(data):
         if a.get("name") == name:
             state = a.get("status", a.get("agent_status", a.get("state")))
             return True, state if isinstance(state, str) else None
@@ -358,7 +361,10 @@ def launch_research(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
     On a failed launch the ticket goes back to the status it had."""
     t = d.ticket
     before = t["status"]
-    claimed = tk.set_status(t["id"], "claimed", allowed_from=("proposed", "open"), assignee=d.agent)
+    # started_at is saved with the claim, so a start can never go uncounted;
+    # a failed launch clears it again.
+    claimed = tk.set_status(t["id"], "claimed", allowed_from=("proposed", "open"), assignee=d.agent,
+                            started_at=tk._now())
     kaneo.mirror_quietly(claimed, warn)
     try:
         dp.log("CLAIMED", f"{t['id']} {d.agent} investigation")
@@ -368,13 +374,11 @@ def launch_research(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
         return 1, (f"{t['id']}  launch failed: {exc}. The agent may still be running, so the "
                    "ticket stays claimed; close the tab by hand, then close the ticket")
     except (LaunchError, OSError) as exc:
-        reopened = tk.set_status(t["id"], before, allowed_from=("claimed",), assignee=None)
+        reopened = tk.set_status(t["id"], before, allowed_from=("claimed",), assignee=None,
+                                 started_at="")
         kaneo.mirror_quietly(reopened, warn)
         _safe_log("LAUNCH_FAILED", f"{t['id']} {exc}")
         return 1, f"{t['id']}  launch failed: {exc}; ticket put back to {before}"
-    # Only a launch that worked counts against the daily limit.
-    started = tk.set_status(t["id"], "claimed", allowed_from=("claimed",), started_at=tk._now())
-    kaneo.mirror_quietly(started, warn)
     _safe_log("LAUNCHED", f"{t['id']} {d.agent} ({d.model or 'default'}) tab {tab} investigating")
     return 0, f"{t['id']}  launched {d.agent} ({d.model or 'default'}) to investigate, in tab {tab}"
 
@@ -393,14 +397,11 @@ def finish_investigations(tickets: list[dict], warn):
         # Gone from herdr counts as stopped; listed with an unreadable state doesn't.
         if listed and state not in RESEARCH_DONE_STATES:
             continue
-        found = bool(t.get("notes"))
         try:
-            new = tk.set_status(
-                t["id"], "done" if found else "failed", allowed_from=("claimed",),
-                close_note=None if found else "the research agent stopped without recording any findings")
+            new = tk.finish_investigation(t["id"])
         except tk.TicketError as exc:
             dp.log("RECONCILE_SKIP", f"{t['id']} {exc}")
             continue
-        dp.log("INVESTIGATION_DONE" if found else "INVESTIGATION_FAILED",
+        dp.log("INVESTIGATION_DONE" if new["status"] == "done" else "INVESTIGATION_FAILED",
                f"{t['id']} agent stopped; ticket {new['status']}")
         yield new

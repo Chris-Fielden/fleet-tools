@@ -535,8 +535,28 @@ def set_status(ticket_id: str, status: str, *, allowed_from, assignee=_KEEP,
             if not COMMIT_RE.fullmatch(base_commit):
                 raise TicketError("base_commit must be a git commit id")
             ticket["base_commit"] = base_commit
-        if started_at is not None:
+        if started_at == "":
+            ticket.pop("started_at", None)  # "" clears it
+        elif started_at is not None:
             ticket["started_at"] = started_at
+        ticket["updated_at"] = _now()
+        _write_atomic(_ticket_path(ticket_id), ticket)
+    return ticket
+
+
+def finish_investigation(ticket_id: str) -> dict:
+    """A claimed investigation's agent has stopped: done if it recorded notes,
+    failed if not. Decided from the notes as stored right now, under the lock,
+    so findings saved a moment ago count."""
+    with _locked():
+        ticket = load_ticket(ticket_id)
+        if ticket["status"] != "claimed" or ticket["type"] != "investigate":
+            raise TicketError(f"{ticket_id} is not a claimed investigation")
+        if ticket.get("notes"):
+            ticket["status"] = "done"
+        else:
+            ticket["status"] = "failed"
+            ticket["close_note"] = "the research agent stopped without recording any findings"
         ticket["updated_at"] = _now()
         _write_atomic(_ticket_path(ticket_id), ticket)
     return ticket
