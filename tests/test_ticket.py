@@ -446,12 +446,19 @@ def test_ordering_by_created_at_then_seq_old_first():
     assert not hasattr(dispatch, "_oldest_first_key")
 
 
-def test_dispatcher_picks_by_seq_when_same_second(monkeypatch):
+@pytest.mark.parametrize("damage", ["delete", "stale"])
+def test_seq_survives_missing_or_stale_counters(monkeypatch, damage):
     monkeypatch.setattr(tk, "_now", lambda: "2025-01-01T00:00:00Z")
-    first, second = make(branch="task/one"), make(branch="task/two")
-    from fleet import dispatch
-    got = sorted([second, first], key=dispatch.tk.oldest_first_key)
-    assert [t["id"] for t in got] == [first["id"], second["id"]]
+    a, b = make(branch="task/one"), make(type="question")
+    path = tk.tickets_dir() / tk.COUNTERS_FILE
+    if damage == "delete":
+        path.unlink()
+    else:
+        path.write_text(json.dumps({"BD": 0, "QN": 0, "seq": 0}))
+    c = make(branch="task/three")
+    assert c["id"] == "BD2" and (a["seq"], b["seq"], c["seq"]) == (1, 2, 3)
+    got = sorted([c, b, a], key=tk.oldest_first_key)
+    assert [t["id"] for t in got] == [a["id"], b["id"], c["id"]]
 
 
 def test_kaneo_title_uses_new_id():

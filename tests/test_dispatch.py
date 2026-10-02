@@ -797,3 +797,16 @@ def test_symlinked_worktrees_folder_is_refused(projects, herdr_log, env):
     assert dispatch_main(["--once"]) == 1
     assert tk.load_ticket(t["id"])["status"] == "open"
     assert list(outside.iterdir()) == [] and not herdr_log.exists()
+
+
+def test_decide_picks_by_seq_when_created_in_the_same_second(projects, monkeypatch):
+    monkeypatch.setattr(tk, "_now", lambda: "2025-01-01T00:00:00Z")
+    make_repo(projects)
+    first, second = mk(branch="task/one"), mk(branch="task/two")
+    assert first["created_at"] == second["created_at"]
+    # Handed over newest-first, and with ids that sort the other way round.
+    first = dict(first, id="ZZ9")
+    second = dict(second, id="AA1")
+    ds = dp.decide([second, first], dp.load_settings())
+    assert [d.ticket["id"] for d in ds] == ["ZZ9", "AA1"]
+    assert ds[0].eligible and not ds[1].eligible

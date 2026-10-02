@@ -332,16 +332,25 @@ def _read_counters() -> dict:
 
 def _assign_ids(prefix: str) -> tuple[str, int]:
     """Next id for `prefix` and the next creation sequence. Caller holds the
-    lock. Counters never go below what is already on disk, so a lost counter
-    file cannot cause a duplicate."""
+    lock. Counters never go below what is already on disk (highest number for
+    the prefix, highest seq overall), so a lost or stale counters file can
+    neither repeat an id nor make a new ticket sort before an older one."""
     counters = _read_counters()
     highest = counters.get(prefix, 0)
     seq = counters.get("seq", 0)
     pat = re.compile(re.escape(prefix) + r"([1-9]\d*)")
-    for p in tickets_dir().glob(f"{prefix}*.json"):
+    for p in tickets_dir().glob("*.json"):
+        if not ID_RE.fullmatch(p.stem):
+            continue
         m = pat.fullmatch(p.stem)
         if m:
             highest = max(highest, int(m.group(1)))
+        try:
+            stored = json.loads(p.read_text(encoding="utf-8")).get("seq", 0)
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(stored, int) and not isinstance(stored, bool):
+            seq = max(seq, stored)
     counters[prefix] = highest + 1
     counters["seq"] = seq + 1
     _write_atomic(tickets_dir() / COUNTERS_FILE, counters)
