@@ -347,6 +347,12 @@ def test_set_status_rejects_bad_assignee():
     assert tk.load_ticket(t["id"])["status"] == "open"
 
 
+def test_set_status_can_clear_assignee():
+    t = claim(mk())
+    got = tk.set_status(t["id"], "open", allowed_from=("claimed",), assignee=None)
+    assert got["assignee"] is None
+
+
 def test_reconcile_ignores_open_tickets(projects):
     repo = make_repo(projects)
     t = mk(branch="task/x")

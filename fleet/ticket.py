@@ -348,13 +348,16 @@ def approve_ticket(ticket_id: str) -> dict:
     return ticket
 
 
-def set_status(ticket_id: str, status: str, *, allowed_from, assignee=None,
+_KEEP = object()
+
+
+def set_status(ticket_id: str, status: str, *, allowed_from, assignee=_KEEP,
                close_note: str | None = None) -> dict:
     """Move a ticket to `status` atomically, under the store lock. Refuses
     unless its current status is in `allowed_from`. Returns the new ticket."""
     if status not in STATUSES:
         raise TicketError(f"unknown status: {status}")
-    if assignee is not None and assignee not in AGENTS:
+    if assignee is not _KEEP and assignee is not None and assignee not in AGENTS:
         raise TicketError(f"assignee must be one of: {', '.join(AGENTS)}")
     with _locked():
         ticket = load_ticket(ticket_id)
@@ -363,7 +366,7 @@ def set_status(ticket_id: str, status: str, *, allowed_from, assignee=None,
                 f"{ticket_id} is {ticket['status']}; it can only change from: "
                 + ", ".join(allowed_from))
         ticket["status"] = status
-        if assignee is not None:
+        if assignee is not _KEEP:
             ticket["assignee"] = assignee
         if close_note is not None:
             ticket["close_note"] = close_note
