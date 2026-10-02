@@ -32,6 +32,7 @@ def _build_parser() -> argparse.ArgumentParser:
     body.add_argument("--body-file")
     new.add_argument("--commit")
     new.add_argument("--parent")
+    new.add_argument("--priority", choices=tk.PRIORITIES)
 
     ls = sub.add_parser("list", help="list tickets, newest first")
     ls.add_argument("--status", choices=tk.STATUSES)
@@ -42,7 +43,7 @@ def _build_parser() -> argparse.ArgumentParser:
     show.add_argument("id")
     show.add_argument("--json", action="store_true")
 
-    approve = sub.add_parser("approve", help="approve a proposed build ticket (humans only)")
+    approve = sub.add_parser("approve", help="approve a proposed ticket (humans only)")
     approve.add_argument("id")
 
     close = sub.add_parser("close", help="close an open or claimed ticket (humans only)")
@@ -79,7 +80,7 @@ def _cmd_new(args) -> int:
     fields = {
         "type": args.type, "repo": args.repo, "branch": args.branch,
         "title": args.title, "body": body,
-        "commit": args.commit, "parent": args.parent,
+        "commit": args.commit, "parent": args.parent, "priority": args.priority,
     }
     ticket = tk.create_ticket(fields)
     print(ticket["id"])
@@ -107,7 +108,7 @@ def _cmd_show(args) -> int:
         print(json.dumps(t, indent=2))
         return 0
     print(f"{t['id']}  {t['title']}")
-    for name in ("status", "type", "repo", "branch", "commit", "parent",
+    for name in ("status", "priority", "type", "repo", "branch", "commit", "parent",
                  "created_by", "assignee", "verdict", "close_note", "base_commit", "created_at", "updated_at"):
         value = t.get(name)
         print(f"  {name + ':':<12} {'-' if value is None else value}")

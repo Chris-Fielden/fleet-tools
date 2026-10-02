@@ -80,9 +80,9 @@ def test_all_problems_listed():
 
 @pytest.mark.parametrize("envvars, who, build_status", [
     ({}, "human", "open"),
-    ({"CLAUDECODE": "1"}, "claude", "proposed"),
-    ({"CODEX_SANDBOX": "seatbelt"}, "codex", "proposed"),
-    ({"CODEX_SANDBOX_NETWORK_DISABLED": "1"}, "codex", "proposed"),
+    ({"CLAUDECODE": "1"}, "claude", "open"),
+    ({"CODEX_SANDBOX": "seatbelt"}, "codex", "open"),
+    ({"CODEX_SANDBOX_NETWORK_DISABLED": "1"}, "codex", "open"),
 ])
 def test_creator_and_status(monkeypatch, envvars, who, build_status):
     for k, v in envvars.items():
@@ -177,9 +177,9 @@ def test_concurrent_new_get_different_ids():
 
 # 7. approve -----------------------------------------------------------------
 
-def test_approve_human_on_proposed_build(monkeypatch):
+def test_approve_human_on_proposed_ticket(monkeypatch):
     monkeypatch.setenv("CLAUDECODE", "1")
-    tid = make()["id"]
+    tid = make(type="investigate")["id"]
     assert tk.load_ticket(tid)["status"] == "proposed"
     monkeypatch.delenv("CLAUDECODE")
     r = run("approve", tid)
@@ -191,7 +191,7 @@ def test_approve_human_on_proposed_build(monkeypatch):
 @pytest.mark.parametrize("var", ["CLAUDECODE", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED"])
 def test_approve_refused_for_agents(monkeypatch, var):
     monkeypatch.setenv("CLAUDECODE", "1")
-    tid = make()["id"]
+    tid = make(type="investigate")["id"]
     monkeypatch.delenv("CLAUDECODE")
     r = run("approve", tid, extra_env={var: "1"})
     assert r.returncode == 1 and "human" in r.stderr
@@ -206,7 +206,7 @@ def test_approve_refused_for_other_cases(monkeypatch):
     assert run("approve", "T-20250101-999").returncode == 1
     assert run("approve", "bogus").returncode == 2
     monkeypatch.setenv("CLAUDECODE", "1")
-    tid = make()["id"]
+    tid = make(type="investigate")["id"]
     monkeypatch.delenv("CLAUDECODE")
     assert run("approve", tid).returncode == 0
     assert run("approve", tid).returncode == 1  # no longer proposed
@@ -328,7 +328,7 @@ def test_functions_take_no_creator_override():
 
 def test_agent_cannot_become_human_through_library(monkeypatch):
     monkeypatch.setenv("CLAUDECODE", "1")
-    assert make()["status"] == "proposed"
+    assert make(type="investigate")["status"] == "proposed"
 
 
 def test_same_second_ordered_by_stored_seq_not_id():
@@ -423,7 +423,7 @@ def test_old_ids_keep_working(monkeypatch):
     assert child["parent"] == "T-20250101-001"
     assert run("show", "T-20250101-001").returncode == 0
     monkeypatch.setenv("CLAUDECODE", "1")
-    prop = make(branch="task/prop")
+    prop = make(type="investigate", branch="task/prop")
     monkeypatch.delenv("CLAUDECODE")
     assert tk.approve_ticket(prop["id"])["status"] == "open"
     assert tk.close_ticket("T-20250101-001", "done")["status"] == "done"
@@ -466,32 +466,24 @@ def test_kaneo_title_uses_new_id():
     assert kaneo.card_title(make()).startswith("[BD-1] ")
 
 
-# Lookup table: investigate and priority arrive later ------------------------
+# Lookup table, investigate and priority ------------------------------------
 
 def test_prefix_table_has_every_entry():
     assert tk.TYPE_PREFIX == {"build": "BD", "fix": "FX", "review": "RV",
                               "question": "QN", "investigate": "ID"}
     assert tk.EMERGENCY_PREFIX == "EM"
+    assert set(tk.TYPE_PREFIX) == set(tk.TYPES)
 
 
-def test_investigate_and_urgent_take_effect_once_they_exist(monkeypatch):
-    # Not there yet: investigate is refused, and no ticket carries a priority.
-    assert "investigate" not in tk.TYPES and "priority" not in tk.CALLER_FIELDS
-    with pytest.raises(tk.TicketInvalid):
-        make(type="investigate")
-    assert make()["id"] == "BD-1"
-    # Stand-in for the later ticket: add the type and the priority field.
-    monkeypatch.setattr(tk, "TYPES", tk.TYPES + ("investigate",))
-    monkeypatch.setattr(tk, "OPTIONAL_FIELDS", tk.OPTIONAL_FIELDS + ("priority",))
-    monkeypatch.setattr(tk, "CALLER_FIELDS", tk.CALLER_FIELDS + ("priority",))
+def test_investigate_and_urgent_prefixes():
     assert make(type="investigate")["id"] == "ID-1"
     assert make(type="investigate")["id"] == "ID-2"
     urgent = make(priority="urgent")
     assert urgent["id"] == "EM-1"
     assert tk.load_ticket("EM-1")["priority"] == "urgent"
-    assert make(type="fix", parent="BD-1", priority="urgent")["id"] == "EM-2"
+    assert make(type="fix", parent=urgent["id"], priority="urgent")["id"] == "EM-2"
     assert make(type="investigate", priority="urgent")["id"] == "EM-3"
-    assert make(priority="normal")["id"] == "BD-2"
+    assert make(priority="normal")["id"] == "BD-1"
     # The prefix is fixed at creation: changing priority later keeps the id.
     path = tk._ticket_path("EM-1")
     data = json.loads(path.read_text())
@@ -500,10 +492,61 @@ def test_investigate_and_urgent_take_effect_once_they_exist(monkeypatch):
     assert tk.load_ticket("EM-1")["id"] == "EM-1"
 
 
-def test_ids_are_never_created_without_the_hyphen(monkeypatch):
-    monkeypatch.setattr(tk, "TYPES", tk.TYPES + ("investigate",))
-    monkeypatch.setattr(tk, "OPTIONAL_FIELDS", tk.OPTIONAL_FIELDS + ("priority",))
-    monkeypatch.setattr(tk, "CALLER_FIELDS", tk.CALLER_FIELDS + ("priority",))
+# Priority and investigate ---------------------------------------------------
+
+@pytest.mark.parametrize("value, ok", [("normal", True), ("urgent", True), (None, True),
+                                       ("high", False), ("URGENT", False), ("", False), (1, False)])
+def test_priority_validation(value, ok):
+    if ok:
+        t = make(priority=value)
+        assert t.get("priority") == value if value is not None else "priority" not in t
+        assert tk.load_ticket(t["id"]) == t
+    else:
+        with pytest.raises(tk.TicketInvalid):
+            make(priority=value)
+
+
+def test_priority_is_validated_when_read():
+    t = make()
+    path = tk._ticket_path(t["id"])
+    data = json.loads(path.read_text())
+    data["priority"] = "high"
+    path.write_text(json.dumps(data))
+    with pytest.raises(tk.TicketError):
+        tk.load_ticket(t["id"])
+
+
+def test_priority_flag_on_cli():
+    r = run("new", *new_args(), "--priority", "urgent")
+    assert r.returncode == 0 and r.stdout.strip() == "EM-1"
+    assert json.loads(run("show", "EM-1", "--json").stdout)["priority"] == "urgent"
+    assert run("new", *new_args(), "--priority", "high").returncode == 2
+
+
+def test_investigate_rules():
+    t = make(type="investigate")
+    assert t["status"] == "proposed" and t["commit"] is None and t["parent"] is None
+    assert make(type="investigate", parent=t["id"])["parent"] == t["id"]
+    with pytest.raises(tk.TicketInvalid):
+        make(type="investigate", commit="abc1234")
+
+
+@pytest.mark.parametrize("env", [{}, {"CLAUDECODE": "1"}, {"CODEX_SANDBOX": "x"}])
+def test_investigate_always_starts_proposed(monkeypatch, env):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    assert make(type="investigate")["status"] == "proposed"
+    assert make(type="investigate", priority="urgent")["status"] == "proposed"
+
+
+@pytest.mark.parametrize("env", [{}, {"CLAUDECODE": "1"}, {"CODEX_SANDBOX": "x"}])
+def test_build_starts_open_whoever_files_it(monkeypatch, env):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    assert make()["status"] == "open"
+
+
+def test_ids_are_never_created_without_the_hyphen():
     make(), make(type="question"), make(type="investigate"), make(priority="urgent")
     make(type="fix", parent="BD-1"), make(type="review", parent="BD-1", commit="abc1234")
     names = [t["id"] for t in tk.list_tickets()]

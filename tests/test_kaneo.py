@@ -60,7 +60,7 @@ def test_creates_project_columns_and_card(kaneo):
     assert [p["name"] for p in kaneo.projects] == ["fleet-tools"]
     pid = kaneo.projects[0]["id"]
     cols = {c["name"]: c for c in kaneo.columns[pid]}
-    assert list(cols) == ["Proposed", "To Do", "In Progress", "In Review", "Done", "Failed"]
+    assert list(cols) == ["Proposed", "Urgent", "To Do", "In Progress", "In Review", "Done", "Failed"]
     task = only_task(kaneo)
     assert task["status"] == cols["To Do"]["slug"]
     assert task["title"] == f"[{tid}] Phase 1 review follow-ups"
@@ -209,7 +209,7 @@ def test_kaneo_down_ticket_new_still_succeeds_with_warning():
 def test_approve_mirrors_the_card(kaneo):
     tid = new_ticket()
     # created by a (simulated) agent -> proposed
-    r = run("new", *new_args(), extra_env={"CLAUDECODE": "1"})
+    r = run("new", *new_args(type="investigate"), extra_env={"CLAUDECODE": "1"})
     pid_ticket = r.stdout.strip()
     assert [t["status"] for t in kaneo.tasks.values() if pid_ticket in t["title"]] == ["proposed"]
     r = run("approve", pid_ticket)
@@ -350,9 +350,9 @@ def test_existing_columns_are_reused_case_insensitively_and_order_fixed(kaneo):
     run("sync")
     cols = kaneo.columns[pid]
     assert [c["name"].lower() for c in cols] == [
-        "proposed", "to do", "in progress", "in review", "done", "failed"]
-    assert [c["position"] for c in cols] == list(range(6))
-    assert len(cols) == 6  # nothing duplicated
+        "proposed", "urgent", "to do", "in progress", "in review", "done", "failed"]
+    assert [c["position"] for c in cols] == list(range(7))
+    assert len(cols) == 7  # nothing duplicated
     assert next(c for c in cols if c["id"] == "k4")["isFinal"] is True
     assert only_task(kaneo)["status"] == "to-do"
     assert any(r["path"] == f"/column/reorder/{pid}" for r in kaneo.writes)
@@ -411,4 +411,34 @@ def test_failed_column_setup_is_retried_for_the_next_ticket(kaneo):
     assert sorted("error:" in ln for ln in lines.values()) == [False, True]
     assert sorted(ln.split()[1] for ln in lines.values()) == ["created", "error:"]
     assert len(kaneo.tasks) == 1 and next(iter(kaneo.tasks.values()))["status"] == "to-do"
-    assert len(names(kaneo)) == 6
+    assert len(names(kaneo)) == 7
+
+
+def test_urgent_ticket_goes_to_urgent_column_with_urgent_priority(kaneo):
+    tid = new_ticket(priority="urgent")
+    assert tid.startswith("EM-")
+    task = only_task(kaneo)
+    assert task["status"] == slug_of(kaneo, "Urgent")
+    assert task["priority"] == "urgent"
+    # then through the normal columns, still urgent
+    for status, column in (("claimed", "In Progress"), ("done", "Done")):
+        edit_ticket(tid, status=status)
+        assert f"{tid}  updated" in run("sync").stdout
+        task = only_task(kaneo)
+        assert task["status"] == slug_of(kaneo, column) and task["priority"] == "urgent"
+    assert f"{tid}  unchanged" in run("sync").stdout
+
+
+def test_normal_ticket_has_no_priority_and_skips_urgent_column(kaneo):
+    tid = new_ticket(priority="normal")
+    task = only_task(kaneo)
+    assert tid.startswith("BD-")
+    assert task["status"] == slug_of(kaneo, "To Do") and task["priority"] == "no-priority"
+
+
+def test_priority_change_updates_card(kaneo):
+    tid = new_ticket()
+    edit_ticket(tid, priority="urgent")
+    assert f"{tid}  updated" in run("sync").stdout
+    task = only_task(kaneo)
+    assert task["status"] == slug_of(kaneo, "Urgent") and task["priority"] == "urgent"

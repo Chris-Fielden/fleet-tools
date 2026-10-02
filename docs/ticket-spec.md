@@ -32,7 +32,7 @@ launching, no hooks in this phase.
 | Field | Type | Rules |
 | --- | --- | --- |
 | id | string | Assigned by the tool: a short id, prefix plus number (see "Ticket ids"). Never accepted from the caller. Older `T-YYYYMMDD-NNN` ids are still valid. |
-| type | string | One of: build, review, fix, question. |
+| type | string | One of: build, review, fix, question, investigate. An investigate ticket is read-only research: no commit, parent optional. |
 | repo | string | 1 to 64 characters: letters, digits, `.`, `_`, `-`. |
 | branch | string | Must start with `task/`, then 1 to 64 characters: lowercase letters, digits, `-`. |
 | commit | string or null | Required for review, otherwise null. 7 to 40 lowercase hex characters. |
@@ -42,6 +42,7 @@ launching, no hooks in this phase.
 | created_by | string | human, claude or codex. Set by the tool, never by the caller (see below). |
 | assignee | string or null | null until the dispatcher claims the ticket; then claude or codex. |
 | status | string | One of: proposed, open, claimed, done, failed, cancelled. |
+| priority | string, optional | `normal` (the default when absent) or `urgent`; nothing else is accepted. Supplied by the caller (`ticket new --priority`, or `alert`). |
 | verdict | object or null | Always null in phase 1. |
 | close_note | string, optional | 1 to 500 characters, gitleaks-checked. Set by `ticket close --note`. Absent otherwise. |
 | base_commit | string, optional | Git commit id (7 to 40 hex characters): main's tip when the dispatcher claimed the ticket. Reconcile only counts a `Merge <branch>` commit made after it. Absent on tickets claimed before this field existed (they count any merge in main's history). |
@@ -66,9 +67,7 @@ with no padding: `BD-1`, `BD-2`, `FX-1`, `EM-1`.
 | EM | any ticket whose `priority` is `urgent` (wins over the type prefix) |
 
 - The prefix comes from one lookup table (`TYPE_PREFIX`, plus
-  `EMERGENCY_PREFIX`) in `fleet/ticket.py`. The `investigate` type and the
-  `priority` field are added by another ticket; once they exist, `ID` and `EM`
-  apply with no further change here.
+  `EMERGENCY_PREFIX`) in `fleet/ticket.py`.
 - The prefix is fixed when the ticket is created and never changes, even if
   its priority changes later.
 - Existing `T-YYYYMMDD-NNN` tickets keep their ids and work everywhere (show,
@@ -88,10 +87,10 @@ with no padding: `BD-1`, `BD-2`, `FX-1`, `EM-1`.
 
 ### Starting status
 
-- A build ticket created by `human` starts as `open`.
-- A build ticket created by `claude` or `codex` starts as `proposed` and
+- An investigate ticket always starts as `proposed`, whoever files it, and
   waits for the human to approve it.
-- review, fix and question tickets start as `open`.
+- Every other ticket (build, review, fix, question) starts as `open`, whoever
+  files it. Agents start work freely; the human approves at merge.
 
 ### Secret check
 
@@ -107,6 +106,7 @@ environment variable `FLEET_GITLEAKS` (default: `gitleaks`).
 ```
 ticket new --type TYPE --repo REPO --branch BRANCH --title TITLE
            (--body TEXT | --body-file PATH) [--commit SHA] [--parent ID]
+           [--priority normal|urgent]
 ticket list [--status STATUS] [--repo REPO] [--json]
 ticket show ID [--json]
 ticket approve ID
@@ -117,11 +117,37 @@ ticket approve ID
   branch, title. `--json` prints a JSON array instead.
 - `show` prints the whole ticket in a readable layout, or the raw JSON with
   `--json`.
-- `approve` turns a `proposed` build ticket into `open`. It refuses when
-  `created_by` would be claude or codex (only a human approves), and refuses
-  for any ticket that isn't a proposed build ticket.
+- `approve` turns a `proposed` ticket into `open`. It refuses when the
+  caller is claude or codex (only a human approves), and refuses for any
+  ticket that isn't proposed.
 - Exit codes: 0 on success, 2 for invalid input (every problem listed, one
   per line, in plain words), 1 for anything else.
+
+## Shortcut commands
+
+Two commands in `bin/` file a ticket in one line. Both print the new ticket id
+(and mirror it to Kaneo like `ticket new`). With no text they print plain usage
+help to stderr and exit 2. Invalid input gives the usual one-line problems and
+exit 2.
+
+```
+idea TEXT
+alert REPO TEXT
+```
+
+- `idea TEXT` files an `investigate` ticket in repo `ideas`, branch
+  `task/idea-TIMESTAMP` (UTC, `YYYYMMDDHHMMSS`). Title: the first 100
+  characters of TEXT (line breaks become spaces). Body: all of TEXT. It
+  starts as `proposed`.
+- `alert REPO TEXT` files a `build` ticket in REPO with priority `urgent`,
+  branch `task/alert-TIMESTAMP`, title and body as for `idea`. Its id is
+  `EM-n`, and it starts `open`.
+- TEXT is all the remaining arguments joined with spaces.
+
+## Dispatcher order
+
+The dispatcher considers open tickets urgent first, then normal, oldest first
+within each group, whoever filed them.
 
 ## Tests to include (at least)
 
