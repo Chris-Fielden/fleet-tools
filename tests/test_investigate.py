@@ -3,6 +3,7 @@ dispatcher's settings and rules for investigations, and launching and
 finishing them with the fake herdr."""
 
 import json
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -245,12 +246,13 @@ def test_once_launches_a_proposed_investigation(projects, herdr_log, env, capsys
     assert dispatch_main(["--once"]) == 0
     got = tk.load_ticket(t["id"])
     assert got["status"] == "claimed" and got["assignee"] == "claude" and "started_at" in got
-    folder = env / "fleet" / "research" / t["id"]
+    folder = env / "home" / "fleet-research" / t["id"]
     c = calls(herdr_log)
     assert ["tab", "create", "--workspace", "w1", "--cwd", str(folder),
             "--label", t["id"], "--no-focus"] in c
     prompt = next(x for x in c if x[:2] == ["agent", "prompt"])
     assert "ticket note" in prompt[3] and "--parent" in prompt[3] and "no commits" in prompt[3]
+    assert str(projects) in prompt[3]
     flags = [a for call in c for a in call if a.startswith("-")]
     assert set(flags) <= {"--workspace", "--cwd", "--label", "--no-focus", "--kind",
                           "--pane", "--", "--model"}
@@ -400,3 +402,115 @@ def test_no_log_line_has_ticket_text(projects, herdr_log):
     idea()
     assert dispatch_main(["--once"]) == 0
     assert "What if?" not in dp.log_path().read_text()
+
+
+# --- research_dir: never near the fleet's private folder -----------------------
+
+SAMPLE = json.loads((Path(__file__).parent / "data" / "herdr_agent_list_sample.json").read_text())
+
+
+def set_research_dir(env, projects, where):
+    (env / "fleet" / "dispatch.json").write_text(json.dumps(
+        {"projects_dir": str(projects), "research_dir": str(where)}))
+
+
+def test_research_dir_default_is_outside_the_fleet_folder(projects, env):
+    s = dp.load_settings()
+    assert s["research_dir"] == env / "home" / "fleet-research"
+    assert dp.research_dir_problem(s) is None
+
+
+def test_research_dir_override_and_invalid(projects, env):
+    set_research_dir(env, projects, env / "elsewhere")
+    assert dp.load_settings()["research_dir"] == env / "elsewhere"
+    (env / "fleet" / "dispatch.json").write_text(json.dumps({"research_dir": ""}))
+    with pytest.raises(dp.SettingsError, match="research_dir"):
+        dp.load_settings()
+
+
+@pytest.mark.parametrize("where", ["fleet", "fleet/research", "."])
+def test_research_dir_inside_or_around_fleet_home_is_refused(projects, herdr_log, env, where, capsys):
+    t = idea()
+    set_research_dir(env, projects, (env / where).resolve())
+    assert "overlaps the fleet's private folder" in dp.research_dir_problem(dp.load_settings())
+    assert dispatch_main(["--dry-run"]) == 0
+    assert "skip: research_dir" in capsys.readouterr().out
+    assert dispatch_main(["--once"]) == 0
+    assert tk.load_ticket(t["id"])["status"] == "proposed"
+    assert not herdr_log.exists()
+
+
+def test_launch_research_refuses_directly_too(projects, herdr_log, env):
+    t = idea()
+    set_research_dir(env, projects, env / "fleet" / "research")
+    s = dp.load_settings()
+    d = dp.decide_investigations(tk.list_tickets(), settings())[0]
+    code, message = lc.launch_research(d, s, lambda m: None)
+    assert code == 1 and "private folder" in message
+    assert tk.load_ticket(t["id"])["status"] == "proposed"
+    assert not (env / "fleet" / "research").exists() and not herdr_log.exists()
+
+
+def test_research_dir_symlink_into_fleet_home_is_refused(projects, env):
+    (env / "fleet").mkdir(exist_ok=True)
+    link = env / "innocent"
+    link.symlink_to(env / "fleet")
+    set_research_dir(env, projects, link)
+    assert dp.research_dir_problem(dp.load_settings())
+
+
+def test_research_folder_wires_the_guard_hooks(projects, herdr_log, env):
+    t = idea()
+    assert dispatch_main(["--once"]) == 0
+    path = env / "home" / "fleet-research" / t["id"] / ".claude" / "settings.json"
+    got = json.loads(path.read_text())
+    repo = Path(__file__).resolve().parent.parent
+    mine = json.loads((repo / ".claude" / "settings.json").read_text())["hooks"]["PreToolUse"]
+    assert [g["matcher"] for g in got["hooks"]["PreToolUse"]] == [g["matcher"] for g in mine]
+    scripts = [a for g in got["hooks"]["PreToolUse"] for h in g["hooks"] for a in h["args"]]
+    assert sorted(Path(a).name for a in scripts) == ["guard_bash.py", "guard_edits.py", "guard_reads.py"]
+    for a in scripts:
+        assert Path(a).is_absolute() and Path(a).parent == repo / ".claude" / "hooks" and Path(a).is_file()
+    assert "CLAUDE_PROJECT_DIR" not in path.read_text()
+    assert "Stop" not in got["hooks"]
+
+
+def test_missing_guard_hooks_stop_the_launch(projects, herdr_log, monkeypatch, env):
+    t = idea()
+    monkeypatch.setattr("fleet.launch.HOOKS_DIR", env / "nowhere" / ".claude" / "hooks")
+    assert dispatch_main(["--once"]) == 1
+    assert tk.load_ticket(t["id"])["status"] == "proposed"
+    assert not herdr_log.exists()
+
+
+# --- the real `herdr agent list` shape -----------------------------------------
+
+def test_agent_list_parsing_against_a_real_capture(monkeypatch):
+    monkeypatch.setattr("fleet.launch.herdr", lambda *a, **k: SAMPLE)
+    assert lc.agent_listed("t-20261002-007") == (True, "idle")
+    assert lc.agent_listed("t-20261002-008") == (True, "working")
+    assert lc.agent_listed("t-20261002-099") == (False, None)  # the unnamed agent doesn't match
+
+
+@pytest.mark.parametrize("bad", [{}, {"result": {}}, {"result": {"agents": "x"}},
+                                 {"result": {"agents": [1]}}, {"agents": []},
+                                 {"result": {"other": [{"name": "t-1", "agent_status": "idle"}]}}])
+def test_agent_list_with_another_shape_is_an_error(monkeypatch, bad):
+    monkeypatch.setattr("fleet.launch.herdr", lambda *a, **k: bad)
+    with pytest.raises(lc.LaunchError):
+        lc.agent_listed("t-1")
+
+
+def test_only_idle_and_done_mean_stopped():
+    assert lc.RESEARCH_DONE_STATES == ("idle", "done")  # not working, blocked or unknown
+
+
+@pytest.mark.parametrize("state, finished", [("working", False), ("blocked", False), ("unknown", False),
+                                             ("idle", True), ("done", True)])
+def test_finish_by_state(projects, herdr_log, monkeypatch, state, finished):
+    t = idea()
+    assert dispatch_main(["--once"]) == 0
+    tk.add_note(t["id"], "found")
+    monkeypatch.setenv("FAKE_HERDR_STATE", state)
+    done = list(lc.finish_investigations(tk.list_tickets(), lambda m: None))
+    assert bool(done) is finished

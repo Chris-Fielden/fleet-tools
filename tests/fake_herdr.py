@@ -25,7 +25,7 @@ elif cmd == "agent list":
     names = [json.loads(line)[2] for line in open(os.environ["FAKE_HERDR_LOG"])
              if json.loads(line)[:2] == ["agent", "start"]]
     out = {"result": {"agents": [
-        {"name": n, "status": os.environ.get("FAKE_HERDR_STATE", "working")} for n in names]}}
+        {"name": n, "agent_status": os.environ.get("FAKE_HERDR_STATE", "working")} for n in names]}}
 elif cmd in ("agent prompt", "tab close"):
     out = {"result": {}}
 else:

@@ -24,6 +24,7 @@ DEFAULTS = {
     "models": {"claude": "sonnet", "codex": None},
     "max_running": 1,
     "projects_dir": "~/projects",
+    "research_dir": "~/fleet-research",
     "herdr_workspace": "fleet",
     "auto_investigate": True,
     "max_investigations_per_day": 3,
@@ -98,12 +99,26 @@ def load_settings() -> dict:
         except ValueError as exc:
             raise SettingsError(f"{path} is not valid JSON: {exc}") from None
         _merge(settings, given, path)
-    try:
-        settings["projects_dir"] = Path(settings["projects_dir"]).expanduser().absolute()
-    except RuntimeError:
-        raise SettingsError(f"projects_dir '{settings['projects_dir']}' starts with ~ "
-                            "but that home folder can't be found") from None
+    for key in ("projects_dir", "research_dir"):
+        try:
+            settings[key] = Path(settings[key]).expanduser().absolute()
+        except RuntimeError:
+            raise SettingsError(f"{key} '{settings[key]}' starts with ~ "
+                                "but that home folder can't be found") from None
     return settings
+
+
+def research_dir_problem(settings: dict) -> str | None:
+    """Why research agents can't work in research_dir, or None. It must not be
+    inside the fleet's private folder (the ticket store and the Kaneo key), nor
+    contain it: the guard hooks only watch what an agent does through its own
+    tools, and a research agent there would sit next to the secrets."""
+    here = settings["research_dir"].resolve()
+    homes = {tk.fleet_home().resolve(), (tk._real_home() / ".fleet").resolve()}
+    for private in sorted(homes):
+        if here == private or here.is_relative_to(private) or private.is_relative_to(here):
+            return f"research_dir {settings['research_dir']} overlaps the fleet's private folder {private}"
+    return None
 
 
 def _merge(settings: dict, given, path: Path) -> None:
@@ -140,7 +155,7 @@ def _merge(settings: dict, given, path: Path) -> None:
         if isinstance(n, bool) or not isinstance(n, int) or n < 0:
             raise SettingsError(f"{path}: max_investigations_per_day must be a whole number, 0 or more")
         settings["max_investigations_per_day"] = n
-    for key in ("projects_dir", "herdr_workspace"):
+    for key in ("projects_dir", "research_dir", "herdr_workspace"):
         if key in given:
             if not isinstance(given[key], str) or not given[key].strip():
                 raise SettingsError(f"{path}: {key} must be a non-empty string")
@@ -304,6 +319,7 @@ def decide_investigations(tickets: list[dict], settings: dict, now: datetime | N
     Every start counts against `max_investigations_per_day`."""
     agent = settings["builder"]
     used = started_today(tickets, now)
+    folder_problem = research_dir_problem(settings)
     waiting = sorted((t for t in tickets if t["type"] == "investigate" and t["status"] in ("proposed", "open")),
                      key=lambda t: (t["created_by"] != "human", *tk.oldest_first_key(t)))
     decisions = []
@@ -311,7 +327,9 @@ def decide_investigations(tickets: list[dict], settings: dict, now: datetime | N
     for t in waiting:
         d = Decision(ticket=t, name=t["id"].lower(), agent=agent,
                      model=settings["models"].get(agent), research=True)
-        if t["status"] == "proposed" and not settings["auto_investigate"]:
+        if folder_problem:
+            d.skip = folder_problem
+        elif t["status"] == "proposed" and not settings["auto_investigate"]:
             d.skip = "auto_investigate is off; approve it to investigate"
         elif used >= settings["max_investigations_per_day"]:
             d.skip = f"daily limit reached ({used} of {settings['max_investigations_per_day']} investigations started today)"

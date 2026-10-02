@@ -189,13 +189,21 @@ per run, in addition to the one build or fix ticket. Investigations do not
 count toward `max_running` and have no branch or task folder.
 
 The agent (the `builder` kind and its model) opens in a tab in
-`$FLEET_HOME/research/<ID>`, which is not a repo. Its prompt says it is
-read-only and may use the web and the repos, record findings with
+`<research_dir>/<ID>` (setting `research_dir`, default `~/fleet-research`),
+which is not a repo. `research_dir` must not be inside `$FLEET_HOME` or
+`~/.fleet`, nor contain them (they hold the tickets and the Kaneo key); the
+dispatcher refuses to launch, and skips the ticket, if it does. Because this
+repo's `.claude/settings.json` is not loaded outside the repo, the dispatcher
+writes `<research_dir>/<ID>/.claude/settings.json` wiring the same `PreToolUse`
+guard hooks, by absolute path to this repo's `.claude/hooks` scripts, and
+refuses to launch if they are missing. The prompt names `projects_dir`. Its
+prompt says it is read-only and may use the web and the repos, record findings with
 `ticket note ID TEXT`, and file follow-up `build` tickets with
 `--parent ID` (these start `proposed`). No permission-bypass flag is passed,
 so "read-only" is an instruction to the agent, not a sandbox.
 
 At the start of each `--once`, a claimed investigation whose agent is gone or
-`idle`/`done` is marked `done`; if it recorded no notes, it is marked `failed`
+`idle`/`done` (herdr's states are idle, working, blocked, done, unknown; `blocked`
+means waiting for a person, so it is not finished) is marked `done`; if it recorded no notes, it is marked `failed`
 with a `close_note`. If herdr cannot be asked, nothing changes. A failed
 launch puts the ticket back to the status it had.
