@@ -357,6 +357,9 @@ def scan_command(command, places, depth=0, cwd_known=True):
             return ("human", name)
         if name == "ticket" and args and args[0] in TICKET_HUMAN_ONLY_SUBCOMMANDS:
             return ("human", f"ticket {args[0]}")
+        if name == "ticket" and args and args[0] == "risk" and any(
+                a.startswith("--rai") for a in args[1:]):
+            return ("human", "ticket risk --raise")
         if name in ("cd", "pushd"):
             target = args[0] if args else "~"
             expanded = _expand(target)

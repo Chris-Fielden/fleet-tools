@@ -43,6 +43,7 @@ launching, no hooks in this phase.
 | assignee | string or null | null until the dispatcher claims the ticket; then claude or codex. |
 | status | string | One of: proposed, open, claimed, done, failed, cancelled. |
 | priority | string, optional | `normal` (the default when absent) or `urgent`; nothing else is accepted. Supplied by the caller (`ticket new --priority`, or `alert`). |
+| risk | string, optional | `low`, `medium` or `high`. Set by the tool when the ticket is filed (see "Risk levels"); never supplied by the caller. Absent on older tickets, which count as `medium`. Only ever goes up. |
 | verdict | object or null | Always null in phase 1. |
 | close_note | string, optional | 1 to 500 characters, gitleaks-checked. Set by `ticket close --note`. Absent otherwise. |
 | base_commit | string, optional | Git commit id (7 to 40 hex characters): main's tip when the dispatcher claimed the ticket. Reconcile only counts a `Merge <branch>` commit made after it. Absent on tickets claimed before this field existed (they count any merge in main's history). |
@@ -110,6 +111,9 @@ ticket new --type TYPE --repo REPO --branch BRANCH --title TITLE
 ticket list [--status STATUS] [--repo REPO] [--json]
 ticket show ID [--json]
 ticket approve ID
+ticket risk [ID] [--diff BASE...BRANCH] [--dir REPO]
+ticket risk ID --raise low|medium|high
+ticket gate --base BASE --branch BRANCH --worktree DIR [--dir REPO] [--field risk|confirm|ok]
 ```
 
 - `new` validates everything, saves the ticket, and prints its id.
@@ -122,6 +126,63 @@ ticket approve ID
   ticket that isn't proposed.
 - Exit codes: 0 on success, 2 for invalid input (every problem listed, one
   per line, in plain words), 1 for anything else.
+
+## Risk levels
+
+Every change has a level, **low**, **medium** or **high**, so the merge step
+can ask for more care where a mistake costs more.
+
+**Rules.** `risk-rules.json` (repo root) maps file patterns to levels. A
+file gets the highest level of any rule it matches; a change gets the
+highest level of its files. Patterns: `**` crosses folders, `*` and `?` stay
+inside one folder, a pattern with no `/` matches the file name in any
+folder, and `contains` matches anywhere in the path, ignoring case.
+- High: `k8s/**`, `.claude/**`, `.codex/**`, `CLAUDE.md`, `AGENTS.md`,
+  `scripts/check.sh`, `scripts/finish-task.sh`, `scripts/review.sh`,
+  `scripts/new-task.sh`, any path containing `secret`, `auth` or `.env`,
+  `requirements*.txt`, `pyproject.toml`, `package.json`, `go.mod`,
+  `compose.yml`, `fleet/dispatch*.py`, and (so a task cannot loosen its own
+  rules) `risk-rules.json`, `fleet/risk.py`, `fleet/ticket.py`, `fleet/ticket_cli.py` and `bin/ticket`.
+- Low: `docs/**`, `tests/**`. A name like `tests/test_auth.py` is still high.
+- Everything else: medium.
+- The rules are read from the **base** branch (`git show BASE:risk-rules.json`),
+  so a branch cannot weaken the rules it is judged by. If base has no rules
+  file, the tool's own copy is used.
+
+**Starting level.** `ticket new` stores a `risk` from `ticket_start` in the
+rules file: by repo first (`sandbox` is low), then by type (`investigate`,
+`question` and `review` are low; `build` and `fix` are medium). Callers
+cannot pick it.
+
+**Only up.** The higher of the stored level and the diff level always wins.
+Nothing lowers a stored level. `ticket risk ID --raise LEVEL` raises it; it
+is human-only (the library refuses agents and the guard hook blocks them) and
+refuses an equal or lower level. `ticket risk --diff BASE...BRANCH` prints
+each changed file with its level and matching rule (renames count as delete
+plus add), then `diff level:` and `risk:`. With an ID it also shows the stored
+level and the higher of the two; it never writes the ticket.
+
+**Merge gate.** `ticket gate` prints the level (and why), the exact commit,
+and each review, and exits 1 if merging is not allowed. A review only counts
+if its `Commit:` header is the full id of the branch tip. The newest review
+per reviewer decides, and any FAIL blocks. Medium and low need one PASS. High
+needs a PASS from both Codex and Claude, with Claude on a stronger model
+(`opus` or `fable`): `REVIEWER=both scripts/review.sh`. Tickets on the branch
+are found by branch name and repo name (`--repo`; the merge script passes the
+main checkout's folder name); the highest stored level counts.
+
+**Merge script.** `scripts/finish-task.sh` runs the gate, refuses to merge if
+it fails, shows the level, and merges the exact commit it checked (it stops if
+the branch moved meanwhile). For high risk the human types the ticket id
+instead of `y` (the task name if no ticket is found). For a real emergency,
+`scripts/finish-task.sh NAME --emergency "why"` skips the review requirement
+after the human types `OVERRIDE`; it is announced loudly, appended to
+`$FLEET_HOME/override.log` (default `~/.fleet/override.log`) and written into
+the merge commit message. The checks are never skipped.
+
+Known limit: review files are plain files in the task's `.reviews/` folder,
+so the gate trusts that folder. It checks the commit and the verdict but
+cannot prove who wrote the file.
 
 ## Shortcut commands
 

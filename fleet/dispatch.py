@@ -286,7 +286,12 @@ def is_merged(repo: Path, branch: str, since: str | None = None) -> bool:
         return False
     # Whole messages, NUL-separated: a subject match with extra text doesn't count.
     # Strip only the newlines git adds around each message, not spaces.
-    return any(m.strip("\n") == f"Merge {branch}" for m in out.stdout.split("\0"))
+    # The merge script adds an "EMERGENCY OVERRIDE (risk ...)" paragraph when a
+    # human merged without the required review; that is still this branch.
+    plain = f"Merge {branch}"
+    override = f"Merge {branch}\n\nEMERGENCY OVERRIDE (risk "
+    return any(m.strip("\n") == plain or m.strip("\n").startswith(override)
+               for m in out.stdout.split("\0"))
 
 
 def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None):

@@ -7,7 +7,10 @@ import json
 import os
 import sys
 
+from pathlib import Path
+
 from . import kaneo
+from . import risk as rk
 from . import ticket as tk
 
 
@@ -52,6 +55,23 @@ def _build_parser() -> argparse.ArgumentParser:
     for name in tk.CLOSE_OUTCOMES:
         outcome.add_argument(f"--{name}", dest="outcome", action="store_const", const=name)
     close.add_argument("--note")
+
+    risk = sub.add_parser("risk", help="show a ticket's risk level, judge a diff, or raise a level")
+    risk.add_argument("id", nargs="?")
+    risk.add_argument("--diff", metavar="BASE...BRANCH",
+                      help="level for the files this range changes, with the rule for each")
+    risk.add_argument("--dir", default=".", help="the git repo to diff in (default: here)")
+    risk.add_argument("--raise", dest="raise_to", choices=rk.LEVELS, metavar="LEVEL",
+                      help="raise the stored level (humans only; a level can never be lowered)")
+
+    gate = sub.add_parser("gate", help="merge gate: risk level and review check for a task branch")
+    gate.add_argument("--base", required=True)
+    gate.add_argument("--branch", required=True)
+    gate.add_argument("--dir", default=".", help="the git repo (default: here)")
+    gate.add_argument("--repo", help="only tickets filed against this repo name count")
+    gate.add_argument("--worktree", required=True, help="the task worktree holding .reviews/")
+    gate.add_argument("--field", choices=("risk", "confirm", "ok"),
+                      help="print just one value instead of the report")
 
     sync = sub.add_parser("sync", help="mirror every ticket onto the Kaneo board")
     sync.add_argument("--dry-run", action="store_true",
@@ -108,7 +128,7 @@ def _cmd_show(args) -> int:
         print(json.dumps(t, indent=2))
         return 0
     print(f"{t['id']}  {t['title']}")
-    for name in ("status", "priority", "type", "repo", "branch", "commit", "parent",
+    for name in ("status", "priority", "risk", "type", "repo", "branch", "commit", "parent",
                  "created_by", "assignee", "verdict", "close_note", "base_commit", "created_at", "updated_at"):
         value = t.get(name)
         print(f"  {name + ':':<12} {'-' if value is None else value}")
@@ -131,6 +151,79 @@ def _cmd_close(args) -> int:
     return 0
 
 
+def _cmd_risk(args) -> int:
+    if args.raise_to:
+        if not args.id or args.diff:
+            raise tk.TicketInvalid(["--raise needs a ticket id and cannot be combined with --diff"])
+        t = tk.raise_risk(args.id, args.raise_to)
+        print(f"{t['id']} risk raised to {t['risk']}")
+        kaneo.mirror_quietly(t, _warn)
+        return 0
+    if not args.id and not args.diff:
+        raise tk.TicketInvalid(["give a ticket id, --diff BASE...BRANCH, or both"])
+    stored = tk.load_ticket(args.id) if args.id else None
+    level = rk.stored_level(stored) if stored else None
+    if args.diff:
+        rules = rk.rules_for_range(args.dir, args.diff)
+        rows, diff_level = rk.classify_all(rk.changed_files(args.dir, args.diff), rules)
+        for path, lv, rule in rows:
+            print(f"  {lv:<6} {path}   ({rule})")
+        if not rows:
+            print("  (no files change)")
+        print(f"diff level: {diff_level}")
+        level = rk.higher(level, diff_level)
+        if stored:
+            print(f"stored level: {rk.stored_level(stored)}")
+    print(f"risk: {level}")
+    return 0
+
+
+def _gate(args) -> dict:
+    """Everything the merge script needs: level, reasons, review problems, and
+    the word the human must type to confirm."""
+    rev_range = f"{args.base}...{args.branch}"
+    rules = rk.rules_for_range(args.dir, rev_range)
+    rows, diff_level = rk.classify_all(rk.changed_files(args.dir, rev_range), rules)
+    tickets = tk.list_tickets()
+    stored, ids = rk.level_for_branch(tickets, args.branch, rules, args.repo)
+    level = rk.higher(stored, diff_level)
+    full = rk._git(args.dir, "rev-parse", "--verify", f"{args.branch}^{{commit}}").strip()
+    reviews = rk.latest_reviews(Path(args.worktree) / ".reviews", full)
+    problems = rk.check_reviews(reviews, level)
+    # The ticket whose id is typed to confirm: the highest-risk one on the branch.
+    best = max((t for t in tickets if t["id"] in ids),
+               key=lambda t: rk.rank(rk.stored_level(t, rules)), default=None)
+    return {"level": level, "diff_level": diff_level, "stored": stored, "ids": ids, "rows": rows,
+            "commit": full, "reviews": reviews, "problems": problems,
+            "confirm": best["id"] if best else args.branch.removeprefix("task/")}
+
+
+def _cmd_gate(args) -> int:
+    g = _gate(args)
+    if args.field == "risk":
+        print(g["level"])
+    elif args.field == "confirm":
+        print(g["confirm"])
+    elif args.field == "ok":
+        print("yes" if not g["problems"] else "no")
+    else:
+        print(f"Risk level: {g['level'].upper()}  (files say {g['diff_level']}, "
+              f"ticket says {g['stored'] or 'nothing: no ticket found'})")
+        if g["level"] != g["diff_level"]:
+            print(f"  raised by the ticket ({', '.join(g['ids'])}), not by the files")
+        shown = [r for r in g["rows"] if r[1] == g["diff_level"]]
+        for path, lv, rule in shown[:15]:
+            print(f"  {lv:<6} {path}   ({rule})")
+        if len(shown) > 15:
+            print(f"  ... and {len(shown) - 15} more")
+        print(f"Commit: {g['commit']}")
+        for kind, info in sorted(g["reviews"].items()):
+            print(f"  review by {info['reviewer']}: {info['verdict'] or 'no verdict'}")
+        for p in g["problems"]:
+            print(f"  BLOCKED: {p}")
+    return 0 if not g["problems"] else 1
+
+
 def _cmd_sync(args) -> int:
     try:
         tickets = tk.list_tickets()
@@ -147,10 +240,13 @@ def _cmd_sync(args) -> int:
 def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
     handler = {"new": _cmd_new, "list": _cmd_list, "show": _cmd_show, "approve": _cmd_approve,
-               "close": _cmd_close,
+               "close": _cmd_close, "risk": _cmd_risk, "gate": _cmd_gate,
                "sync": _cmd_sync}
     try:
         return handler[args.command](args)
+    except rk.RiskError as exc:
+        print(f"ticket: {exc}", file=sys.stderr)
+        return 1
     except kaneo.KaneoError as exc:
         print(f"ticket: {exc}", file=sys.stderr)
         return 1
