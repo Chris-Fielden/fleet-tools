@@ -63,7 +63,7 @@ def main():
             cut = min([pattern.find(c) for c in GLOB_CHARS if c in pattern] or [len(pattern)])
             fixed = pattern[:cut].rsplit("/", 1)[0] if cut < len(pattern) else pattern
             base = resolve(fixed, root) if fixed else root
-            if is_under_fleet(base, cwd) or ".fleet" in pattern.split("/"):
+            if is_under_fleet(base, cwd):
                 deny("Don't search the fleet's private folder (~/.fleet). Use "
                      "`ticket show` or `ticket list` instead.")
             root = base

@@ -4,6 +4,13 @@
 Runs before every shell command Claude wants to execute and blocks the
 ones that break the repository rules (see CLAUDE.md). Anything not listed
 here is left to Claude Code's normal permission prompts.
+
+What these rules are for: stopping mistakes and casual misuse (an agent
+running a fleet command, or a test that touches the real ~/.fleet). They are
+not a wall against a determined program: anything running as your user can
+find another route to your own files. The real wall is running agents as a
+separate Linux user that cannot read ~/.fleet at all (planned for the tower).
+When a command is too unusual to analyse safely, these rules refuse it.
 """
 
 import os
@@ -78,22 +85,22 @@ SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", ";;", "|&", "{", "}"}
 
 def _segments(command):
     """Split a shell command into simple commands, as lists of words. Quotes
-    are honoured, so 'dispatch' and "dispatch" count as dispatch."""
+    are honoured, so 'dispatch' and "dispatch" count as dispatch, and a
+    newline inside quotes stays part of the quoted text."""
     command = command.replace("`", " ; ").replace("$(", " ; ( ")
-    out = []
-    for line in command.splitlines():
-        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|(){}<>")
-        lexer.whitespace_split = True
-        current = []
-        for tok in lexer:
-            if tok in SEPARATORS:
-                if current:
-                    out.append(current)
-                current = []
-            else:
-                current.append(tok)
-        if current:
-            out.append(current)
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|(){}<>\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    out, current = [], []
+    for tok in lexer:
+        if tok in SEPARATORS or set(tok) <= {"\n"}:
+            if current:
+                out.append(current)
+            current = []
+        else:
+            current.append(tok)
+    if current:
+        out.append(current)
     return out
 
 
@@ -119,9 +126,10 @@ def _unwrap(words):
             continue
         if name in SHELLS or PYTHONS.match(name):
             rest = words[i + 1:]
-            if "-c" in rest:
-                j = rest.index("-c")
-                return ("-c", rest[j + 1:j + 2]) if name in SHELLS else (name, rest)
+            flag = next((k for k, a in enumerate(rest)
+                         if re.match(r"^-[a-zA-Z]*c[a-zA-Z]*$", a)), None)
+            if flag is not None:
+                return ("-c", rest[flag + 1:flag + 2]) if name in SHELLS else (name, rest)
             k = 0
             while k < len(rest) and rest[k].startswith("-"):
                 k += 1
@@ -132,7 +140,18 @@ def _unwrap(words):
     return None, []
 
 
+def _expand(token):
+    """Expand the home folder however it is written. Returns None when the
+    word still contains a variable we can't know, like $DIR."""
+    home = real_home()
+    if token == "~" or token.startswith("~/"):
+        token = home + token[1:]
+    token = token.replace("${HOME}", home).replace("$HOME", home)
+    return None if "$" in token else token
+
+
 def _resolve(token, cwd):
+    token = _expand(token) or token
     if token == "~" or token.startswith("~/"):
         token = real_home() + token[1:]
     if not os.path.isabs(token):
@@ -153,11 +172,16 @@ def scan_command(command, cwd, depth=0):
     try:
         segments = _segments(command)
     except ValueError:
-        return None  # unbalanced quotes: bash would refuse it anyway
+        # Unbalanced quotes: too odd to analyse. Refuse if it mentions fleet
+        # commands or the private folder at all; otherwise bash will reject it.
+        if re.search(r"\b(idea|alert|dispatch|ship|ticket)\b|\.fleet", command):
+            return ("odd", None)
+        return None
+    cwd_known = True
     for words in segments:
         name, args = _unwrap(words)
         if name == "-c":
-            reason = scan_command(args[0] if args else "", cwd, depth + 1)
+            reason = scan_command(args[0] if args else "", cwd if cwd_known else "/", depth + 1)
             if reason:
                 return reason
             continue
@@ -165,21 +189,49 @@ def scan_command(command, cwd, depth=0):
             return ("human", name)
         if name == "ticket" and args and args[0] in TICKET_HUMAN_ONLY_SUBCOMMANDS:
             return ("human", f"ticket {args[0]}")
-        # Any word that is a path into ~/.fleet, symlinks included.
-        paths = []
+        if name in ("cd", "pushd"):
+            target = args[0] if args else "~"
+            expanded = _expand(target)
+            if expanded is None:
+                cwd_known = False
+            else:
+                cwd = _resolve(expanded, cwd)
+            if cwd_known and is_under_fleet(cwd):
+                return ("fleet", None)
+            continue
+        # Every operand, including bare names like `sneaky`, is checked as a
+        # path. Symlinks are followed, so a link into ~/.fleet is caught.
+        operands = []
         for w in words:
             value = w.split("=", 1)[1] if re.match(r"^\w+=", w) else w
-            if value.startswith(("/", "~", ".")) or "/" in value:
-                if is_under_fleet(value, cwd):
-                    return ("fleet", None)
-                if not value.startswith("-"):
-                    paths.append(value)
-        # Whole-tree searches started at your home folder or above.
+            if not value or value.startswith("-"):
+                continue
+            expanded = _expand(value)
+            if expanded is None:
+                operands.append(None)  # can't tell where it points
+                continue
+            if cwd_known and is_under_fleet(expanded, cwd):
+                return ("fleet", None)
+            if not cwd_known and is_under_fleet(expanded, "/"):
+                return ("fleet", None)
+            operands.append(expanded)
+        # Whole-tree searches started at your home folder or above, or from a
+        # place we can't work out.
         recursive = name in TREE_WALKERS or (
             name in {"grep", "egrep", "fgrep", "cp", "scp", "ls", "chmod", "chown"}
             and any(RECURSIVE_FLAG.match(a) for a in args))
         if recursive:
-            roots = [_resolve(p, cwd) for p in paths] or [os.path.realpath(cwd)]
+            paths = []
+            for a in args:
+                if a.startswith("-"):
+                    continue
+                o = _expand(a)
+                if o is None or o.startswith(("/", ".", "~")) or "/" in o or (
+                        cwd_known and os.path.exists(os.path.join(cwd, o))):
+                    paths.append(o)
+            if any(o is None for o in paths) or not cwd_known:
+                return ("tree", name)
+            roots = [_resolve(o, cwd) for o in paths] or [os.path.realpath(cwd)]
             if any(_is_ancestor_of_fleet(r) for r in roots):
                 return ("tree", name)
     return None
@@ -233,6 +285,9 @@ def main():
         deny("Don't touch the fleet's private folder (~/.fleet) directly: it holds "
              "the real tickets and the Kaneo key. Use `ticket show`, `ticket list` "
              "or `ticket new` instead. In tests, set FLEET_HOME to a temporary folder.")
+    if found and found[0] == "odd":
+        deny("That command is too unusual for the safety rules to check (unbalanced "
+             "quotes). Write it more simply.")
     if found and found[0] == "tree":
         deny(f"Don't run `{found[1]}` across your home folder or above: it would read "
              "the fleet's private folder (~/.fleet) on the way. Search inside the "

@@ -241,3 +241,61 @@ def test_shell_symlink_into_fleet_blocked(tmp_path):
 def test_searches_reaching_fleet_blocked(tmp_path, tool_name, tool_input, cwd):
     reason = run_hook("guard_reads.py", tool_input, cwd or tmp_path, tool_name=tool_name)
     assert reason and "~/.fleet" in reason
+
+
+# --- second review round -----------------------------------------------------------
+
+def test_bare_symlink_to_a_fleet_file_blocked(tmp_path):
+    (tmp_path / "sneaky").symlink_to(os.path.join(REAL_FLEET, "kaneo.json"))
+    reason = bash("cat sneaky", tmp_path)
+    assert reason and "~/.fleet" in reason
+
+
+@pytest.mark.parametrize("command", [
+    'grep -R key "$HOME"',
+    "grep -R key ${HOME}",
+    "cd ~ && grep -R key .",
+    "cd $HOME; find . -name '*.json'",
+    'cd "$SOMEWHERE" && rg key',
+    'grep -r key "$DIR"',
+])
+def test_home_searches_via_variables_and_cd_blocked(tmp_path, command):
+    reason = bash(command, tmp_path)
+    assert reason and ("~/.fleet" in reason or "Only the human" in reason)
+
+
+@pytest.mark.parametrize("command", [
+    "bash -lc 'env dispatch --once'",
+    "bash -ec 'ship BD-1'",
+    "sh -xc \"ticket sync\"",
+])
+def test_combined_shell_flags_scanned(tmp_path, command):
+    reason = bash(command, tmp_path)
+    assert reason and "Only the human runs" in reason
+
+
+def test_multiline_quoted_string_still_scanned(tmp_path):
+    reason = bash("git commit -m 'line one\nline two' && dispatch --once", tmp_path)
+    assert reason and "Only the human runs" in reason
+    assert bash("git commit -m 'line one\nline two'", tmp_path) is None
+
+
+def test_cd_into_fleet_blocked(tmp_path):
+    reason = bash("cd ~/.fleet && ls", tmp_path)
+    assert reason and "~/.fleet" in reason
+
+
+def test_project_local_dot_fleet_folder_allowed(tmp_path):
+    (tmp_path / ".fleet").mkdir()
+    assert run_hook("guard_reads.py", {"pattern": ".fleet/*.json"}, tmp_path, tool_name="Glob") is None
+
+
+@pytest.mark.parametrize("command", [
+    "cd fleet && grep -rn idea .",
+    "cd tests; ls -R .",
+    "grep -r fleet_home fleet tests",
+])
+def test_cd_inside_project_allowed(tmp_path, command):
+    (tmp_path / "fleet").mkdir()
+    (tmp_path / "tests").mkdir()
+    assert bash(command, tmp_path) is None
