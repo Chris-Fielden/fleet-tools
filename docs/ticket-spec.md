@@ -54,7 +54,7 @@ Unknown fields are rejected when reading a ticket file. The counters file is not
 ### Ticket ids
 
 A new ticket's id is a prefix by kind plus a number that counts up per prefix,
-with no padding: `BD1`, `BD2`, `FX1`, `EM1`.
+with no padding: `BD-1`, `BD-2`, `FX-1`, `EM-1`.
 
 | Prefix | For |
 | --- | --- |
@@ -76,7 +76,7 @@ with no padding: `BD1`, `BD2`, `FX1`, `EM1`.
 - Nothing reads meaning out of an id. Anything that sorts oldest first
   (the dispatcher, reconcile) uses `created_at`, then `seq`, then the id only
   to keep the order stable. `ticket list` is the same order, reversed.
-- Kaneo card titles use the id: `[BD1] title`.
+- Kaneo card titles use the id: `[BD-1] title`.
 
 ### Who created it
 

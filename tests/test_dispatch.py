@@ -805,8 +805,8 @@ def test_decide_picks_by_seq_when_created_in_the_same_second(projects, monkeypat
     first, second = mk(branch="task/one"), mk(branch="task/two")
     assert first["created_at"] == second["created_at"]
     # Handed over newest-first, and with ids that sort the other way round.
-    first = dict(first, id="ZZ9")
-    second = dict(second, id="AA1")
+    first = dict(first, id="ZZ-9")
+    second = dict(second, id="AA-1")
     ds = dp.decide([second, first], dp.load_settings())
-    assert [d.ticket["id"] for d in ds] == ["ZZ9", "AA1"]
+    assert [d.ticket["id"] for d in ds] == ["ZZ-9", "AA-1"]
     assert ds[0].eligible and not ds[1].eligible

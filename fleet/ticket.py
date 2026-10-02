@@ -34,9 +34,9 @@ CLOSE_OUTCOMES = {"done": "done", "failed": "failed", "cancelled": "cancelled"}
 # FIELDS is set by the tool.
 CALLER_FIELDS = ("type", "repo", "branch", "title", "body", "commit", "parent")
 
-# Short ids like BD12 (new) and legacy ids like T-20250101-001 (kept as is).
-ID_RE = re.compile(r"T-\d{8}-\d{3,}|[A-Z]{2}[1-9]\d*")
-ID_EXAMPLE = "BD12 or T-20250101-001"
+# Short ids like BD-12 (new) and legacy ids like T-20250101-001 (kept as is).
+ID_RE = re.compile(r"T-\d{8}-\d{3,}|[A-Z]{2}-[1-9]\d*")
+ID_EXAMPLE = "BD-12 or T-20250101-001"
 
 # Id prefix by ticket type. Add a type here (and to TYPES) and it gets its
 # prefix. EMERGENCY_PREFIX wins over the type for any ticket whose priority
@@ -165,7 +165,7 @@ def _check_common(f: dict, errors: list[str]) -> None:
     elif t == "build" and parent is not None:
         errors.append("a build ticket must not have a parent")
     elif parent is not None and (not _is_str(parent) or not ID_RE.fullmatch(parent)):
-        errors.append("parent must be a ticket id like BD12 or T-20250101-001")
+        errors.append("parent must be a ticket id like BD-12 or T-20250101-001")
 
     title = f.get("title")
     if not _is_str(title) or not 1 <= len(title) <= 100:
@@ -338,7 +338,7 @@ def _assign_ids(prefix: str) -> tuple[str, int]:
     counters = _read_counters()
     highest = counters.get(prefix, 0)
     seq = counters.get("seq", 0)
-    pat = re.compile(re.escape(prefix) + r"([1-9]\d*)")
+    pat = re.compile(re.escape(prefix) + r"-([1-9]\d*)")
     for p in tickets_dir().glob("*.json"):
         if not ID_RE.fullmatch(p.stem):
             continue
@@ -354,7 +354,7 @@ def _assign_ids(prefix: str) -> tuple[str, int]:
     counters[prefix] = highest + 1
     counters["seq"] = seq + 1
     _write_atomic(tickets_dir() / COUNTERS_FILE, counters)
-    return f"{prefix}{highest + 1}", seq + 1
+    return f"{prefix}-{highest + 1}", seq + 1
 
 
 def create_ticket(fields: dict) -> dict:
