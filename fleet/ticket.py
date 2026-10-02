@@ -52,6 +52,8 @@ TYPE_PREFIX = {
 }
 EMERGENCY_PREFIX = "EM"
 COUNTERS_FILE = ".counters"
+AGENT_TICKET_LIMIT = 5      # new tickets per hour, per agent kind
+AGENT_TICKET_WINDOW = 3600  # seconds
 REPO_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 BRANCH_RE = re.compile(r"task/[a-z0-9-]{1,64}")
 TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
@@ -387,6 +389,31 @@ def _assign_ids(prefix: str) -> tuple[str, int]:
     return f"{prefix}-{highest + 1}", seq + 1
 
 
+def _check_agent_rate(creator: str) -> None:
+    """Refuse when an agent kind has already made too many tickets in the last
+    hour. Counted from the stored tickets; caller holds the lock."""
+    if creator == "human":
+        return
+    cutoff = datetime.now(timezone.utc).timestamp() - AGENT_TICKET_WINDOW
+    recent = 0
+    for p in tickets_dir().glob("*.json"):
+        if not ID_RE.fullmatch(p.stem):
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            made = datetime.strptime(data["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc).timestamp()
+            who = data["created_by"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if who == creator and made > cutoff:
+            recent += 1
+    if recent >= AGENT_TICKET_LIMIT:
+        raise TicketError(
+            f"too many new tickets: {creator} has already made {recent} in the last hour "
+            f"(the limit is {AGENT_TICKET_LIMIT}). Wait, or ask the human to create it.")
+
+
 def create_ticket(fields: dict) -> dict:
     """Validate, check for secrets, assign an id and save. Returns the ticket."""
     creator = current_creator()
@@ -402,6 +429,7 @@ def create_ticket(fields: dict) -> dict:
     status = "proposed" if t == "investigate" else "open"
 
     with _locked():
+        _check_agent_rate(creator)
         parent = fields.get("parent")
         if parent is not None:
             try:
