@@ -44,6 +44,13 @@ def _build_parser() -> argparse.ArgumentParser:
     approve = sub.add_parser("approve", help="approve a proposed build ticket (humans only)")
     approve.add_argument("id")
 
+    close = sub.add_parser("close", help="close an open or claimed ticket (humans only)")
+    close.add_argument("id")
+    outcome = close.add_mutually_exclusive_group(required=True)
+    for name in tk.CLOSE_OUTCOMES:
+        outcome.add_argument(f"--{name}", dest="outcome", action="store_const", const=name)
+    close.add_argument("--note")
+
     sync = sub.add_parser("sync", help="mirror every ticket onto the Kaneo board")
     sync.add_argument("--dry-run", action="store_true",
                       help="show what would happen without changing Kaneo")
@@ -95,8 +102,8 @@ def _cmd_show(args) -> int:
         return 0
     print(f"{t['id']}  {t['title']}")
     for name in ("status", "type", "repo", "branch", "commit", "parent",
-                 "created_by", "assignee", "verdict", "created_at", "updated_at"):
-        value = t[name]
+                 "created_by", "assignee", "verdict", "close_note", "created_at", "updated_at"):
+        value = t.get(name)
         print(f"  {name + ':':<12} {'-' if value is None else value}")
     print()
     print(t["body"])
@@ -106,6 +113,13 @@ def _cmd_show(args) -> int:
 def _cmd_approve(args) -> int:
     t = tk.approve_ticket(args.id)
     print(f"{t['id']} approved (now {t['status']})")
+    kaneo.mirror_quietly(t, _warn)
+    return 0
+
+
+def _cmd_close(args) -> int:
+    t = tk.close_ticket(args.id, args.outcome, args.note)
+    print(f"{t['id']} closed (now {t['status']})")
     kaneo.mirror_quietly(t, _warn)
     return 0
 
@@ -126,6 +140,7 @@ def _cmd_sync(args) -> int:
 def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
     handler = {"new": _cmd_new, "list": _cmd_list, "show": _cmd_show, "approve": _cmd_approve,
+               "close": _cmd_close,
                "sync": _cmd_sync}
     try:
         return handler[args.command](args)

@@ -38,9 +38,10 @@ launching, no hooks in this phase.
 | title | string | 1 to 100 characters, a single line. |
 | body | string | 1 to 4,000 characters. |
 | created_by | string | human, claude or codex. Set by the tool, never by the caller (see below). |
-| assignee | string or null | Always null in phase 1. Only the dispatcher sets it later. |
+| assignee | string or null | null until the dispatcher claims the ticket; then claude or codex. |
 | status | string | One of: proposed, open, claimed, done, failed, cancelled. |
 | verdict | object or null | Always null in phase 1. |
+| close_note | string, optional | 1 to 500 characters, gitleaks-checked. Set by `ticket close --note`. Absent otherwise. |
 | created_at | string | UTC time, ISO 8601, set by the tool. |
 | updated_at | string | UTC time, ISO 8601, set by the tool. |
 
