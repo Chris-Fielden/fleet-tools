@@ -55,6 +55,7 @@ def log(kind: str, message: str) -> None:
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     line = f"{stamp} {kind} {message}".replace("\n", " ")
     path = log_path()
+    tk.refuse_real_store_in_tests(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
@@ -64,6 +65,7 @@ def log(kind: str, message: str) -> None:
 def single_instance():
     """Hold $FLEET_HOME/dispatch.lock, or raise AlreadyRunning."""
     path = tk.fleet_home() / "dispatch.lock"
+    tk.refuse_real_store_in_tests(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a") as lock:
         try:

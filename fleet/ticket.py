@@ -10,6 +10,7 @@ import contextlib
 import fcntl
 import json
 import os
+import pwd
 import re
 import subprocess
 import tempfile
@@ -80,6 +81,29 @@ def fleet_home() -> Path:
     return Path(os.environ.get("FLEET_HOME") or Path.home() / ".fleet")
 
 
+def _real_home() -> Path:
+    """The account's real home folder, from the password database. Unlike
+    $HOME it cannot be redirected by a test."""
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def refuse_real_store_in_tests(path=None) -> None:
+    """Tripwire: under pytest, never write to the real ~/.fleet (or talk to
+    the Kaneo board configured there). Called before every write."""
+    if "PYTEST_CURRENT_TEST" not in os.environ:
+        return
+    target = Path(path) if path is not None else fleet_home()
+    real = _real_home() / ".fleet"
+    try:
+        inside = target.resolve().is_relative_to(real.resolve())
+    except (OSError, RuntimeError):
+        inside = True  # cannot tell: fail closed
+    if inside:
+        raise TicketError(
+            f"refusing to write to {target}: a test is running and this is the real "
+            f"{real} (the test is not isolated; it must set FLEET_HOME to a temporary folder)")
+
+
 def tickets_dir() -> Path:
     return fleet_home() / "tickets"
 
@@ -91,6 +115,7 @@ def _ticket_path(ticket_id: str) -> Path:
 @contextlib.contextmanager
 def _locked():
     """Exclusive lock covering id assignment and read-modify-write."""
+    refuse_real_store_in_tests()
     d = tickets_dir()
     d.mkdir(parents=True, exist_ok=True)
     with open(d / ".lock", "a") as lock:
@@ -257,6 +282,7 @@ def check_secrets(title: str, body: str) -> list[str]:
 # --- storage -----------------------------------------------------------------
 
 def _write_atomic(path: Path, data: dict) -> None:
+    refuse_real_store_in_tests(path)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:

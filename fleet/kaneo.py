@@ -77,6 +77,7 @@ def load_config() -> dict:
     No message here ever includes file contents, so the key cannot leak.
     """
     path = config_path()
+    tk.refuse_real_store_in_tests(path)
     try:
         mode = stat.S_IMODE(os.stat(path).st_mode)
     except FileNotFoundError:
@@ -174,6 +175,7 @@ def _reason(reason) -> str:
 @contextlib.contextmanager
 def _map_locked():
     home = tk.fleet_home()
+    tk.refuse_real_store_in_tests(home)
     home.mkdir(parents=True, exist_ok=True)
     with open(home / ".kaneo-sync.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)

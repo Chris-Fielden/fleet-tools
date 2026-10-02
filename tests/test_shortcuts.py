@@ -43,9 +43,9 @@ def test_idea_multiline_text_gives_single_line_title():
     assert "\n" not in t["title"] and t["body"] == "first line\nsecond line"
 
 
-@pytest.mark.parametrize("env", [{}, {"CLAUDECODE": "1"}])
-def test_idea_is_proposed_whoever_files_it(env):
-    assert tk.load_ticket(sh(IDEA, "an idea", extra_env=env).stdout.strip())["status"] == "proposed"
+@pytest.mark.parametrize("agent_env", [{}, {"CLAUDECODE": "1"}])
+def test_idea_is_proposed_whoever_files_it(agent_env):
+    assert tk.load_ticket(sh(IDEA, "an idea", extra_env=agent_env).stdout.strip())["status"] == "proposed"
 
 
 @pytest.mark.parametrize("args", [[], [""], ["  ", "\n"]])

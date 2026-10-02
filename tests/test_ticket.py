@@ -531,17 +531,17 @@ def test_investigate_rules():
         make(type="investigate", commit="abc1234")
 
 
-@pytest.mark.parametrize("env", [{}, {"CLAUDECODE": "1"}, {"CODEX_SANDBOX": "x"}])
-def test_investigate_always_starts_proposed(monkeypatch, env):
-    for k, v in env.items():
+@pytest.mark.parametrize("agent_env", [{}, {"CLAUDECODE": "1"}, {"CODEX_SANDBOX": "x"}])
+def test_investigate_always_starts_proposed(monkeypatch, agent_env):
+    for k, v in agent_env.items():
         monkeypatch.setenv(k, v)
     assert make(type="investigate")["status"] == "proposed"
     assert make(type="investigate", priority="urgent")["status"] == "proposed"
 
 
-@pytest.mark.parametrize("env", [{}, {"CLAUDECODE": "1"}, {"CODEX_SANDBOX": "x"}])
-def test_build_starts_open_whoever_files_it(monkeypatch, env):
-    for k, v in env.items():
+@pytest.mark.parametrize("agent_env", [{}, {"CLAUDECODE": "1"}, {"CODEX_SANDBOX": "x"}])
+def test_build_starts_open_whoever_files_it(monkeypatch, agent_env):
+    for k, v in agent_env.items():
         monkeypatch.setenv(k, v)
     assert make()["status"] == "open"
 
@@ -554,3 +554,12 @@ def test_ids_are_never_created_without_the_hyphen():
     assert all(re.fullmatch(r"[A-Z]{2}-[1-9]\d*", i) for i in names)
     assert all(re.fullmatch(r"[A-Z]{2}-[1-9]\d*\.json", p.name)
                for p in tk.tickets_dir().glob("*.json"))
+
+
+def test_old_proposed_build_ticket_can_still_be_approved():
+    t = make()
+    path = tk._ticket_path(t["id"])
+    data = json.loads(path.read_text())
+    data["status"] = "proposed"
+    path.write_text(json.dumps(data))
+    assert tk.approve_ticket(t["id"])["status"] == "open"
