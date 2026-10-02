@@ -87,3 +87,35 @@ def deny(reason):
 def allow_silently():
     """Stay out of the way: no decision, normal permission rules apply."""
     sys.exit(0)
+
+
+# --- The fleet's private folder ------------------------------------------------
+# ~/.fleet holds the ticket store, the Kaneo key and the dispatcher's state.
+# Agents may use it only through the ticket command (show, list, new), never by
+# touching the files directly. The real home folder comes from the system's
+# user database, not $HOME, so an agent can't dodge the rule by changing HOME.
+
+def real_home():
+    import pwd
+    return pwd.getpwuid(os.getuid()).pw_dir
+
+
+def fleet_dir():
+    return os.path.realpath(os.path.join(real_home(), ".fleet"))
+
+
+def is_under_fleet(path, cwd=None):
+    """True if path points at ~/.fleet or anything inside it."""
+    if not path:
+        return False
+    path = str(path)
+    # Expand "~" with the real home folder, not $HOME, which can be changed.
+    if path == "~" or path.startswith("~/"):
+        path = real_home() + path[1:]
+    else:
+        path = os.path.expanduser(path)
+    if not os.path.isabs(path):
+        path = os.path.join(cwd or os.getcwd(), path)
+    full = os.path.realpath(path)
+    fleet = fleet_dir()
+    return full == fleet or full.startswith(fleet + os.sep)

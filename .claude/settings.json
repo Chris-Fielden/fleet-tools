@@ -7,7 +7,9 @@
           {
             "type": "command",
             "command": "python3",
-            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_bash.py"],
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_bash.py"
+            ],
             "timeout": 30
           }
         ]
@@ -18,7 +20,22 @@
           {
             "type": "command",
             "command": "python3",
-            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_edits.py"],
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_edits.py"
+            ],
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_reads.py"
+            ],
             "timeout": 30
           }
         ]
@@ -30,7 +47,9 @@
           {
             "type": "command",
             "command": "python3",
-            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/check_before_stop.py"],
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/check_before_stop.py"
+            ],
             "timeout": 600,
             "statusMessage": "Running scripts/check.sh before finishing..."
           }
