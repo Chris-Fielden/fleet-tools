@@ -177,9 +177,11 @@ def rules_for_range(repo_dir, rev_range: str) -> dict:
     return load_rules(text)
 
 
-def level_for_branch(tickets: list[dict], branch: str, rules: dict | None = None):
-    """(highest stored level or None, ticket ids) over the tickets on a branch."""
-    found = [t for t in tickets if t["branch"] == branch]
+def level_for_branch(tickets: list[dict], branch: str, rules: dict | None = None,
+                     repo: str | None = None):
+    """(highest stored level or None, ticket ids) over the tickets on a branch,
+    in one repo when `repo` is given."""
+    found = [t for t in tickets if t["branch"] == branch and (repo is None or t["repo"] == repo)]
     level = None
     for t in found:
         level = higher(level, stored_level(t, rules))

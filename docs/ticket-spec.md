@@ -142,7 +142,7 @@ folder, and `contains` matches anywhere in the path, ignoring case.
   `scripts/new-task.sh`, any path containing `secret`, `auth` or `.env`,
   `requirements*.txt`, `pyproject.toml`, `package.json`, `go.mod`,
   `compose.yml`, `fleet/dispatch*.py`, and (so a task cannot loosen its own
-  rules) `risk-rules.json` and `fleet/risk.py`.
+  rules) `risk-rules.json`, `fleet/risk.py`, `fleet/ticket.py` and `fleet/ticket_cli.py`.
 - Low: `docs/**`, `tests/**`. A name like `tests/test_auth.py` is still high.
 - Everything else: medium.
 - The rules are read from the **base** branch (`git show BASE:risk-rules.json`),
@@ -168,7 +168,8 @@ if its `Commit:` header is the full id of the branch tip. The newest review
 per reviewer decides, and any FAIL blocks. Medium and low need one PASS. High
 needs a PASS from both Codex and Claude, with Claude on a stronger model
 (`opus` or `fable`): `REVIEWER=both scripts/review.sh`. Tickets on the branch
-are found by branch name; the highest stored level counts.
+are found by branch name and repo name (`--repo`; the merge script passes the
+main checkout's folder name); the highest stored level counts.
 
 **Merge script.** `scripts/finish-task.sh` runs the gate, refuses to merge if
 it fails, shows the level, and merges the exact commit it checked (it stops if

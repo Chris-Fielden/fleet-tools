@@ -68,6 +68,7 @@ def _build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--base", required=True)
     gate.add_argument("--branch", required=True)
     gate.add_argument("--dir", default=".", help="the git repo (default: here)")
+    gate.add_argument("--repo", help="only tickets filed against this repo name count")
     gate.add_argument("--worktree", required=True, help="the task worktree holding .reviews/")
     gate.add_argument("--field", choices=("risk", "confirm", "ok"),
                       help="print just one value instead of the report")
@@ -184,7 +185,7 @@ def _gate(args) -> dict:
     rules = rk.rules_for_range(args.dir, rev_range)
     rows, diff_level = rk.classify_all(rk.changed_files(args.dir, rev_range), rules)
     tickets = tk.list_tickets()
-    stored, ids = rk.level_for_branch(tickets, args.branch, rules)
+    stored, ids = rk.level_for_branch(tickets, args.branch, rules, args.repo)
     level = rk.higher(stored, diff_level)
     full = rk._git(args.dir, "rev-parse", "--verify", f"{args.branch}^{{commit}}").strip()
     reviews = rk.latest_reviews(Path(args.worktree) / ".reviews", full)

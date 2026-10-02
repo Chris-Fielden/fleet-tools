@@ -65,7 +65,7 @@ echo "== 2/5 Risk level and reviews"
 # The exact commit being reviewed, gated and merged. Merging this id (not the
 # branch name) means a commit added while you read this cannot slip in.
 tip="$(git rev-parse --verify "$branch^{commit}")"
-gate_args=(gate --base "$base" --branch "$branch" --dir "$root" --worktree "$wt")
+gate_args=(gate --base "$base" --branch "$branch" --dir "$root" --worktree "$wt" --repo "$(basename "$root")")
 override_reason=""
 gate_ok=1
 $ticket_cmd "${gate_args[@]}" || gate_ok=0

@@ -34,7 +34,7 @@ def rules():
     "fleet/secrets.py", "docs/secret-notes.md", "fleet/oauth.py", "src/Auth/login.py",
     ".env", "app/.env.example", "requirements.txt", "requirements-dev.txt", "svc/requirements.txt",
     "pyproject.toml", "web/package.json", "go.mod", "compose.yml",
-    "fleet/dispatch.py", "fleet/dispatch_cli.py", "risk-rules.json",
+    "fleet/dispatch.py", "fleet/dispatch_cli.py", "risk-rules.json", "fleet/ticket.py", "fleet/ticket_cli.py",
 ])
 def test_high_paths(rules, path):
     assert rk.classify(path, rules)[0] == "high"
@@ -46,7 +46,7 @@ def test_low_paths(rules, path):
 
 
 @pytest.mark.parametrize("path", [
-    "fleet/ticket.py", "README.md", "bin/ticket", "scripts/ask-codex.sh", "fleet/usage.py",
+    "fleet/usage_cli.py", "README.md", "bin/ticket", "scripts/ask-codex.sh", "fleet/usage.py",
     "scripts/check.sh.bak", "k8s", "fleet/sub/dispatch.py", "compose.yaml"])
 def test_medium_paths(rules, path):
     assert rk.classify(path, rules)[0] == "medium", path
@@ -59,7 +59,7 @@ def test_highest_matching_rule_wins(rules):
 
 
 def test_overall_level_is_highest_and_empty_is_low(rules):
-    rows, level = rk.classify_all(["docs/a.md", "fleet/ticket.py"], rules)
+    rows, level = rk.classify_all(["docs/a.md", "fleet/usage_cli.py"], rules)
     assert level == "medium" and len(rows) == 2
     assert rk.classify_all([], rules)[1] == "low"
     assert rk.classify_all(["docs/a.md", "k8s/x.yaml"], rules)[1] == "high"
@@ -191,11 +191,11 @@ def branch_with(repo, name, files, rules_text=None):
 
 
 def test_diff_prints_level_and_rule_per_file(repo):
-    branch_with(repo, "task/a", ["docs/a.md", "fleet/ticket.py", "k8s/app.yaml"])
+    branch_with(repo, "task/a", ["docs/a.md", "fleet/usage_cli.py", "k8s/app.yaml"])
     r = run("risk", "--diff", "main...task/a", "--dir", str(repo))
     assert r.returncode == 0, r.stderr
     assert "low    docs/a.md   (docs/**)" in r.stdout
-    assert "medium fleet/ticket.py   (no rule (default))" in r.stdout
+    assert "medium fleet/usage_cli.py   (no rule (default))" in r.stdout
     assert "high   k8s/app.yaml   (k8s/**)" in r.stdout
     assert r.stdout.strip().endswith("risk: high")
 
@@ -446,8 +446,8 @@ def merged(repo):
     return "Merge task/demo" in git(repo, "log", "main", "--format=%s")
 
 
-def file_ticket(branch="task/demo", **over):
-    r = run("new", *new_args(branch=branch, **over))
+def file_ticket(branch="task/demo", repo="repo", **over):
+    r = run("new", *new_args(branch=branch, repo=repo, **over))
     assert r.returncode == 0, r.stderr
     return r.stdout.split()[0]
 
@@ -673,3 +673,32 @@ def test_hook_blocks_agents_from_raising():
     spec.loader.exec_module(mod)
     assert mod.scan_command("ticket risk BD-1 --raise high", [Path("/tmp")], 0, True) is not None
     assert mod.scan_command("ticket risk --diff main...task/x", [Path("/tmp")], 0, True) is None
+
+
+def test_tickets_of_another_repo_do_not_count(task, repo):
+    other = file_ticket(repo="other-repo")
+    run("risk", other, "--raise", "high")
+    commit_in(task, "docs/a.md")
+    pass_review(task)
+    r = finish(repo, "y\n")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Risk level: LOW" in r.stdout
+
+
+def test_emergency_merge_still_reconciles_the_ticket(task, repo):
+    from fleet import dispatch
+    base = git(repo, "rev-parse", "HEAD")
+    commit_in(task, "k8s/app.yaml")
+    assert not dispatch.is_merged(repo, "task/demo", base)
+    r = finish(repo, "OVERRIDE\n", "--emergency", "prod is down")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert dispatch.is_merged(repo, "task/demo", base)
+    assert not dispatch.is_merged(repo, "task/other", base)
+
+
+def test_reconcile_still_needs_the_exact_branch_in_an_override_message(repo):
+    from fleet import dispatch
+    base = git(repo, "rev-parse", "HEAD")
+    branch_with(repo, "task/demo", ["docs/a.md"])
+    git(repo, "merge", "--no-ff", "task/demo", "-m", "Merge task/demo-2\n\nEMERGENCY OVERRIDE (risk high): x")
+    assert not dispatch.is_merged(repo, "task/demo", base)

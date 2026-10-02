@@ -22,6 +22,8 @@
     {"level": "high", "glob": "fleet/dispatch*.py"},
     {"level": "high", "glob": "risk-rules.json"},
     {"level": "high", "glob": "fleet/risk.py"},
+    {"level": "high", "glob": "fleet/ticket.py"},
+    {"level": "high", "glob": "fleet/ticket_cli.py"},
     {"level": "low", "glob": "docs/**"},
     {"level": "low", "glob": "tests/**"}
   ],
