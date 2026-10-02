@@ -55,6 +55,7 @@ def log(kind: str, message: str) -> None:
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     line = f"{stamp} {kind} {message}".replace("\n", " ")
     path = log_path()
+    tk.refuse_real_store_in_tests(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
@@ -64,6 +65,7 @@ def log(kind: str, message: str) -> None:
 def single_instance():
     """Hold $FLEET_HOME/dispatch.lock, or raise AlreadyRunning."""
     path = tk.fleet_home() / "dispatch.lock"
+    tk.refuse_real_store_in_tests(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a") as lock:
         try:
@@ -251,13 +253,16 @@ def _judge(t: dict, tickets: dict, claimed: list[dict], settings: dict) -> Decis
 
 
 def decide(tickets: list[dict], settings: dict) -> list[Decision]:
-    """One Decision per open ticket, oldest first. Only the first eligible
+    """One Decision per open ticket: urgent ones first, then normal ones,
+    oldest first within each (whoever filed them). Only the first eligible
     one stays eligible (rule 6); later ones are marked as waiting."""
     by_id = {t["id"]: t for t in tickets}
     claimed = [t for t in tickets if t["status"] == "claimed"]
     decisions = []
     picked = False
-    for t in sorted((t for t in tickets if t["status"] == "open"), key=tk.oldest_first_key):
+    open_tickets = sorted((t for t in tickets if t["status"] == "open"),
+                          key=lambda t: (t.get("priority") != "urgent", *tk.oldest_first_key(t)))
+    for t in open_tickets:
         d = _judge(t, by_id, claimed, settings)
         if d.eligible:
             if picked:

@@ -10,13 +10,15 @@ import contextlib
 import fcntl
 import json
 import os
+import pwd
 import re
 import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-TYPES = ("build", "review", "fix", "question")
+TYPES = ("build", "review", "fix", "question", "investigate")
+PRIORITIES = ("normal", "urgent")
 STATUSES = ("proposed", "open", "claimed", "done", "failed", "cancelled")
 CREATORS = ("human", "claude", "codex")
 
@@ -25,14 +27,14 @@ FIELDS = (
     "created_by", "assignee", "status", "verdict", "created_at", "updated_at",
 )
 # Optional fields: may be absent from a stored ticket.
-OPTIONAL_FIELDS = ("close_note", "base_commit", "seq")
+OPTIONAL_FIELDS = ("close_note", "base_commit", "seq", "priority")
 CLOSE_NOTE_MAX = 500
 BODY_MAX = 4000
 AGENTS = ("claude", "codex")
 CLOSE_OUTCOMES = {"done": "done", "failed": "failed", "cancelled": "cancelled"}
 # Fields a caller may supply when creating a ticket. Everything else in
 # FIELDS is set by the tool.
-CALLER_FIELDS = ("type", "repo", "branch", "title", "body", "commit", "parent")
+CALLER_FIELDS = ("type", "repo", "branch", "title", "body", "commit", "parent", "priority")
 
 # Short ids like BD-12 (new) and legacy ids like T-20250101-001 (kept as is).
 ID_RE = re.compile(r"T-\d{8}-\d{3,}|[A-Z]{2}-[1-9]\d*")
@@ -79,6 +81,29 @@ def fleet_home() -> Path:
     return Path(os.environ.get("FLEET_HOME") or Path.home() / ".fleet")
 
 
+def _real_home() -> Path:
+    """The account's real home folder, from the password database. Unlike
+    $HOME it cannot be redirected by a test."""
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def refuse_real_store_in_tests(path=None) -> None:
+    """Tripwire: under pytest, never write to the real ~/.fleet (or talk to
+    the Kaneo board configured there). Called before every write."""
+    if "PYTEST_CURRENT_TEST" not in os.environ:
+        return
+    target = Path(path) if path is not None else fleet_home()
+    real = _real_home() / ".fleet"
+    try:
+        inside = target.resolve().is_relative_to(real.resolve())
+    except (OSError, RuntimeError):
+        inside = True  # cannot tell: fail closed
+    if inside:
+        raise TicketError(
+            f"refusing to write to {target}: a test is running and this is the real "
+            f"{real} (the test is not isolated; it must set FLEET_HOME to a temporary folder)")
+
+
 def tickets_dir() -> Path:
     return fleet_home() / "tickets"
 
@@ -90,6 +115,7 @@ def _ticket_path(ticket_id: str) -> Path:
 @contextlib.contextmanager
 def _locked():
     """Exclusive lock covering id assignment and read-modify-write."""
+    refuse_real_store_in_tests()
     d = tickets_dir()
     d.mkdir(parents=True, exist_ok=True)
     with open(d / ".lock", "a") as lock:
@@ -166,6 +192,9 @@ def _check_common(f: dict, errors: list[str]) -> None:
         errors.append("a build ticket must not have a parent")
     elif parent is not None and (not _is_str(parent) or not ID_RE.fullmatch(parent)):
         errors.append("parent must be a ticket id like BD-12 or T-20250101-001")
+
+    if f.get("priority") is not None and f["priority"] not in PRIORITIES:
+        errors.append(f"priority must be one of: {', '.join(PRIORITIES)}")
 
     title = f.get("title")
     if not _is_str(title) or not 1 <= len(title) <= 100:
@@ -253,6 +282,7 @@ def check_secrets(title: str, body: str) -> list[str]:
 # --- storage -----------------------------------------------------------------
 
 def _write_atomic(path: Path, data: dict) -> None:
+    refuse_real_store_in_tests(path)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -367,12 +397,9 @@ def create_ticket(fields: dict) -> dict:
         raise TicketInvalid(errors)
 
     t = fields["type"]
-    if t == "build" and creator == "human":
-        status = "open"
-    elif t == "build":
-        status = "proposed"
-    else:
-        status = "open"
+    # Investigate tickets always wait for approval; everything else starts
+    # open (the human approves at merge).
+    status = "proposed" if t == "investigate" else "open"
 
     with _locked():
         parent = fields.get("parent")
@@ -407,7 +434,7 @@ def create_ticket(fields: dict) -> dict:
 
 
 def approve_ticket(ticket_id: str) -> dict:
-    """Turn a proposed build ticket into an open one. Humans only."""
+    """Turn a proposed ticket (build or investigate) into an open one. Humans only."""
     creator = current_creator()
     if creator != "human":
         raise TicketError(f"only a human can approve tickets (running as {creator})")
@@ -415,10 +442,10 @@ def approve_ticket(ticket_id: str) -> dict:
         raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
     with _locked():
         ticket = load_ticket(ticket_id)
-        if ticket["type"] != "build" or ticket["status"] != "proposed":
+        if ticket["status"] != "proposed":
             raise TicketError(
                 f"{ticket_id} is a {ticket['status']} {ticket['type']} ticket; "
-                "only proposed build tickets can be approved"
+                "only proposed tickets can be approved"
             )
         ticket["status"] = "open"
         ticket["updated_at"] = _now()

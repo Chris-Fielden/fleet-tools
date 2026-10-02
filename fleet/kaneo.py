@@ -38,9 +38,10 @@ from . import ticket as tk
 
 TIMEOUT = 10  # seconds per request
 # Columns, left to right. Tickets use Kaneo's own To Do / In Progress / Done;
-# Proposed and Failed are ours. In Review is created so the order is right,
+# Proposed, Urgent and Failed are ours. An open urgent ticket sits in Urgent
+# instead of To Do. In Review is created so the order is right,
 # but nothing is put there yet (the dispatcher phase will).
-COLUMNS = ("Proposed", "To Do", "In Progress", "In Review", "Done", "Failed")
+COLUMNS = ("Proposed", "Urgent", "To Do", "In Progress", "In Review", "Done", "Failed")
 FINAL_COLUMNS = ("Done", "Failed")
 # Kaneo has no per-card archive call, so a cancelled ticket sits in Done,
 # marked in its title.
@@ -49,6 +50,7 @@ STATUS_COLUMN = {"proposed": "Proposed", "open": "To Do", "claimed": "In Progres
 # Per-status columns an earlier version of the sync created.
 LEGACY_COLUMNS = ("open", "claimed", "cancelled")
 PRIORITY = "no-priority"
+URGENT_PRIORITY = "urgent"
 
 
 class KaneoError(Exception):
@@ -75,6 +77,7 @@ def load_config() -> dict:
     No message here ever includes file contents, so the key cannot leak.
     """
     path = config_path()
+    tk.refuse_real_store_in_tests(path)
     try:
         mode = stat.S_IMODE(os.stat(path).st_mode)
     except FileNotFoundError:
@@ -172,6 +175,7 @@ def _reason(reason) -> str:
 @contextlib.contextmanager
 def _map_locked():
     home = tk.fleet_home()
+    tk.refuse_real_store_in_tests(home)
     home.mkdir(parents=True, exist_ok=True)
     with open(home / ".kaneo-sync.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -195,6 +199,14 @@ def _load_map() -> dict:
 
 
 # --- mapping -----------------------------------------------------------------
+
+def is_urgent(t: dict) -> bool:
+    return t.get("priority") == "urgent"
+
+
+def card_priority(t: dict) -> str:
+    return URGENT_PRIORITY if is_urgent(t) else PRIORITY
+
 
 def card_title(t: dict) -> str:
     suffix = " (cancelled)" if t["status"] == "cancelled" else ""
@@ -283,8 +295,9 @@ class _Board:
             for i, k in enumerate(order):
                 cols[k]["position"] = i
 
-    def column_slug(self, project_id: str, status: str):
-        col = self._columns_of(project_id).get(STATUS_COLUMN[status].lower())
+    def column_slug(self, project_id: str, t: dict):
+        name = "Urgent" if t["status"] == "open" and is_urgent(t) else STATUS_COLUMN[t["status"]]
+        col = self._columns_of(project_id).get(name.lower())
         return None if col is None else col["slug"]
 
     def prune(self) -> None:
@@ -331,7 +344,7 @@ def _mirror(t: dict, board: _Board, tasks: dict, dry_run: bool) -> str:
             # The card was deleted in Kaneo; make a fresh one.
     if pid is None:
         return verb("create")
-    slug = board.column_slug(pid, t["status"])
+    slug = board.column_slug(pid, t)
     title, desc = card_title(t), card_description(t)
 
     if existing is None:
@@ -340,19 +353,20 @@ def _mirror(t: dict, board: _Board, tasks: dict, dry_run: bool) -> str:
         if dry_run:
             return verb("create")
         made = c.request("POST", f"/task/{pid}", body={
-            "title": title, "description": desc, "priority": PRIORITY, "status": slug})
+            "title": title, "description": desc, "priority": card_priority(t), "status": slug})
         tasks[t["id"]] = made["id"]
         return "created"
 
     if (slug is not None and existing.get("projectId") == pid
             and existing.get("title") == title
-            and existing.get("description") == desc and existing.get("status") == slug):
+            and existing.get("description") == desc and existing.get("status") == slug
+            and existing.get("priority") == card_priority(t)):
         return "unchanged"
     if dry_run:
         return verb("update")
     c.request("PUT", f"/task/{tasks[t['id']]}", body={
         "title": title, "description": desc,
-        "priority": existing.get("priority") or PRIORITY,
+        "priority": card_priority(t),
         "status": slug, "projectId": pid,
         "position": existing.get("position") or 0})
     return "updated"

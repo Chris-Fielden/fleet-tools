@@ -106,7 +106,7 @@ def test_close_refused_from_other_statuses(status, capsys):
 
 def test_close_refused_from_proposed(monkeypatch, capsys):
     monkeypatch.setenv("CLAUDECODE", "1")
-    t = mk()
+    t = mk(type="investigate")
     monkeypatch.delenv("CLAUDECODE")
     assert t["status"] == "proposed"
     assert ticket_main(["close", t["id"], "--cancelled"]) == 1
@@ -810,3 +810,42 @@ def test_decide_picks_by_seq_when_created_in_the_same_second(projects, monkeypat
     ds = dp.decide([second, first], dp.load_settings())
     assert [d.ticket["id"] for d in ds] == ["ZZ-9", "AA-1"]
     assert ds[0].eligible and not ds[1].eligible
+
+
+# --- urgent first --------------------------------------------------------------
+
+def test_urgent_open_ticket_is_picked_before_older_normal_ones(projects, capsys, monkeypatch):
+    make_repo(projects)
+    times = iter(f"2025-01-01T00:00:0{i}Z" for i in range(1, 6))
+    monkeypatch.setattr(tk, "_now", lambda: next(times))
+    old = mk(branch="task/old")
+    urgent1 = mk(branch="task/urg-one", priority="urgent")
+    new = mk(branch="task/new")
+    urgent2 = mk(branch="task/urg-two", priority="urgent")
+    out = dry(capsys).splitlines()
+    assert [ln.split()[0] for ln in out] == [urgent1["id"], urgent2["id"], old["id"], new["id"]]
+    assert "would launch" in out[0]
+    assert all("only one ticket is started per run" in ln for ln in out[1:])
+
+
+@pytest.mark.parametrize("agent_env", [{}, {"CLAUDECODE": "1"}, {"CODEX_SANDBOX": "x"}])
+def test_urgent_wins_whoever_filed_it(projects, capsys, monkeypatch, agent_env):
+    make_repo(projects)
+    old = mk(branch="task/old")
+    for k, v in agent_env.items():
+        monkeypatch.setenv(k, v)
+    urgent = mk(branch="task/urg", priority="urgent")
+    assert urgent["status"] == "open"
+    for k in agent_env:
+        monkeypatch.delenv(k)
+    out = dry(capsys)
+    assert f"{urgent['id']}  would launch" in out
+    assert f"{old['id']}  skip: only one ticket" in out
+
+
+def test_ineligible_urgent_does_not_block_normal(projects, capsys):
+    make_repo(projects)
+    urgent = mk(branch="task/urg", priority="urgent", repo="missing")
+    normal = mk(branch="task/norm")
+    out = dry(capsys)
+    assert f"{urgent['id']}  skip:" in out and f"{normal['id']}  would launch" in out

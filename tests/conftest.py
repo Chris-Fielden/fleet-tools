@@ -18,12 +18,21 @@ def _fake(path: Path, exit_code: int) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def env(tmp_path, monkeypatch):
-    """Isolated FLEET_HOME, a gitleaks that finds nothing, and no agent vars."""
+def _isolated_environment(tmp_path, monkeypatch):
+    """Temporary HOME and FLEET_HOME, a gitleaks that finds nothing, no agent
+    vars. Deliberately not named `env`: a `parametrize("env", ...)` replaces a
+    fixture of that name, which once let tests write to the real ~/.fleet."""
     for var in AGENT_VARS:
         monkeypatch.delenv(var, raising=False)
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("FLEET_HOME", str(tmp_path / "fleet"))
     monkeypatch.setenv("FLEET_GITLEAKS", str(_fake(tmp_path / "gl-clean", 0)))
+
+
+@pytest.fixture
+def env(tmp_path):
+    """The temporary folder everything above lives in."""
     return tmp_path
 
 
