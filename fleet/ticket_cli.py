@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 
+from . import kaneo
 from . import ticket as tk
 
 
@@ -42,7 +43,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     approve = sub.add_parser("approve", help="approve a proposed build ticket (humans only)")
     approve.add_argument("id")
+
+    sync = sub.add_parser("sync", help="mirror every ticket onto the Kaneo board")
+    sync.add_argument("--dry-run", action="store_true",
+                      help="show what would happen without changing Kaneo")
     return p
+
+
+def _warn(message: str) -> None:
+    print(f"ticket: {message}", file=sys.stderr)
 
 
 def _cmd_new(args) -> int:
@@ -59,7 +68,9 @@ def _cmd_new(args) -> int:
         "title": args.title, "body": body,
         "commit": args.commit, "parent": args.parent,
     }
-    print(tk.create_ticket(fields)["id"])
+    ticket = tk.create_ticket(fields)
+    print(ticket["id"])
+    kaneo.mirror_quietly(ticket, _warn)
     return 0
 
 
@@ -95,14 +106,32 @@ def _cmd_show(args) -> int:
 def _cmd_approve(args) -> int:
     t = tk.approve_ticket(args.id)
     print(f"{t['id']} approved (now {t['status']})")
+    kaneo.mirror_quietly(t, _warn)
     return 0
+
+
+def _cmd_sync(args) -> int:
+    try:
+        tickets = tk.list_tickets()
+        failed = False
+        for ticket_id, outcome in kaneo.sync(tickets, dry_run=args.dry_run):
+            print(f"{ticket_id}  {outcome}")
+            failed = failed or outcome.startswith("error: ")
+    except kaneo.NotConfigured:
+        print(f"Kaneo sync is off: no {kaneo.config_path()} (create it to turn sync on).")
+        return 0
+    return 1 if failed else 0
 
 
 def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
-    handler = {"new": _cmd_new, "list": _cmd_list, "show": _cmd_show, "approve": _cmd_approve}
+    handler = {"new": _cmd_new, "list": _cmd_list, "show": _cmd_show, "approve": _cmd_approve,
+               "sync": _cmd_sync}
     try:
         return handler[args.command](args)
+    except kaneo.KaneoError as exc:
+        print(f"ticket: {exc}", file=sys.stderr)
+        return 1
     except tk.TicketInvalid as exc:
         for line in exc.errors:
             print(f"ticket: {line}", file=sys.stderr)
