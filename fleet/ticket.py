@@ -31,6 +31,7 @@ CALLER_FIELDS = ("type", "repo", "branch", "title", "body", "commit", "parent")
 ID_RE = re.compile(r"T-\d{8}-\d{3,}")
 REPO_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 BRANCH_RE = re.compile(r"task/[a-z0-9-]{1,64}")
+TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 COMMIT_RE = re.compile(r"[0-9a-f]{7,40}")
 
 GITLEAKS_INSTALL_HINT = (
@@ -182,8 +183,8 @@ def validate_stored(data) -> list[str]:
     if data["verdict"] is not None:
         errors.append("verdict must be null in phase 1")
     for name in ("created_at", "updated_at"):
-        if not _is_str(data[name]):
-            errors.append(f"{name} must be a string")
+        if not _is_str(data[name]) or not TIME_RE.fullmatch(data[name]):
+            errors.append(f"{name} must be a UTC ISO 8601 time like 2025-01-01T00:00:00Z")
     return errors
 
 
@@ -236,7 +237,7 @@ def _load_path(path: Path, label: str) -> dict:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise TicketError(f"no such ticket: {label}") from None
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise TicketError(f"cannot read ticket {label}: {exc}") from None
     try:
         data = json.loads(raw)
@@ -250,12 +251,17 @@ def _load_path(path: Path, label: str) -> dict:
     return data
 
 
+def _sort_key(t: dict):
+    day, seq = t["id"].split("-")[1:]
+    return (t["created_at"], day, int(seq))
+
+
 def list_tickets() -> list[dict]:
     d = tickets_dir()
     if not d.is_dir():
         return []
     tickets = [_load_path(p, p.stem) for p in d.glob("T-*.json")]
-    tickets.sort(key=lambda t: (t["created_at"], t["id"]), reverse=True)
+    tickets.sort(key=_sort_key, reverse=True)
     return tickets
 
 
@@ -269,9 +275,9 @@ def _next_id(day: str) -> str:
     return f"{prefix}{highest + 1:03d}"
 
 
-def create_ticket(fields: dict, creator: str | None = None) -> dict:
+def create_ticket(fields: dict) -> dict:
     """Validate, check for secrets, assign an id and save. Returns the ticket."""
-    creator = creator or current_creator()
+    creator = current_creator()
     errors = validate_new(fields)
     if not errors:
         errors += check_secrets(fields["title"], fields["body"])
@@ -314,9 +320,9 @@ def create_ticket(fields: dict, creator: str | None = None) -> dict:
     return ticket
 
 
-def approve_ticket(ticket_id: str, creator: str | None = None) -> dict:
+def approve_ticket(ticket_id: str) -> dict:
     """Turn a proposed build ticket into an open one. Humans only."""
-    creator = creator or current_creator()
+    creator = current_creator()
     if creator != "human":
         raise TicketError(f"only a human can approve tickets (running as {creator})")
     if not ID_RE.fullmatch(ticket_id):

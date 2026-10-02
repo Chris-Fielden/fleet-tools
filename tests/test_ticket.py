@@ -285,3 +285,44 @@ def test_no_stray_temp_files():
 def test_tests_never_touch_real_home(tmp_path):
     make()
     assert str(tk.fleet_home()).startswith(str(tmp_path))
+
+
+# Review follow-ups ----------------------------------------------------------
+
+def test_functions_take_no_creator_override():
+    with pytest.raises(TypeError):
+        tk.create_ticket(good(), creator="human")
+    with pytest.raises(TypeError):
+        tk.approve_ticket("T-20250101-001", creator="human")
+
+
+def test_agent_cannot_become_human_through_library(monkeypatch):
+    monkeypatch.setenv("CLAUDECODE", "1")
+    assert make()["status"] == "proposed"
+
+
+def test_newest_first_beyond_999_same_second():
+    d = tk.tickets_dir()
+    d.mkdir(parents=True)
+    base = make()
+    for seq in (999, 1000):
+        t = dict(base, id=f"T-20250101-{seq:03d}", created_at="2025-01-01T00:00:00Z",
+                 updated_at="2025-01-01T00:00:00Z")
+        (d / f"{t['id']}.json").write_text(json.dumps(t))
+    ids = [t["id"] for t in tk.list_tickets()]
+    assert ids.index("T-20250101-1000") < ids.index("T-20250101-999")
+
+
+def test_invalid_utf8_and_bad_timestamp_rejected_on_read():
+    tid = make()["id"]
+    path = tk.tickets_dir() / f"{tid}.json"
+    good_data = json.loads(path.read_text())
+    good_data["created_at"] = "yesterday"
+    path.write_text(json.dumps(good_data))
+    with pytest.raises(tk.TicketError, match="created_at"):
+        tk.load_ticket(tid)
+    path.write_bytes(b"\xff\xfe")
+    with pytest.raises(tk.TicketError, match="cannot read"):
+        tk.load_ticket(tid)
+    r = run("show", tid)
+    assert r.returncode == 1 and "Traceback" not in r.stderr
