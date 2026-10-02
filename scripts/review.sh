@@ -63,7 +63,7 @@ fi
 mkdir -p .reviews
 full_sha="$(git rev-parse HEAD)"
 prompt="You are a code reviewer. Review the changes on branch '$branch' compared
-to '$base' (use: git diff $base...HEAD and git log $base..HEAD). You are
+to '$base' (use: git diff $base...$full_sha and git log $base..$full_sha). You are
 read-only: do not try to edit anything.
 
 Check for: bugs, missing error handling, security problems, secrets in the
@@ -87,6 +87,7 @@ SUMMARY: two or three sentences."
 run_review() {
   local kind="$1" model="$2"
   local out=".reviews/${branch//\//-}-$sha-$kind.md"
+  local rc=0
   case "$kind" in
     codex)
       command -v codex >/dev/null 2>&1 || { echo "Codex isn't installed. Install it, or run with REVIEWER=claude."; return 1; }
@@ -103,8 +104,10 @@ run_review() {
       #   attached (for example when an agent runs this script).
       # Progress goes to stderr; only the final review goes to stdout (and the file).
       # The header is written first, then a blank line, then the review.
+      # `|| rc=$?` keeps the reviewer's failure (pipefail) instead of losing it
+      # when this function is called inside an `||` list.
       { echo "Reviewer: Codex${model:+ ($model)}"; echo "Commit: $full_sha"; echo; \
-        codex exec -s read-only --ephemeral "${model_args[@]}" "$prompt" </dev/null; } | tee "$out"
+        codex exec -s read-only --ephemeral "${model_args[@]}" "$prompt" </dev/null; } | tee "$out" || rc=$?
       ;;
     claude)
       model="${model:-sonnet}"
@@ -114,10 +117,22 @@ run_review() {
         AGENT_RULES_OFF=1 claude -p "$prompt" \
           --model "$model" \
           --allowedTools "Read" "Grep" "Glob" "Bash(git diff *)" "Bash(git log *)" "Bash(git show *)" \
-          --disallowedTools "Edit" "Write" "NotebookEdit"; } | tee "$out"
+          --disallowedTools "Edit" "Write" "NotebookEdit"; } | tee "$out" || rc=$?
       ;;
   esac
   echo
+  if [[ "$rc" != "0" ]]; then
+    rm -f "$out"
+    echo "The $kind review failed (exit $rc), so no review was saved."
+    return 1
+  fi
+  # The review is only about the commit in its header: if the checkout moved
+  # while the reviewer ran, it does not count.
+  if [[ "$(git rev-parse HEAD)" != "$full_sha" ]]; then
+    rm -f "$out"
+    echo "HEAD changed during the $kind review, so it was discarded. Run it again."
+    return 1
+  fi
   echo "Saved to $out"
 }
 

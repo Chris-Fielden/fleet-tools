@@ -16,6 +16,7 @@ class FakeKaneo:
         self.columns: dict[str, list[dict]] = {}
         self.tasks: dict[str, dict] = {}
         self.labels: list[dict] = []
+        self.fail_labels = False             # every /labels request -> 500
         self.task_labels: dict[str, list[str]] = {}  # task id -> label ids
         self.requests: list[dict] = []
         self.fail_title: str | None = None   # POST /task with this in the title -> 500
@@ -51,6 +52,8 @@ class FakeKaneo:
     def route(self, method: str, path: str, query: dict, body):
         parts = path.strip("/").split("/")
         if parts[0] == "labels":
+            if self.fail_labels:
+                return 500, {"error": "boom"}
             if len(parts) == 1 and method == "GET":
                 return 200, [l for l in self.labels if l["workspaceId"] == query["workspaceId"][0]]
             if len(parts) == 1:

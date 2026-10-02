@@ -435,11 +435,15 @@ def sync(tickets: list[dict], dry_run: bool = False):
         for t in tickets:
             try:
                 before = dict(tasks)
-                # Re-read under the lock: the snapshot may be stale if another
-                # command changed this ticket while we waited.
-                outcome = _mirror(tk.load_ticket(t["id"]), board, tasks, dry_run)
-                if tasks != before:
-                    tk._write_atomic(map_path(), tasks)
+                try:
+                    # Re-read under the lock: the snapshot may be stale if another
+                    # command changed this ticket while we waited.
+                    outcome = _mirror(tk.load_ticket(t["id"]), board, tasks, dry_run)
+                finally:
+                    # Save a new card's id even if the label step failed after
+                    # it, or the retry would make a duplicate card.
+                    if tasks != before:
+                        tk._write_atomic(map_path(), tasks)
             except (KaneoError, tk.TicketError, tk.TicketInvalid) as exc:
                 outcome = f"error: {exc}"
             except OSError as exc:

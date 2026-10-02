@@ -69,6 +69,7 @@ def test_bad_rules_files_are_refused():
     for bad in ['[]', '{"default": "huge"}', '{"default": "low", "rules": [{"level": "low"}]}',
                 '{"default": "low", "rules": [{"level": "x", "glob": "a"}]}',
                 '{"default": "low", "rules": [{"level": "low", "glob": "a", "contains": "b"}]}',
+                '{"default": "low", "rules": 5}', '{"default": "low", "ticket_start": 5}',
                 'nope']:
         with pytest.raises(rk.RiskError):
             rk.load_rules(bad)
@@ -395,6 +396,38 @@ def test_review_sh_both_fails_if_one_cannot_run(task, env):
     assert set(rk.latest_reviews(task / ".reviews", git(task, "rev-parse", "HEAD"))) == {"claude"}
 
 
+def test_review_sh_both_fails_when_a_reviewer_dies_after_login(task, env):
+    commit_in(task, "fleet/x.py")
+    fake_tool(env / "bin", "codex")
+    broken = env / "bin" / "claude"
+    broken.write_text("#!/bin/sh\necho partial\nexit 3\n")
+    broken.chmod(broken.stat().st_mode | stat.S_IEXEC)
+    r = run_review(task, env / "bin", REVIEWER="both")
+    assert r.returncode == 1 and "claude review failed" in r.stdout
+    assert set(rk.latest_reviews(task / ".reviews", git(task, "rev-parse", "HEAD"))) == {"codex"}
+
+
+def test_review_sh_single_failure_is_a_failure(task, env):
+    commit_in(task, "fleet/x.py")
+    broken = env / "bin" / "codex"
+    broken.parent.mkdir(exist_ok=True)
+    broken.write_text('#!/bin/sh\n[ "$1" = login ] && exit 0\nexit 3\n')
+    broken.chmod(broken.stat().st_mode | stat.S_IEXEC)
+    assert run_review(task, env / "bin", REVIEWER="codex").returncode == 1
+
+
+def test_review_sh_discards_a_review_if_head_moved(task, env):
+    commit_in(task, "fleet/x.py")
+    slow = env / "bin" / "codex"
+    slow.parent.mkdir(exist_ok=True)
+    slow.write_text('#!/bin/sh\n[ "$1" = login ] && exit 0\n'
+                    f'git -C {task} commit --allow-empty -qm moved\necho "VERDICT: PASS"\n')
+    slow.chmod(slow.stat().st_mode | stat.S_IEXEC)
+    r = run_review(task, env / "bin", REVIEWER="codex")
+    assert r.returncode == 1 and "HEAD changed" in r.stdout
+    assert not list((task / ".reviews").glob("*.md"))
+
+
 def test_review_sh_rejects_unknown_reviewer(task, env):
     commit_in(task, "fleet/x.py")
     assert run_review(task, env / "bin", REVIEWER="nobody").returncode == 1
@@ -619,6 +652,18 @@ def test_sync_adds_the_label_to_an_old_card_and_dry_run_writes_nothing(kaneo):
     assert f"{tid}  updated" in run("sync").stdout
     assert kaneo.label_names(task_id) == ["risk: medium"]
     assert len(kaneo.labels) == 1  # the label is reused, not duplicated
+
+
+def test_label_failure_after_card_creation_does_not_duplicate_the_card(kaneo):
+    kaneo.fail_labels = True
+    r = run("new", *new_args())
+    tid = r.stdout.split()[0]
+    assert "not shown on Kaneo" in r.stderr and len(kaneo.tasks) == 1
+    assert json.loads((Path(os.environ["FLEET_HOME"]) / "kaneo-map.json").read_text())
+    kaneo.fail_labels = False
+    assert f"{tid}  updated" in run("sync").stdout
+    (task_id,) = kaneo.tasks
+    assert kaneo.label_names(task_id) == ["risk: medium"]
 
 
 def test_hook_blocks_agents_from_raising():
