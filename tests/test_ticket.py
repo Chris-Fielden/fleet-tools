@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 import json
 import re
 import subprocess
@@ -563,3 +564,38 @@ def test_old_proposed_build_ticket_can_still_be_approved():
     data["status"] = "proposed"
     path.write_text(json.dumps(data))
     assert tk.approve_ticket(t["id"])["status"] == "open"
+
+
+# --- agent rate limit ---------------------------------------------------------
+
+def _make(monkeypatch, who_var, n):
+    monkeypatch.setenv(who_var, "1")
+    return [tk.create_ticket({"type": "build", "repo": "fleet-tools", "branch": "task/demo",
+                              "title": f"t{i}", "body": "b"}) for i in range(n)]
+
+
+def test_agent_limited_to_five_new_tickets_per_hour(monkeypatch):
+    _make(monkeypatch, "CLAUDECODE", 5)
+    with pytest.raises(tk.TicketError, match="too many new tickets"):
+        _make(monkeypatch, "CLAUDECODE", 1)
+    assert len(tk.list_tickets()) == 5
+
+
+def test_rate_limit_is_per_agent_kind_and_not_for_humans(monkeypatch):
+    _make(monkeypatch, "CLAUDECODE", 5)
+    monkeypatch.delenv("CLAUDECODE")
+    _make(monkeypatch, "CODEX_SANDBOX", 5)       # codex has its own count
+    monkeypatch.delenv("CODEX_SANDBOX")
+    for i in range(6):                            # a human is never limited
+        tk.create_ticket({"type": "build", "repo": "fleet-tools", "branch": "task/demo",
+                          "title": f"h{i}", "body": "b"})
+    assert len(tk.list_tickets()) == 16
+
+
+def test_rate_limit_ignores_tickets_older_than_an_hour(monkeypatch):
+    made = _make(monkeypatch, "CLAUDECODE", 5)
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for t in made:
+        t["created_at"] = old
+        tk._write_atomic(tk._ticket_path(t["id"]), t)
+    assert _make(monkeypatch, "CLAUDECODE", 1)

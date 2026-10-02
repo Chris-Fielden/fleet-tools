@@ -849,3 +849,11 @@ def test_ineligible_urgent_does_not_block_normal(projects, capsys):
     normal = mk(branch="task/norm")
     out = dry(capsys)
     assert f"{urgent['id']}  skip:" in out and f"{normal['id']}  would launch" in out
+
+
+def test_starting_prompt_forbids_touching_the_real_store():
+    from fleet import launch
+    text = launch.PROMPT.format(id="BD-1")
+    assert "Never run ticket, idea or alert against the real store" in text
+    assert "ticket show" in text and "ticket new" in text
+    assert "temporary FLEET_HOME" in text
