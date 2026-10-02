@@ -8,11 +8,12 @@ here is left to Claude Code's normal permission prompts.
 
 import os
 import re
+import shlex
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import RULES_OFF, allow_silently, deny, read_input, repo_info  # noqa: E402
-from _common import fleet_dir  # noqa: E402
+from _common import fleet_dir, is_under_fleet, real_home  # noqa: E402
 
 PROTECTED_BRANCHES = {"main", "master"}
 
@@ -60,6 +61,130 @@ TICKET_HUMAN_ONLY = re.compile(_CMD_START + r"ticket\s+(close|approve|sync)\b")
 FLEET_PATH = re.compile(r"(^|[^\w.-])\.fleet(/|$|[\s'\";|&)])")
 
 
+HUMAN_ONLY_NAMES = {"idea", "alert", "dispatch", "ship"}
+TICKET_HUMAN_ONLY_SUBCOMMANDS = {"close", "approve", "sync"}
+# Programs that run another program: `env dispatch`, `command ship`, `sudo -u me idea`.
+WRAPPERS = {"env", "command", "exec", "nohup", "time", "setsid", "stdbuf", "sudo",
+            "doas", "nice", "ionice", "timeout", "xargs", "builtin", "chronic", "unbuffer"}
+WRAPPER_OPTS_WITH_VALUE = {"-u", "-g", "-n", "-c", "-s", "-k", "-S", "-C", "-I", "-L", "-P"}
+SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
+PYTHONS = re.compile(r"^python(\d+(\.\d+)?)?$")
+# Programs that walk a whole folder tree. Pointed at your home folder (or
+# above it), they would read ~/.fleet along the way.
+TREE_WALKERS = {"find", "rg", "ag", "fd", "fdfind", "tar", "zip", "rsync", "du", "tree"}
+RECURSIVE_FLAG = re.compile(r"^(-[a-zA-Z]*[rRa][a-zA-Z]*|--recursive|--archive|-d\s*recurse)$")
+SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", ";;", "|&", "{", "}"}
+
+
+def _segments(command):
+    """Split a shell command into simple commands, as lists of words. Quotes
+    are honoured, so 'dispatch' and "dispatch" count as dispatch."""
+    command = command.replace("`", " ; ").replace("$(", " ; ( ")
+    out = []
+    for line in command.splitlines():
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|(){}<>")
+        lexer.whitespace_split = True
+        current = []
+        for tok in lexer:
+            if tok in SEPARATORS:
+                if current:
+                    out.append(current)
+                current = []
+            else:
+                current.append(tok)
+        if current:
+            out.append(current)
+    return out
+
+
+def _unwrap(words):
+    """Strip VAR=value settings and wrapper programs. Returns (program, args),
+    or a nested command string for `bash -c "..."` as ("-c", [string])."""
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if re.match(r"^\w+=", w):
+            i += 1
+            continue
+        name = os.path.basename(w)
+        if name in WRAPPERS:
+            i += 1
+            if name == "timeout":
+                while i < len(words) and words[i].startswith("-"):
+                    i += 1
+                i += 1  # the duration
+                continue
+            while i < len(words) and (words[i].startswith("-") or re.match(r"^\w+=", words[i])):
+                i += 2 if words[i] in WRAPPER_OPTS_WITH_VALUE else 1
+            continue
+        if name in SHELLS or PYTHONS.match(name):
+            rest = words[i + 1:]
+            if "-c" in rest:
+                j = rest.index("-c")
+                return ("-c", rest[j + 1:j + 2]) if name in SHELLS else (name, rest)
+            k = 0
+            while k < len(rest) and rest[k].startswith("-"):
+                k += 1
+            if k < len(rest):  # `bash bin/ticket ...`, `python3 bin/dispatch ...`
+                return os.path.basename(rest[k]), rest[k + 1:]
+            return name, rest
+        return name, words[i + 1:]
+    return None, []
+
+
+def _resolve(token, cwd):
+    if token == "~" or token.startswith("~/"):
+        token = real_home() + token[1:]
+    if not os.path.isabs(token):
+        token = os.path.join(cwd, token)
+    return os.path.realpath(token)
+
+
+def _is_ancestor_of_fleet(path):
+    fleet = fleet_dir()
+    return fleet.startswith(path.rstrip(os.sep) + os.sep) or path == os.sep
+
+
+def scan_command(command, cwd, depth=0):
+    """Return a reason to block, or None. Looks at every simple command in the
+    line, including ones behind wrappers, in $( ), backticks and bash -c."""
+    if depth > 3:
+        return None
+    try:
+        segments = _segments(command)
+    except ValueError:
+        return None  # unbalanced quotes: bash would refuse it anyway
+    for words in segments:
+        name, args = _unwrap(words)
+        if name == "-c":
+            reason = scan_command(args[0] if args else "", cwd, depth + 1)
+            if reason:
+                return reason
+            continue
+        if name in HUMAN_ONLY_NAMES:
+            return ("human", name)
+        if name == "ticket" and args and args[0] in TICKET_HUMAN_ONLY_SUBCOMMANDS:
+            return ("human", f"ticket {args[0]}")
+        # Any word that is a path into ~/.fleet, symlinks included.
+        paths = []
+        for w in words:
+            value = w.split("=", 1)[1] if re.match(r"^\w+=", w) else w
+            if value.startswith(("/", "~", ".")) or "/" in value:
+                if is_under_fleet(value, cwd):
+                    return ("fleet", None)
+                if not value.startswith("-"):
+                    paths.append(value)
+        # Whole-tree searches started at your home folder or above.
+        recursive = name in TREE_WALKERS or (
+            name in {"grep", "egrep", "fgrep", "cp", "scp", "ls", "chmod", "chown"}
+            and any(RECURSIVE_FLAG.match(a) for a in args))
+        if recursive:
+            roots = [_resolve(p, cwd) for p in paths] or [os.path.realpath(cwd)]
+            if any(_is_ancestor_of_fleet(r) for r in roots):
+                return ("tree", name)
+    return None
+
+
 def main():
     if RULES_OFF:
         allow_silently()
@@ -95,20 +220,23 @@ def main():
     if ENV_WRITE.search(command):
         deny("Don't write .env files. Secrets never go in the repo; ask the human "
              "to put real values in place.")
-    m = FLEET_HUMAN_ONLY.search(command)
-    if m:
-        deny(f"Only the human runs `{m.group(1)}`. If you have an idea or found an "
-             "urgent problem, say so in your summary, or file a proposal with "
-             "`ticket new`. Tests must call these commands with a temporary "
-             "FLEET_HOME from inside pytest, not from the shell.")
-    m = TICKET_HUMAN_ONLY.search(command)
-    if m:
-        deny(f"Only the human runs `ticket {m.group(1)}`. You may use `ticket show`, "
-             "`ticket list` and `ticket new`.")
-    if FLEET_PATH.search(command) or fleet_dir() in command:
+    found = scan_command(command, cwd)
+    m = FLEET_HUMAN_ONLY.search(command) or TICKET_HUMAN_ONLY.search(command)
+    if (found and found[0] == "human") or m:
+        what = found[1] if found and found[0] == "human" else (
+            m.group(1) if m.re is FLEET_HUMAN_ONLY else f"ticket {m.group(1)}")
+        deny(f"Only the human runs `{what}`. If you have an idea or found an urgent "
+             "problem, say so in your summary, or file a proposal with `ticket new`. "
+             "You may use `ticket show`, `ticket list` and `ticket new`. Tests must "
+             "call fleet commands from inside pytest with a temporary FLEET_HOME.")
+    if (found and found[0] == "fleet") or FLEET_PATH.search(command) or fleet_dir() in command:
         deny("Don't touch the fleet's private folder (~/.fleet) directly: it holds "
              "the real tickets and the Kaneo key. Use `ticket show`, `ticket list` "
              "or `ticket new` instead. In tests, set FLEET_HOME to a temporary folder.")
+    if found and found[0] == "tree":
+        deny(f"Don't run `{found[1]}` across your home folder or above: it would read "
+             "the fleet's private folder (~/.fleet) on the way. Search inside the "
+             "project folder instead.")
 
     # Rules that depend on where Claude is standing.
     info = repo_info(cwd)
