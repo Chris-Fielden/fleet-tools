@@ -1,0 +1,32 @@
+{
+  "comment": "Risk levels. A file gets the HIGHEST level of any rule it matches; a change gets the highest level of its files. Patterns: '**' crosses folders, '*' and '?' stay inside one folder, and a pattern with no '/' matches the file name in any folder. 'contains' matches anywhere in the path, ignoring case. Unmatched files get 'default'. The rules are read from the base branch, so a branch cannot weaken its own rules.",
+  "default": "medium",
+  "rules": [
+    {"level": "high", "glob": "k8s/**"},
+    {"level": "high", "glob": ".claude/**"},
+    {"level": "high", "glob": ".codex/**"},
+    {"level": "high", "glob": "CLAUDE.md"},
+    {"level": "high", "glob": "AGENTS.md"},
+    {"level": "high", "glob": "scripts/check.sh"},
+    {"level": "high", "glob": "scripts/finish-task.sh"},
+    {"level": "high", "glob": "scripts/review.sh"},
+    {"level": "high", "glob": "scripts/new-task.sh"},
+    {"level": "high", "contains": "secret"},
+    {"level": "high", "contains": "auth"},
+    {"level": "high", "contains": ".env"},
+    {"level": "high", "glob": "requirements*.txt"},
+    {"level": "high", "glob": "pyproject.toml"},
+    {"level": "high", "glob": "package.json"},
+    {"level": "high", "glob": "go.mod"},
+    {"level": "high", "glob": "compose.yml"},
+    {"level": "high", "glob": "fleet/dispatch*.py"},
+    {"level": "high", "glob": "risk-rules.json"},
+    {"level": "high", "glob": "fleet/risk.py"},
+    {"level": "low", "glob": "docs/**"},
+    {"level": "low", "glob": "tests/**"}
+  ],
+  "ticket_start": {
+    "by_type": {"investigate": "low", "question": "low", "review": "low", "build": "medium", "fix": "medium"},
+    "by_repo": {"sandbox": "low"}
+  }
+}

@@ -15,6 +15,8 @@ class FakeKaneo:
         self.projects: list[dict] = []
         self.columns: dict[str, list[dict]] = {}
         self.tasks: dict[str, dict] = {}
+        self.labels: list[dict] = []
+        self.task_labels: dict[str, list[str]] = {}  # task id -> label ids
         self.requests: list[dict] = []
         self.fail_title: str | None = None   # POST /task with this in the title -> 500
         self.fail_column: str | None = None  # POST /column with this name -> 500 (once)
@@ -48,6 +50,23 @@ class FakeKaneo:
     # routing: returns (status, json)
     def route(self, method: str, path: str, query: dict, body):
         parts = path.strip("/").split("/")
+        if parts[0] == "labels":
+            if len(parts) == 1 and method == "GET":
+                return 200, [l for l in self.labels if l["workspaceId"] == query["workspaceId"][0]]
+            if len(parts) == 1:
+                lab = {"id": self.next_id("l"), "name": body["name"],
+                       "color": body.get("color"), "workspaceId": body["workspaceId"]}
+                self.labels.append(lab)
+                return 200, lab
+            if len(parts) == 3 and parts[2] in ("attach", "detach"):
+                ids = self.task_labels.setdefault(body["taskId"], [])
+                if parts[2] == "attach" and parts[1] not in ids:
+                    ids.append(parts[1])
+                if parts[2] == "detach" and parts[1] in ids:
+                    ids.remove(parts[1])
+                return 200, {"ok": True}
+        if parts[0] == "tasks" and len(parts) == 3 and parts[2] == "labels":
+            return 200, [l for l in self.labels if l["id"] in self.task_labels.get(parts[1], [])]
         if parts[0] == "project" and len(parts) == 1:
             if method == "GET":
                 return 200, [p for p in self.projects if p["workspaceId"] == query["workspaceId"][0]]
@@ -149,3 +168,6 @@ class FakeKaneo:
             do_GET = do_POST = do_PUT = do_DELETE = _do
 
         return H
+
+    def label_names(self, task_id: str) -> list[str]:
+        return [l["name"] for l in self.labels if l["id"] in self.task_labels.get(task_id, [])]

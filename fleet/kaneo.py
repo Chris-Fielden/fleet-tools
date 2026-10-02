@@ -34,6 +34,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from . import risk as rk
 from . import ticket as tk
 
 TIMEOUT = 10  # seconds per request
@@ -51,6 +52,8 @@ STATUS_COLUMN = {"proposed": "Proposed", "open": "To Do", "claimed": "In Progres
 LEGACY_COLUMNS = ("open", "claimed", "cancelled")
 PRIORITY = "no-priority"
 URGENT_PRIORITY = "urgent"
+RISK_LABEL_PREFIX = "risk: "
+RISK_LABEL_COLORS = {"low": "#2da44e", "medium": "#d4a72c", "high": "#cf222e"}
 
 
 class KaneoError(Exception):
@@ -239,6 +242,7 @@ class _Board:
         self.create = create
         self._projects: dict[str, str | None] = {}
         self._columns: dict[str, dict[str, dict]] = {}
+        self._labels: dict[str, str] | None = None
 
     def project_id(self, repo: str):
         if repo in self._projects:
@@ -295,6 +299,19 @@ class _Board:
             for i, k in enumerate(order):
                 cols[k]["position"] = i
 
+    def label_id(self, name: str) -> str:
+        """Workspace label by exact name; created if missing."""
+        if self._labels is None:
+            listing = self.c.request("GET", "/labels", query={"workspaceId": self.c.workspace_id})
+            self._labels = {l["name"]: l["id"] for l in listing or []
+                            if isinstance(l, dict) and "name" in l and "id" in l}
+        if name not in self._labels:
+            made = self.c.request("POST", "/labels", body={
+                "name": name, "workspaceId": self.c.workspace_id,
+                "color": RISK_LABEL_COLORS[name.removeprefix(RISK_LABEL_PREFIX)]})
+            self._labels[name] = made["id"]
+        return self._labels[name]
+
     def column_slug(self, project_id: str, t: dict):
         name = "Urgent" if t["status"] == "open" and is_urgent(t) else STATUS_COLUMN[t["status"]]
         col = self._columns_of(project_id).get(name.lower())
@@ -327,8 +344,8 @@ class _Board:
         return not any(col["tasks"] for col in columns)
 
 
-def _mirror(t: dict, board: _Board, tasks: dict, dry_run: bool) -> str:
-    """Mirror one ticket. Returns created, updated or unchanged (a dry run
+def _mirror_card(t: dict, board: _Board, tasks: dict, dry_run: bool) -> str:
+    """Mirror one ticket's card. Returns created, updated or unchanged (a dry run
     returns 'would create' / 'would update' / 'unchanged'). Mutates `tasks`
     (the id map) on create; the caller saves it."""
     c = board.c
@@ -370,6 +387,41 @@ def _mirror(t: dict, board: _Board, tasks: dict, dry_run: bool) -> str:
         "status": slug, "projectId": pid,
         "position": existing.get("position") or 0})
     return "updated"
+
+
+def risk_label(t: dict) -> str:
+    return f"{RISK_LABEL_PREFIX}{rk.stored_level(t)}"
+
+
+def _sync_label(t: dict, board: _Board, task_id: str, dry_run: bool) -> bool:
+    """Make the card carry exactly one risk label, the right one. Returns True
+    if it had to change (or, on a dry run, would have to)."""
+    c = board.c
+    want = risk_label(t)
+    have = c.request("GET", f"/tasks/{task_id}/labels") or []
+    names = {l["id"]: l.get("name") for l in have if isinstance(l, dict)}
+    stale = [i for i, n in names.items()
+             if isinstance(n, str) and n.startswith(RISK_LABEL_PREFIX) and n != want]
+    if want in names.values() and not stale:
+        return False
+    if dry_run:
+        return True
+    for label_id in stale:
+        c.request("POST", f"/labels/{label_id}/detach", body={"taskId": task_id})
+    if want not in names.values():
+        c.request("POST", f"/labels/{board.label_id(want)}/attach", body={"taskId": task_id})
+    return True
+
+
+def _mirror(t: dict, board: _Board, tasks: dict, dry_run: bool) -> str:
+    """Mirror one ticket: its card, then its risk label."""
+    outcome = _mirror_card(t, board, tasks, dry_run)
+    task_id = tasks.get(t["id"])
+    if task_id is None or outcome.startswith("would create"):
+        return outcome
+    if _sync_label(t, board, task_id, dry_run) and outcome == "unchanged":
+        return "would update" if dry_run else "updated"
+    return outcome
 
 
 def sync(tickets: list[dict], dry_run: bool = False):

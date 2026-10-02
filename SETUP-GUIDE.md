@@ -453,7 +453,11 @@ To choose the reviewer yourself:
 ```bash
 REVIEWER=codex scripts/review.sh
 REVIEWER=claude REVIEW_MODEL=opus scripts/review.sh
+REVIEWER=both scripts/review.sh      # Codex and a stronger Claude (opus); needed for high risk
 ```
+
+Each review is saved with the full id of the commit it covers. A review of an
+older commit does not count once you commit again: review again.
 
 ### 4. You merge
 
@@ -468,12 +472,24 @@ scripts/finish-task.sh weather-check
 The script:
 
 1. Re-runs the checks in the task folder.
-2. Shows the review verdict (and warns you if the latest commit wasn't reviewed).
+2. Works out the **risk level** (low, medium or high, from the files changed
+   and the ticket; rules in `risk-rules.json`) and shows why. **Refuses to
+   merge** unless the exact commit has a PASS review. High risk (Kubernetes,
+   `.claude/`, the scripts, secrets/auth, dependency files...) needs PASS
+   reviews from both Codex and Claude (`REVIEWER=both`).
 3. Lists the commits and files that will change.
-4. **Asks you to type `y`** before touching anything. Anything else cancels.
+4. **Asks you to type `y`** before touching anything (for high risk you type
+   the ticket id instead). Anything else cancels.
 5. Merges into `main` and runs the checks again on the merged result.
 6. Pushes `main` to GitHub, where ArgoCD picks it up, then deletes the task
    folder and branch.
+
+Real emergency with no review? `scripts/finish-task.sh NAME --emergency "why"`
+asks you to type `OVERRIDE`, then merges and records it in
+`~/.fleet/override.log` and the merge commit. Use it rarely.
+
+To make a ticket stricter by hand: `ticket risk ID --raise high` (levels only
+go up).
 
 If the checks fail after the merge, it stops *before* pushing, so nothing is
 deployed, and prints the command to undo the merge.

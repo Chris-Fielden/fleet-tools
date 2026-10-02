@@ -17,6 +17,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import risk as rk
+
 TYPES = ("build", "review", "fix", "question", "investigate")
 PRIORITIES = ("normal", "urgent")
 STATUSES = ("proposed", "open", "claimed", "done", "failed", "cancelled")
@@ -27,7 +29,7 @@ FIELDS = (
     "created_by", "assignee", "status", "verdict", "created_at", "updated_at",
 )
 # Optional fields: may be absent from a stored ticket.
-OPTIONAL_FIELDS = ("close_note", "base_commit", "seq", "priority")
+OPTIONAL_FIELDS = ("close_note", "base_commit", "seq", "priority", "risk")
 CLOSE_NOTE_MAX = 500
 BODY_MAX = 4000
 AGENTS = ("claude", "codex")
@@ -251,6 +253,8 @@ def validate_stored(data) -> list[str]:
     base = data.get("base_commit")
     if "base_commit" in data and (not _is_str(base) or not COMMIT_RE.fullmatch(base)):
         errors.append("base_commit must be a git commit id (7 to 40 hex characters)")
+    if "risk" in data and data["risk"] not in rk.LEVELS:
+        errors.append(f"risk must be one of: {', '.join(rk.LEVELS)}")
     seq = data.get("seq")
     if "seq" in data and (not isinstance(seq, int) or isinstance(seq, bool) or seq < 1):
         errors.append("seq must be a whole number, 1 or more")
@@ -427,6 +431,10 @@ def create_ticket(fields: dict) -> dict:
     # Investigate tickets always wait for approval; everything else starts
     # open (the human approves at merge).
     status = "proposed" if t == "investigate" else "open"
+    try:
+        start_risk = rk.starting_level(t, fields["repo"])
+    except rk.RiskError as exc:
+        raise TicketError(str(exc)) from None
 
     with _locked():
         _check_agent_rate(creator)
@@ -454,6 +462,7 @@ def create_ticket(fields: dict) -> dict:
             "created_at": now,
             "updated_at": now,
             "seq": seq,
+            "risk": start_risk,
         }
         if fields.get("priority") is not None:
             ticket["priority"] = fields["priority"]
@@ -531,3 +540,27 @@ def close_ticket(ticket_id: str, outcome: str, note: str | None = None) -> dict:
             raise TicketInvalid(errors)
     return set_status(ticket_id, CLOSE_OUTCOMES[outcome],
                       allowed_from=("open", "claimed"), close_note=note)
+
+
+def raise_risk(ticket_id: str, level: str) -> dict:
+    """Raise a ticket's stored risk level. Humans only, and only upwards:
+    nobody can lower a level."""
+    creator = current_creator()
+    if creator != "human":
+        raise TicketError(f"only a human can raise a ticket's risk level (running as {creator})")
+    if not ID_RE.fullmatch(ticket_id):
+        raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
+    if level not in rk.LEVELS:
+        raise TicketInvalid([f"level must be one of: {', '.join(rk.LEVELS)}"])
+    with _locked():
+        ticket = load_ticket(ticket_id)
+        try:
+            current = rk.stored_level(ticket)
+        except rk.RiskError as exc:
+            raise TicketError(str(exc)) from None
+        if rk.rank(level) <= rk.rank(current):
+            raise TicketError(f"{ticket_id} is already {current}; a risk level can only be raised")
+        ticket["risk"] = level
+        ticket["updated_at"] = _now()
+        _write_atomic(_ticket_path(ticket_id), ticket)
+    return ticket

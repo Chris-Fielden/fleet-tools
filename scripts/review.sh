@@ -10,11 +10,17 @@
 #                   Run by hand, it uses Codex if installed, otherwise Claude.
 #   REVIEWER=codex  OpenAI's Codex CLI (signs in with your ChatGPT account)
 #   REVIEWER=claude A separate Claude session on another model
-# Optional: REVIEW_MODEL=<name> picks the model for that reviewer.
+#   REVIEWER=both   Codex AND Claude, one after the other. High-risk changes
+#                   need a PASS from both before the human can merge them.
+#                   Claude defaults to the stronger model "opus" here.
+# Optional: REVIEW_MODEL=<name> picks the model for that reviewer (with
+#   REVIEWER=both, REVIEW_MODEL sets Claude's model and REVIEW_CODEX_MODEL sets Codex's).
 #   Examples:  REVIEWER=claude REVIEW_MODEL=opus scripts/review.sh
 #              REVIEWER=codex scripts/review.sh
 #
-# The review is printed and also saved in .reviews/ (ignored by git).
+# Each review is printed and also saved in .reviews/ (ignored by git), with a
+# "Commit:" header holding the full id of the commit reviewed. The merge script
+# only accepts a review of the exact commit it is merging.
 set -euo pipefail
 
 root="$(git rev-parse --show-toplevel)"
@@ -55,8 +61,7 @@ if [[ "$reviewer" == "auto" ]]; then
 fi
 
 mkdir -p .reviews
-out=".reviews/${branch//\//-}-$sha.md"
-
+full_sha="$(git rev-parse HEAD)"
 prompt="You are a code reviewer. Review the changes on branch '$branch' compared
 to '$base' (use: git diff $base...HEAD and git log $base..HEAD). You are
 read-only: do not try to edit anything.
@@ -78,39 +83,57 @@ MUST FIX: numbered list (empty if none). Each item: file, line, problem, fix.
 SHOULD FIX: numbered list of smaller suggestions.
 SUMMARY: two or three sentences."
 
+# run_review <codex|claude> <model or empty>
+run_review() {
+  local kind="$1" model="$2"
+  local out=".reviews/${branch//\//-}-$sha-$kind.md"
+  case "$kind" in
+    codex)
+      command -v codex >/dev/null 2>&1 || { echo "Codex isn't installed. Install it, or run with REVIEWER=claude."; return 1; }
+      if ! codex login status >/dev/null 2>&1; then
+        echo "Codex isn't signed in. Run 'codex login' once (it uses your ChatGPT account), or run with REVIEWER=claude."
+        return 1
+      fi
+      echo "Reviewing $branch @ $sha with Codex${model:+ ($model)}..."
+      local model_args=()
+      [[ -n "$model" ]] && model_args=(-m "$model")
+      # -s read-only: Codex may read files and run read-only commands, never edit.
+      # --ephemeral: don't keep a Codex session file for this one-off review.
+      # </dev/null: without it, Codex waits for extra input when no terminal is
+      #   attached (for example when an agent runs this script).
+      # Progress goes to stderr; only the final review goes to stdout (and the file).
+      # The header is written first, then a blank line, then the review.
+      { echo "Reviewer: Codex${model:+ ($model)}"; echo "Commit: $full_sha"; echo; \
+        codex exec -s read-only --ephemeral "${model_args[@]}" "$prompt" </dev/null; } | tee "$out"
+      ;;
+    claude)
+      model="${model:-sonnet}"
+      echo "Reviewing $branch @ $sha with Claude ($model)..."
+      # AGENT_RULES_OFF=1: the reviewer is read-only, so the Stop gate isn't needed.
+      { echo "Reviewer: Claude ($model)"; echo "Commit: $full_sha"; echo; \
+        AGENT_RULES_OFF=1 claude -p "$prompt" \
+          --model "$model" \
+          --allowedTools "Read" "Grep" "Glob" "Bash(git diff *)" "Bash(git log *)" "Bash(git show *)" \
+          --disallowedTools "Edit" "Write" "NotebookEdit"; } | tee "$out"
+      ;;
+  esac
+  echo
+  echo "Saved to $out"
+}
+
 case "$reviewer" in
-  codex)
-    command -v codex >/dev/null 2>&1 || { echo "Codex isn't installed. Install it, or run with REVIEWER=claude."; exit 1; }
-    if ! codex login status >/dev/null 2>&1; then
-      echo "Codex isn't signed in. Run 'codex login' once (it uses your ChatGPT account), or run with REVIEWER=claude."
-      exit 1
-    fi
-    echo "Reviewing $branch @ $sha with Codex${REVIEW_MODEL:+ ($REVIEW_MODEL)}..."
-    model_args=()
-    [[ -n "${REVIEW_MODEL:-}" ]] && model_args=(-m "$REVIEW_MODEL")
-    # -s read-only: Codex may read files and run read-only commands, never edit.
-    # --ephemeral: don't keep a Codex session file for this one-off review.
-    # </dev/null: without it, Codex waits for extra input when no terminal is
-    #   attached (for example when an agent runs this script).
-    # Progress goes to stderr; only the final review goes to stdout (and the file).
-    { echo "Reviewer: Codex${REVIEW_MODEL:+ ($REVIEW_MODEL)}"; echo; \
-      codex exec -s read-only --ephemeral "${model_args[@]}" "$prompt" </dev/null; } | tee "$out"
-    ;;
-  claude)
-    model="${REVIEW_MODEL:-sonnet}"
-    echo "Reviewing $branch @ $sha with Claude ($model)..."
-    # AGENT_RULES_OFF=1: the reviewer is read-only, so the Stop gate isn't needed.
-    { echo "Reviewer: Claude ($model)"; echo; \
-      AGENT_RULES_OFF=1 claude -p "$prompt" \
-        --model "$model" \
-        --allowedTools "Read" "Grep" "Glob" "Bash(git diff *)" "Bash(git log *)" "Bash(git show *)" \
-        --disallowedTools "Edit" "Write" "NotebookEdit"; } | tee "$out"
+  codex)  run_review codex "${REVIEW_MODEL:-}" ;;
+  claude) run_review claude "${REVIEW_MODEL:-}" ;;
+  both)
+    # Run both even if the first fails, so one outage doesn't hide the other
+    # review; fail overall if either could not run.
+    status=0
+    run_review codex "${REVIEW_CODEX_MODEL:-}" || status=1
+    run_review claude "${REVIEW_MODEL:-opus}" || status=1
+    exit $status
     ;;
   *)
-    echo "Unknown REVIEWER '$reviewer'. Use auto, codex or claude."
+    echo "Unknown REVIEWER '$reviewer'. Use auto, codex, claude or both."
     exit 1
     ;;
 esac
-
-echo
-echo "Saved to $out"
