@@ -1,0 +1,29 @@
+{
+  "found_at": [
+    "payload",
+    "rate_limits"
+  ],
+  "rate_limits": {
+    "limit_id": "codex",
+    "limit_name": null,
+    "primary": {
+      "used_percent": 0.0,
+      "window_minutes": 300,
+      "resets_at": 1790941837
+    },
+    "secondary": {
+      "used_percent": 0.0,
+      "window_minutes": 10080,
+      "resets_at": 1791528637
+    },
+    "credits": {
+      "has_credits": false,
+      "unlimited": false,
+      "balance": "0"
+    },
+    "individual_limit": null,
+    "spend_control_reached": null,
+    "plan_type": "plus",
+    "rate_limit_reached_type": null
+  }
+}
