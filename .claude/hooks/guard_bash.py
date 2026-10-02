@@ -11,6 +11,17 @@ not a wall against a determined program: anything running as your user can
 find another route to your own files. The real wall is running agents as a
 separate Linux user that cannot read ~/.fleet at all (planned for the tower).
 When a command is too unusual to analyse safely, these rules refuse it.
+
+Known limits (by design; the separate-user setup is the fix for these):
+- Code the hook can't see: a script written and then run in a later step,
+  `source`/`.` of a file, shell functions and aliases, and programs started
+  from inside another language (for example Python's subprocess).
+- Rarely used shell syntax: case statements, here-documents, arrays and
+  arithmetic. Simple if/while/for, subshells, $( ), backticks, eval and
+  bash -c are understood.
+- Mentions of ~/.fleet in plain text (for example a commit message) are
+  refused too. That is deliberate: it is cheaper than telling text and paths
+  apart, and the message says why.
 """
 
 import os
@@ -81,6 +92,8 @@ PYTHONS = re.compile(r"^python(\d+(\.\d+)?)?$")
 TREE_WALKERS = {"find", "rg", "ag", "fd", "fdfind", "tar", "zip", "rsync", "du", "tree"}
 RECURSIVE_FLAG = re.compile(r"^(-[a-zA-Z]*[rRa][a-zA-Z]*|--recursive|--archive|-d\s*recurse)$")
 SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", ";;", "|&", "{", "}"}
+# Shell keywords that can sit in front of a command: `if ship ...; then`.
+KEYWORDS = {"if", "then", "else", "elif", "while", "until", "do", "!", "{", "}", "fi", "done"}
 
 
 def _segments(command):
@@ -93,7 +106,9 @@ def _segments(command):
     lexer.whitespace_split = True
     out, current = [], []
     for tok in lexer:
-        if tok in SEPARATORS or set(tok) <= {"\n"}:
+        # shlex glues neighbouring punctuation together (");" or "&&("), so any
+        # all-punctuation token containing a separator character ends a command.
+        if tok in SEPARATORS or (set(tok) <= set(";&|(){}<>\n") and set(tok) & set(";&|(){}\n")):
             if current:
                 out.append(current)
             current = []
@@ -110,6 +125,13 @@ def _unwrap(words):
     i = 0
     while i < len(words):
         w = words[i]
+        if w in KEYWORDS:
+            i += 1
+            continue
+        if w == "for":  # for NAME in WORDS ... ; the loop body comes later
+            return None, []
+        if w == "eval":
+            return ("-c", [" ".join(words[i + 1:])])
         if re.match(r"^\w+=", w):
             i += 1
             continue
@@ -178,6 +200,7 @@ def scan_command(command, cwd, depth=0):
             return ("odd", None)
         return None
     cwd_known = True
+    places = [cwd]  # every folder a later command might run in
     for words in segments:
         name, args = _unwrap(words)
         if name == "-c":
@@ -195,8 +218,10 @@ def scan_command(command, cwd, depth=0):
             if expanded is None:
                 cwd_known = False
             else:
-                cwd = _resolve(expanded, cwd)
-            if cwd_known and is_under_fleet(cwd):
+                # Keep the old folders too: a cd inside ( ) doesn't last.
+                places = places + [_resolve(expanded, p) for p in places]
+                cwd = places[-1]
+            if cwd_known and any(is_under_fleet(p) for p in places):
                 return ("fleet", None)
             continue
         # Every operand, including bare names like `sneaky`, is checked as a
@@ -210,7 +235,7 @@ def scan_command(command, cwd, depth=0):
             if expanded is None:
                 operands.append(None)  # can't tell where it points
                 continue
-            if cwd_known and is_under_fleet(expanded, cwd):
+            if cwd_known and any(is_under_fleet(expanded, p) for p in places):
                 return ("fleet", None)
             if not cwd_known and is_under_fleet(expanded, "/"):
                 return ("fleet", None)
@@ -227,11 +252,12 @@ def scan_command(command, cwd, depth=0):
                     continue
                 o = _expand(a)
                 if o is None or o.startswith(("/", ".", "~")) or "/" in o or (
-                        cwd_known and os.path.exists(os.path.join(cwd, o))):
+                        cwd_known and any(os.path.exists(os.path.join(p, o)) for p in places)):
                     paths.append(o)
             if any(o is None for o in paths) or not cwd_known:
                 return ("tree", name)
-            roots = [_resolve(o, cwd) for o in paths] or [os.path.realpath(cwd)]
+            roots = ([_resolve(o, p) for o in paths for p in places]
+                     or [os.path.realpath(p) for p in places])
             if any(_is_ancestor_of_fleet(r) for r in roots):
                 return ("tree", name)
     return None

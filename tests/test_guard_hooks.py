@@ -299,3 +299,32 @@ def test_cd_inside_project_allowed(tmp_path, command):
     (tmp_path / "fleet").mkdir()
     (tmp_path / "tests").mkdir()
     assert bash(command, tmp_path) is None
+
+
+# --- third review round ------------------------------------------------------------
+
+@pytest.mark.parametrize("command", [
+    "if command ship BD-4; then true; fi",
+    "while dispatch --once; do sleep 60; done",
+    "! ticket sync",
+    "{ idea something; }",
+    "eval 'dispatch --once'",
+    "eval dispatch --once",
+])
+def test_keywords_and_eval_do_not_hide_commands(tmp_path, command):
+    reason = bash(command, tmp_path)
+    assert reason and "Only the human runs" in reason
+
+
+@pytest.mark.parametrize("command", [
+    "cd ~ && (cd /tmp); rg --hidden key",
+    "cd ~; (cd /tmp && true); grep -r key .",
+])
+def test_subshell_cd_does_not_hide_home_search(tmp_path, command):
+    reason = bash(command, tmp_path)
+    assert reason and "~/.fleet" in reason
+
+
+def test_plain_if_and_loops_still_allowed(tmp_path):
+    assert bash("if test -f README.md; then cat README.md; fi", tmp_path) is None
+    assert bash("for f in tests/*.py; do python3 -m py_compile $f; done", tmp_path) is None
