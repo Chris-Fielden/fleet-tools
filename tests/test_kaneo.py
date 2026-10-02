@@ -284,3 +284,28 @@ def test_card_in_the_wrong_project_is_moved_back(kaneo):
     assert f"{tid}  updated" in r.stdout
     assert only_task(kaneo)["projectId"] == right
     assert f"{tid}  unchanged" in run("sync").stdout
+
+
+def test_existing_final_column_that_is_not_final_gets_fixed(kaneo):
+    tid = new_ticket()
+    edit_ticket(tid, status="done")
+    pid = kaneo.projects[0]["id"]
+    kaneo.columns[pid].append({"id": "c-old", "projectId": pid, "name": "done",
+                               "slug": "done", "isFinal": False})
+    kaneo.requests.clear()
+    assert run("sync", "--dry-run").returncode == 0
+    assert kaneo.writes == []
+    run("sync")
+    done = [c for c in kaneo.columns[pid] if c["name"] == "done"]
+    assert len(done) == 1 and done[0]["isFinal"] is True
+
+
+def test_sync_uses_the_ticket_as_it_is_now_not_a_stale_snapshot(kaneo, monkeypatch):
+    from fleet import kaneo as kn
+    from fleet import ticket as tk
+    tid = new_ticket()
+    stale = tk.load_ticket(tid)
+    edit_ticket(tid, status="claimed")
+    outcomes = dict(kn.sync([stale]))
+    assert outcomes[tid] == "updated"
+    assert only_task(kaneo)["status"] == "claimed"

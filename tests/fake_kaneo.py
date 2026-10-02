@@ -55,6 +55,13 @@ class FakeKaneo:
             self.projects.append(p)
             self.columns[p["id"]] = []
             return 200, p
+        if parts[0] == "column" and len(parts) == 2 and method == "PUT":
+            for cols in self.columns.values():
+                for c in cols:
+                    if c["id"] == parts[1]:
+                        c.update(body)
+                        return 200, c
+            return 404, {"error": "not found"}
         if parts[0] == "column" and len(parts) == 2:
             cols = self.columns[parts[1]]
             if method == "GET":

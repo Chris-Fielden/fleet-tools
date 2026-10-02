@@ -8,6 +8,7 @@ Kaneo endpoints used (https://kaneo.app/docs/llms.txt, API reference):
   POST /project                   create a project (name, workspaceId, icon, slug)
   GET  /column/{projectId}        list a project's columns
   POST /column/{projectId}        create a column (name, isFinal)
+  PUT  /column/{id}               mark an existing done/cancelled column final
   POST /task/{projectId}          create a task (title, description, priority, status)
   GET  /task/{id}?view=detail     read a task, to compare before updating
   PUT  /task/{id}                 update a task (title, description, priority,
@@ -211,7 +212,7 @@ class _Board:
         self.c = client
         self.create = create
         self._projects: dict[str, str | None] = {}
-        self._columns: dict[str, dict[str, str]] = {}
+        self._columns: dict[str, dict[str, dict]] = {}
 
     def project_id(self, repo: str):
         if repo in self._projects:
@@ -234,13 +235,18 @@ class _Board:
         cols = self._columns.get(project_id)
         if cols is None:
             listing = self.c.request("GET", f"/column/{project_id}")
-            cols = {c["name"]: c["slug"] for c in listing or [] if isinstance(c, dict)}
+            cols = {c["name"]: c for c in listing or [] if isinstance(c, dict)}
             self._columns[project_id] = cols
-        if status not in cols and self.create:
-            made = self.c.request("POST", f"/column/{project_id}", body={
-                "name": status, "isFinal": status in FINAL_STATUSES})
-            cols[status] = made["slug"]
-        return cols.get(status)
+        final = status in FINAL_STATUSES
+        if status not in cols:
+            if not self.create:
+                return None
+            cols[status] = self.c.request("POST", f"/column/{project_id}", body={
+                "name": status, "isFinal": final})
+        elif final and not cols[status].get("isFinal") and self.create:
+            self.c.request("PUT", f"/column/{cols[status]['id']}", body={"isFinal": True})
+            cols[status]["isFinal"] = True
+        return cols[status]["slug"]
 
 
 def _mirror(t: dict, board: _Board, tasks: dict, dry_run: bool) -> str:
@@ -298,10 +304,12 @@ def sync(tickets: list[dict], dry_run: bool = False):
         for t in tickets:
             try:
                 before = dict(tasks)
-                outcome = _mirror(t, board, tasks, dry_run)
+                # Re-read under the lock: the snapshot may be stale if another
+                # command changed this ticket while we waited.
+                outcome = _mirror(tk.load_ticket(t["id"]), board, tasks, dry_run)
                 if tasks != before:
                     tk._write_atomic(map_path(), tasks)
-            except KaneoError as exc:
+            except (KaneoError, tk.TicketError, tk.TicketInvalid) as exc:
                 outcome = f"error: {exc}"
             except OSError as exc:
                 outcome = (f"error: could not save {map_path().name} ({exc.strerror or 'I/O error'}); "
