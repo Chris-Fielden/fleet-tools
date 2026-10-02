@@ -646,3 +646,54 @@ def test_herdr_reply_that_is_not_an_object(projects, herdr_log, monkeypatch, env
     monkeypatch.setenv("FLEET_HERDR", str(stub))
     assert dispatch_main(["--once"]) == 1
     assert tk.load_ticket(t["id"])["status"] == "open"
+
+
+def test_fix_with_branch_but_no_folder_gets_a_checkout_and_keeps_branch_on_failure(
+        projects, herdr_log, monkeypatch):
+    repo, fix = _fix_setup(projects)
+    git(repo, "branch", "task/job")
+    monkeypatch.setenv("FAKE_HERDR_STATE", "idle")
+    assert dispatch_main(["--once"]) == 1
+    assert not (repo / ".worktrees" / "job").exists()
+    assert git(repo, "branch", "--list", "task/job").strip() == "task/job"  # not ours to delete
+    monkeypatch.setenv("FAKE_HERDR_STATE", "working")
+    assert dispatch_main(["--once"]) == 0
+    assert (repo / ".worktrees" / "job").is_dir()
+    assert tk.load_ticket(fix["id"])["status"] == "claimed"
+
+
+def test_cleanup_uses_the_folders_own_starting_commit(projects, herdr_log, monkeypatch):
+    repo = real_repo(projects)
+    t = mk(branch="task/job")
+    monkeypatch.setenv("FAKE_HERDR_STATE", "idle")
+    real = __import__("fleet.launch", fromlist=["x"]).make_worktree
+
+    def advancing(d):  # main moves while new-task.sh runs (e.g. a fetch)
+        git(repo, "commit", "-q", "--allow-empty", "-m", "moved")
+        return real(d)
+    monkeypatch.setattr("fleet.launch.make_worktree", advancing)
+    assert dispatch_main(["--once"]) == 1
+    assert not (repo / ".worktrees" / "job").exists()
+    assert tk.load_ticket(t["id"])["status"] == "open"
+
+
+def test_tab_that_wont_close_keeps_the_claim(projects, herdr_log, monkeypatch, env):
+    repo = real_repo(projects)
+    t = mk(branch="task/job")
+    monkeypatch.setenv("FAKE_HERDR_STATE", "idle")
+    wrapper = env / "no-close-herdr"
+    wrapper.write_text(f"#!/bin/sh\n[ \"$1 $2\" = \"tab close\" ] && exit 1\n"
+                       f"exec {sys.executable} {Path(__file__).parent / 'fake_herdr.py'} \"$@\"\n")
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("FLEET_HERDR", str(wrapper))
+    assert dispatch_main(["--once"]) == 1
+    assert tk.load_ticket(t["id"])["status"] == "claimed"
+    assert (repo / ".worktrees" / "job").is_dir()
+
+
+def test_bad_fleet_herdr_value_rolls_back(projects, herdr_log, monkeypatch):
+    real_repo(projects)
+    t = mk(branch="task/job")
+    monkeypatch.setenv("FLEET_HERDR", "'unclosed")
+    assert dispatch_main(["--once"]) == 1
+    assert tk.load_ticket(t["id"])["status"] == "open"

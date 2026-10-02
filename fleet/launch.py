@@ -38,11 +38,19 @@ class LaunchError(Exception):
     pass
 
 
+class AgentMayBeRunning(LaunchError):
+    """The launch failed but its tab could not be closed, so the agent might
+    still be running. Nothing may be cleaned up and the claim must stay."""
+
+
 # --- herdr -------------------------------------------------------------------
 
 def herdr(*args: str) -> dict:
     """Run one herdr command and return its parsed JSON."""
-    cmd = shlex.split(os.environ.get("FLEET_HERDR", "herdr")) + list(args)
+    try:
+        cmd = shlex.split(os.environ.get("FLEET_HERDR", "herdr")) + list(args)
+    except ValueError:
+        raise LaunchError("FLEET_HERDR is not a valid command line") from None
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -137,34 +145,51 @@ def check_reusable(d: dp.Decision, folder: Path) -> None:
         raise LaunchError(f"{folder} is on {branch or 'no branch'}, not {d.ticket['branch']}")
 
 
-def make_worktree(d: dp.Decision) -> tuple[Path, bool]:
-    """Create the task folder (a fix ticket reuses a valid existing one).
-    Returns the folder and whether this call created it."""
+def make_worktree(d: dp.Decision) -> tuple[Path, str]:
+    """Create the task folder. A fix ticket reuses a valid existing folder, or
+    gets a new folder on its existing branch. Returns the folder and what this
+    call made: "nothing", "checkout" (a folder on an existing branch) or
+    "branch" (a new branch and folder)."""
     folder = d.repo_path / ".worktrees" / d.name
-    if d.ticket["type"] == "fix" and (folder.exists() or folder.is_symlink()):
-        check_reusable(d, folder)
-        return folder, False
+    branch = d.ticket["branch"]
+    if d.ticket["type"] == "fix":
+        if folder.exists() or folder.is_symlink():
+            check_reusable(d, folder)
+            return folder, "nothing"
+        if dp.branch_exists(d.repo_path, branch):
+            proc = _run(["git", "worktree", "add", str(folder), branch], d.repo_path)
+            if proc.returncode != 0:
+                raise LaunchError(f"git worktree add for {branch} failed")
+            return folder, "checkout"
     proc = _run(["bash", "scripts/new-task.sh", d.name], d.repo_path)
     if proc.returncode != 0 or not folder.is_dir():
         tail = (proc.stdout + proc.stderr).strip().splitlines()
         raise LaunchError(f"scripts/new-task.sh {d.name} failed"
                           + (f": {tail[-1][:200]}" if tail else ""))
-    return folder, True
+    return folder, "branch"
 
 
-def discard_new_worktree(d: dp.Decision, folder: Path, base: str) -> None:
-    """After a failed launch, remove the folder and branch this run created so
-    the ticket can be retried. Plain (non-forced) git commands only, and only
-    if the branch is still exactly at the base commit."""
-    if _git_out(d.repo_path, "rev-parse", d.ticket["branch"]) != base:
-        dp.log("CLEANUP_SKIPPED", f"{d.ticket['id']} {d.ticket['branch']} has new commits")
+def discard_new_worktree(d: dp.Decision, folder: Path, made: str, initial: str | None) -> None:
+    """After a failed launch, remove what this run created so the ticket can be
+    retried: the folder, and the branch too if this run made it. Plain
+    (non-forced) git commands only, and only if the folder is still exactly at
+    the commit it was created at."""
+    ticket = d.ticket["id"]
+    if initial is None or _git_out(folder, "rev-parse", "HEAD") != initial:
+        dp.log("CLEANUP_SKIPPED", f"{ticket} {d.name} has new commits or cannot be checked")
         return
-    for cmd in (["worktree", "remove", str(folder)], ["branch", "-d", d.ticket["branch"]]):
-        proc = _run(["git", *cmd], d.repo_path)
-        if proc.returncode != 0:
-            dp.log("CLEANUP_SKIPPED", f"{d.ticket['id']} git {cmd[0]} failed")
+    steps = [["worktree", "remove", str(folder)]]
+    if made == "branch":
+        steps.append(["branch", "-d", d.ticket["branch"]])
+    for cmd in steps:
+        try:
+            proc = _run(["git", *cmd], d.repo_path)
+        except LaunchError:
+            proc = None
+        if proc is None or proc.returncode != 0:
+            dp.log("CLEANUP_SKIPPED", f"{ticket} git {cmd[0]} failed")
             return
-    dp.log("CLEANUP", f"{d.ticket['id']} removed {d.worktree} and {d.ticket['branch']}")
+    dp.log("CLEANUP", f"{ticket} removed {d.worktree}" + (" and its branch" if made == "branch" else ""))
 
 
 def record_writer(folder: Path, agent: str, ticket_id: str) -> None:
@@ -199,6 +224,7 @@ def start_agent(d: dp.Decision, folder: Path, workspace: str, warn) -> str:
             herdr("tab", "close", tab)
         except LaunchError as exc:
             warn(f"could not close tab {tab}: {exc}")
+            raise AgentMayBeRunning(f"tab {tab} could not be closed") from None
         raise
     return tab
 
@@ -214,14 +240,19 @@ def launch(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
                             assignee=d.agent, base_commit=base)
     dp.log("CLAIMED", f"{t['id']} {d.agent} {t['branch']} base {base[:12]}")
     kaneo.mirror_quietly(claimed, warn)
-    folder, created = None, False
+    folder, made, initial = None, "nothing", None
     try:
-        folder, created = make_worktree(d)
+        folder, made = make_worktree(d)
+        initial = _git_out(folder, "rev-parse", "HEAD")
         record_writer(folder, d.agent, t["id"])
         tab = start_agent(d, folder, find_workspace(settings["herdr_workspace"]), warn)
+    except AgentMayBeRunning as exc:
+        dp.log("LAUNCH_FAILED", f"{t['id']} {exc}; ticket stays claimed, needs a human")
+        return 1, (f"{t['id']}  launch failed: {exc}. The agent may still be running, so the "
+                   "ticket stays claimed; close the tab by hand, then `ticket close` it")
     except (LaunchError, OSError, subprocess.TimeoutExpired) as exc:
-        if created:
-            discard_new_worktree(d, folder, base)
+        if made != "nothing":
+            discard_new_worktree(d, folder, made, initial)
         reopened = tk.set_status(t["id"], "open", allowed_from=("claimed",), assignee=None)
         kaneo.mirror_quietly(reopened, warn)
         dp.log("LAUNCH_FAILED", f"{t['id']} {exc}")
