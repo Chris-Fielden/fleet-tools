@@ -36,7 +36,7 @@ launching, no hooks in this phase.
 | repo | string | 1 to 64 characters: letters, digits, `.`, `_`, `-`. |
 | branch | string | Must start with `task/`, then 1 to 64 characters: lowercase letters, digits, `-`. |
 | commit | string or null | Required for review, otherwise null. 7 to 40 lowercase hex characters. |
-| parent | string or null | Required for review and fix; must be the id of an existing ticket. Optional for question; null for build. |
+| parent | string or null | Required for review and fix; must be the id of an existing ticket. Optional for question; for build, null, or the id of an investigate ticket (a follow-up). |
 | title | string | 1 to 100 characters, a single line. |
 | body | string | 1 to 4,000 characters. |
 | created_by | string | human, claude or codex. Set by the tool, never by the caller (see below). |

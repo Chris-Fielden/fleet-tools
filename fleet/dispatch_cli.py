@@ -42,8 +42,7 @@ def _cmd_dry_run(settings: dict) -> int:
         if d.skip:
             dp.log("DECISION", f"{d.ticket['id']} skip: {d.skip}")
         else:
-            dp.log("DECISION", f"{d.ticket['id']} would launch {d.agent} "
-                               f"({d.model or 'default'}) in {d.worktree}")
+            dp.log("DECISION", d.line())
     return 0
 
 

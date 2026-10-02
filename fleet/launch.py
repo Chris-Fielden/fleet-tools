@@ -128,12 +128,17 @@ def find_workspace(name: str) -> str:
     raise LaunchError(f"herdr has no workspace '{name}'")
 
 
-def agent_state(name: str, timeout: float = 120) -> str | None:
+def agent_listed(name: str, timeout: float = 120) -> tuple[bool, str | None]:
+    """(is the agent listed, its state or None if it has no readable state)."""
     for a in _dicts(herdr("agent", "list", timeout=timeout)):
         if a.get("name") == name:
             state = a.get("status", a.get("agent_status", a.get("state")))
-            return state if isinstance(state, str) else None
-    return None
+            return True, state if isinstance(state, str) else None
+    return False, None
+
+
+def agent_state(name: str, timeout: float = 120) -> str | None:
+    return agent_listed(name, timeout)[1]
 
 
 def wait_until_working(name: str) -> None:
@@ -355,8 +360,8 @@ def launch_research(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
     before = t["status"]
     claimed = tk.set_status(t["id"], "claimed", allowed_from=("proposed", "open"), assignee=d.agent)
     kaneo.mirror_quietly(claimed, warn)
-    dp.log("CLAIMED", f"{t['id']} {d.agent} investigation")
     try:
+        dp.log("CLAIMED", f"{t['id']} {d.agent} investigation")
         tab = start_agent(d, research_folder(t["id"]), find_workspace(settings["herdr_workspace"]), warn)
     except AgentMayBeRunning as exc:
         _safe_log("LAUNCH_FAILED", f"{t['id']} {exc}; ticket stays claimed, needs a human")
@@ -381,11 +386,12 @@ def finish_investigations(tickets: list[dict], warn):
     for t in sorted((t for t in tickets if t["status"] == "claimed" and t["type"] == "investigate"),
                     key=tk.oldest_first_key):
         try:
-            state = agent_state(t["id"].lower())
+            listed, state = agent_listed(t["id"].lower())
         except LaunchError as exc:
             warn(f"cannot check the investigation agent for {t['id']}: {exc}")
             return
-        if state is not None and state not in RESEARCH_DONE_STATES:
+        # Gone from herdr counts as stopped; listed with an unreadable state doesn't.
+        if listed and state not in RESEARCH_DONE_STATES:
             continue
         found = bool(t.get("notes"))
         try:

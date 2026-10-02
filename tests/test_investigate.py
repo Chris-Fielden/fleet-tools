@@ -327,6 +327,32 @@ def test_finish_leaves_ticket_alone_when_herdr_fails(projects, herdr_log, monkey
     assert warnings and tk.load_ticket(t["id"])["status"] == "claimed"
 
 
+def test_log_failure_during_research_launch_rolls_back(projects, herdr_log, monkeypatch):
+    t = idea()
+
+    def boom(kind, message):
+        if kind == "CLAIMED":
+            raise OSError("disk full")
+    monkeypatch.setattr("fleet.launch.dp.log", boom)
+    assert dispatch_main(["--once"]) == 1
+    assert tk.load_ticket(t["id"])["status"] == "proposed"
+    assert not herdr_log.exists()
+
+
+def test_finish_ignores_an_agent_with_unreadable_state(projects, herdr_log, monkeypatch):
+    t = idea()
+    assert dispatch_main(["--once"]) == 0
+    monkeypatch.setattr("fleet.launch.agent_listed", lambda name, timeout=120: (True, None))
+    assert list(lc.finish_investigations(tk.list_tickets(), lambda m: None)) == []
+    assert tk.load_ticket(t["id"])["status"] == "claimed"
+
+
+def test_dry_run_log_has_no_worktree_for_investigations(projects):
+    idea()
+    assert dispatch_main(["--dry-run"]) == 0
+    assert "worktree" not in dp.log_path().read_text() and ".worktrees" not in dp.log_path().read_text()
+
+
 def test_finish_does_not_touch_other_tickets(projects, herdr_log, monkeypatch):
     build = mk(branch="task/job")
     tk.set_status(build["id"], "claimed", allowed_from=("open",), assignee="claude")
