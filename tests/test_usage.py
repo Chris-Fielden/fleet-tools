@@ -122,3 +122,28 @@ def test_malformed_values_do_not_crash(tmp_path):
            "message": {"id": "x", "usage": {"input_tokens": "lots", "output_tokens": 4}}}
     (d / "s.jsonl").write_text(json.dumps(row) + "\n" + json.dumps({**row, "timestamp": 1e30}) + "\n")
     assert usage.claude_usage(tmp_path, NOW)["five_hour"]["tokens"] == 4
+
+
+def test_review_regressions(tmp_path):
+    d = tmp_path / ".claude/projects/p"
+    d.mkdir(parents=True)
+    ts = z(NOW - timedelta(hours=1))
+    rows = [{"type": "assistant", "timestamp": ts, "requestId": [1],
+             "message": {"id": {"a": 1}, "usage": {"output_tokens": 99}}},
+            {"type": "assistant", "timestamp": ts,
+             "message": {"id": "ok", "usage": {"output_tokens": 4}}}]
+    (d / "s.jsonl").write_text("\n".join(map(json.dumps, rows)) + "\n")
+    assert usage.claude_usage(tmp_path, NOW)["five_hour"]["tokens"] == 4
+
+    rl = json.loads(json.dumps(SAMPLE["rate_limits"]))
+    rl["primary"]["window_minutes"] = 1e30
+    rl["secondary"]["used_percent"] = float("nan")
+    write_codex(tmp_path, NOW - timedelta(minutes=5), rl)
+    r = usage.codex_usage(tmp_path, NOW)
+    assert r["five_hour"]["used_percent"] == 0.0
+    assert r["weekly"]["used_percent"] is None
+
+
+def test_codex_old_record_in_fresh_file_ignored(tmp_path):
+    write_codex(tmp_path, NOW - timedelta(days=9))
+    assert not usage.codex_usage(tmp_path, NOW)["limit_known"]

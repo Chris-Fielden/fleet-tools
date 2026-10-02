@@ -25,6 +25,7 @@ Codex -- <codex home>/sessions/**/rollout-*.jsonl (CODEX_HOME or ~/.codex).
 from __future__ import annotations
 
 import json
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -102,6 +103,8 @@ def claude_usage(home: Path, now: datetime) -> dict:
                     or ts is None or ts < t7 or ts > now:
                 continue
             key = (msg.get("id"), obj.get("requestId"))
+            if not all(k is None or isinstance(k, str) for k in key):
+                continue
             if key != (None, None):
                 if key in seen:
                     continue
@@ -123,12 +126,17 @@ def claude_usage(home: Path, now: datetime) -> dict:
     }
 
 
+def _pct(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
 def _codex_window(rl, recorded_at: datetime, length: timedelta, now: datetime) -> dict:
-    if not isinstance(rl, dict) or not isinstance(rl.get("used_percent"), (int, float)):
+    if not isinstance(rl, dict) or not _pct(rl.get("used_percent")):
         return _window()
     resets = _ts(rl.get("resets_at"))
     minutes = rl.get("window_minutes")
-    if isinstance(minutes, (int, float)) and minutes > 0:
+    if isinstance(minutes, (int, float)) and not isinstance(minutes, bool) \
+            and 0 < minutes <= 60 * 24 * 365:
         length = timedelta(minutes=minutes)
     stale = now - recorded_at > length or (resets is not None and resets <= now)
     return _window(used_percent=float(rl["used_percent"]), resets_at=resets,
@@ -144,9 +152,9 @@ def codex_usage(home: Path, now: datetime) -> dict:
             rl = payload.get("rate_limits") if isinstance(payload, dict) else None
             ts = _ts(obj.get("timestamp"))
             usable = isinstance(rl, dict) and any(
-                isinstance(rl.get(k), dict) and isinstance(rl[k].get("used_percent"), (int, float))
+                isinstance(rl.get(k), dict) and _pct(rl[k].get("used_percent"))
                 for k in ("primary", "secondary"))
-            if usable and ts is not None and ts <= now and (best is None or ts > best[0]):
+            if usable and ts is not None and now - WEEK <= ts <= now and (best is None or ts > best[0]):
                 best = (ts, rl)
     out = {"tool": "codex", "limit_known": False, "five_hour": _window(),
            "weekly": _window(),
