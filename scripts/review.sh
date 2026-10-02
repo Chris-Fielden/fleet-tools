@@ -90,8 +90,7 @@ run_review() {
   local rc=0
   # Written under another name and renamed only when complete and checked, so a
   # half-finished review can never satisfy the merge gate.
-  local part="$out.partial"
-  rm -f "$part"
+  local part; part="$(mktemp "$out.XXXXXX.partial")"
   case "$kind" in
     codex)
       command -v codex >/dev/null 2>&1 || { echo "Codex isn't installed. Install it, or run with REVIEWER=claude."; return 1; }

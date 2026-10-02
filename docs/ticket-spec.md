@@ -142,7 +142,7 @@ folder, and `contains` matches anywhere in the path, ignoring case.
   `scripts/new-task.sh`, any path containing `secret`, `auth` or `.env`,
   `requirements*.txt`, `pyproject.toml`, `package.json`, `go.mod`,
   `compose.yml`, `fleet/dispatch*.py`, and (so a task cannot loosen its own
-  rules) `risk-rules.json`, `fleet/risk.py`, `fleet/ticket.py` and `fleet/ticket_cli.py`.
+  rules) `risk-rules.json`, `fleet/risk.py`, `fleet/ticket.py`, `fleet/ticket_cli.py` and `bin/ticket`.
 - Low: `docs/**`, `tests/**`. A name like `tests/test_auth.py` is still high.
 - Everything else: medium.
 - The rules are read from the **base** branch (`git show BASE:risk-rules.json`),

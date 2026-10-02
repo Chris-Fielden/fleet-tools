@@ -34,7 +34,7 @@ def rules():
     "fleet/secrets.py", "docs/secret-notes.md", "fleet/oauth.py", "src/Auth/login.py",
     ".env", "app/.env.example", "requirements.txt", "requirements-dev.txt", "svc/requirements.txt",
     "pyproject.toml", "web/package.json", "go.mod", "compose.yml",
-    "fleet/dispatch.py", "fleet/dispatch_cli.py", "risk-rules.json", "fleet/ticket.py", "fleet/ticket_cli.py",
+    "fleet/dispatch.py", "fleet/dispatch_cli.py", "risk-rules.json", "fleet/ticket.py", "fleet/ticket_cli.py", "bin/ticket",
 ])
 def test_high_paths(rules, path):
     assert rk.classify(path, rules)[0] == "high"
@@ -46,7 +46,7 @@ def test_low_paths(rules, path):
 
 
 @pytest.mark.parametrize("path", [
-    "fleet/usage_cli.py", "README.md", "bin/ticket", "scripts/ask-codex.sh", "fleet/usage.py",
+    "fleet/usage_cli.py", "README.md", "bin/idea", "scripts/ask-codex.sh", "fleet/usage.py",
     "scripts/check.sh.bak", "k8s", "fleet/sub/dispatch.py", "compose.yaml"])
 def test_medium_paths(rules, path):
     assert rk.classify(path, rules)[0] == "medium", path
