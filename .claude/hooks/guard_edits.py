@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import RULES_OFF, allow_silently, deny, read_input, repo_info  # noqa: E402
+from _common import is_under_fleet  # noqa: E402
 
 # Patterns that look like real credentials. Kept short on purpose: better to
 # catch the obvious cases reliably than to flag every long string.
@@ -68,6 +69,9 @@ def main():
                  "variable or a Kubernetes Secret) and let the human supply the value.")
 
     for raw in paths:
+        if is_under_fleet(raw, cwd):
+            deny("Don't edit files in the fleet's private folder (~/.fleet): it holds "
+                 "the real tickets and the Kaneo key. Use the ticket command instead.")
         path = raw.replace("\\", "/")
         if ENV_FILE.search(path) and not path.endswith(".env.example"):
             deny("Don't create or edit .env files. Secrets stay out of the repo. "
