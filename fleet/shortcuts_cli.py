@@ -31,7 +31,7 @@ def _file(prog: str, fields: dict) -> int:
 
 
 def _branch(kind: str) -> str:
-    return f"task/{kind}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    return f"task/{kind}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
 
 
 def _text(words: list[str]) -> str:
@@ -39,7 +39,7 @@ def _text(words: list[str]) -> str:
 
 
 def _title(text: str) -> str:
-    return " ".join(text.split())[:100].strip()
+    return text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")[:100].strip()
 
 
 def idea_main(argv=None) -> int:

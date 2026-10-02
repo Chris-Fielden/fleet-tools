@@ -66,8 +66,10 @@ Optional `$FLEET_HOME/dispatch.json`. Defaults when it's missing:
 
 ### The rules
 
-The dispatcher looks at tickets with status `open`, oldest first, and decides
-for each one. Part A and Part B use the same rule code.
+The dispatcher looks at tickets with status `open` and decides for each one:
+urgent tickets (`priority` urgent) before normal ones, oldest first within each,
+whoever filed them (an agent can file an urgent ticket too).
+Part A and Part B use the same rule code.
 
 1. **Type.** Only `build` and `fix` tickets are launched for now. `review`
    and `question` tickets are skipped with the reason "handled in phase 4".

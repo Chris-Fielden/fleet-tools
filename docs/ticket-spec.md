@@ -136,7 +136,7 @@ alert REPO TEXT
 ```
 
 - `idea TEXT` files an `investigate` ticket in repo `ideas`, branch
-  `task/idea-TIMESTAMP` (UTC, `YYYYMMDDHHMMSS`). Title: the first 100
+  `task/idea-TIMESTAMP` (UTC, `YYYYMMDDHHMMSSffffff`, with microseconds so two filed in the same second differ). Title: the first 100
   characters of TEXT (line breaks become spaces). Body: all of TEXT. It
   starts as `proposed`.
 - `alert REPO TEXT` files a `build` ticket in REPO with priority `urgent`,

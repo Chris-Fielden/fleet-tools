@@ -28,7 +28,7 @@ def test_idea_files_an_investigate_ticket():
     t = tk.load_ticket(tid)
     assert (t["type"], t["repo"], t["status"]) == ("investigate", "ideas", "proposed")
     assert t["title"] == t["body"] == "look into caching"
-    assert re.fullmatch(r"task/idea-\d{14}", t["branch"])
+    assert re.fullmatch(r"task/idea-\d{20}", t["branch"])
     assert "priority" not in t
 
 
@@ -63,7 +63,7 @@ def test_alert_files_an_urgent_build_ticket():
     t = tk.load_ticket(tid)
     assert (t["type"], t["repo"], t["priority"], t["status"]) == ("build", "myrepo", "urgent", "open")
     assert t["title"] == t["body"] == "disk is full"
-    assert re.fullmatch(r"task/alert-\d{14}", t["branch"])
+    assert re.fullmatch(r"task/alert-\d{20}", t["branch"])
 
 
 def test_alert_title_is_first_100_characters():
@@ -91,3 +91,18 @@ def test_alert_body_too_long_is_a_plain_error():
 def test_alert_from_agent_is_open_and_urgent():
     t = tk.load_ticket(sh(ALERT, "myrepo", "boom", extra_env={"CODEX_SANDBOX": "x"}).stdout.strip())
     assert (t["created_by"], t["status"], t["priority"]) == ("codex", "open", "urgent")
+
+
+def test_tickets_filed_back_to_back_get_different_branches():
+    from fleet.shortcuts_cli import alert_main, idea_main
+    for main, args in ((alert_main, ["myrepo", "t"]), (idea_main, ["t"])):
+        for _ in range(3):
+            assert main(args) == 0
+    branches = [t["branch"] for t in tk.list_tickets()]
+    assert len(branches) == 6 and len(set(branches)) == 6
+    assert all(tk.BRANCH_RE.fullmatch(b) and len(b) - 5 <= 41 for b in branches)
+
+
+def test_title_keeps_other_whitespace():
+    t = tk.load_ticket(sh(IDEA, "a  b\tc\r\nd").stdout.strip())
+    assert t["title"] == "a  b\tc d"
