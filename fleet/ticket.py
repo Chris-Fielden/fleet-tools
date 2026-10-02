@@ -24,6 +24,11 @@ FIELDS = (
     "id", "type", "repo", "branch", "commit", "parent", "title", "body",
     "created_by", "assignee", "status", "verdict", "created_at", "updated_at",
 )
+# Optional fields: may be absent from a stored ticket.
+OPTIONAL_FIELDS = ("close_note",)
+CLOSE_NOTE_MAX = 500
+AGENTS = ("claude", "codex")
+CLOSE_OUTCOMES = {"done": "done", "failed": "failed", "cancelled": "cancelled"}
 # Fields a caller may supply when creating a ticket. Everything else in
 # FIELDS is set by the tool.
 CALLER_FIELDS = ("type", "repo", "branch", "title", "body", "commit", "parent")
@@ -164,7 +169,7 @@ def validate_stored(data) -> list[str]:
     if not isinstance(data, dict):
         return ["ticket file is not a JSON object"]
     errors: list[str] = []
-    for name in sorted(set(data) - set(FIELDS)):
+    for name in sorted(set(data) - set(FIELDS) - set(OPTIONAL_FIELDS)):
         errors.append(f"unknown field: {name}")
     for name in FIELDS:
         if name not in data:
@@ -178,10 +183,13 @@ def validate_stored(data) -> list[str]:
         errors.append(f"created_by must be one of: {', '.join(CREATORS)}")
     if data["status"] not in STATUSES:
         errors.append(f"status must be one of: {', '.join(STATUSES)}")
-    if data["assignee"] is not None:
-        errors.append("assignee must be null in phase 1")
+    if data["assignee"] is not None and data["assignee"] not in AGENTS:
+        errors.append(f"assignee must be null or one of: {', '.join(AGENTS)}")
     if data["verdict"] is not None:
         errors.append("verdict must be null in phase 1")
+    note = data.get("close_note")
+    if "close_note" in data and (not _is_str(note) or not 1 <= len(note) <= CLOSE_NOTE_MAX):
+        errors.append(f"close_note must be 1 to {CLOSE_NOTE_MAX} characters")
     for name in ("created_at", "updated_at"):
         if not _is_str(data[name]) or not TIME_RE.fullmatch(data[name]):
             errors.append(f"{name} must be a UTC ISO 8601 time like 2025-01-01T00:00:00Z")
@@ -338,3 +346,51 @@ def approve_ticket(ticket_id: str) -> dict:
         ticket["updated_at"] = _now()
         _write_atomic(_ticket_path(ticket_id), ticket)
     return ticket
+
+
+_KEEP = object()
+
+
+def set_status(ticket_id: str, status: str, *, allowed_from, assignee=_KEEP,
+               close_note: str | None = None) -> dict:
+    """Move a ticket to `status` atomically, under the store lock. Refuses
+    unless its current status is in `allowed_from`. Returns the new ticket."""
+    if status not in STATUSES:
+        raise TicketError(f"unknown status: {status}")
+    if assignee is not _KEEP and assignee is not None and assignee not in AGENTS:
+        raise TicketError(f"assignee must be one of: {', '.join(AGENTS)}")
+    with _locked():
+        ticket = load_ticket(ticket_id)
+        if ticket["status"] not in allowed_from:
+            raise TicketError(
+                f"{ticket_id} is {ticket['status']}; it can only change from: "
+                + ", ".join(allowed_from))
+        ticket["status"] = status
+        if assignee is not _KEEP:
+            ticket["assignee"] = assignee
+        if close_note is not None:
+            ticket["close_note"] = close_note
+        ticket["updated_at"] = _now()
+        _write_atomic(_ticket_path(ticket_id), ticket)
+    return ticket
+
+
+def close_ticket(ticket_id: str, outcome: str, note: str | None = None) -> dict:
+    """Close an open or claimed ticket as done, failed or cancelled. Humans only."""
+    creator = current_creator()
+    if creator != "human":
+        raise TicketError(f"only a human can close tickets (running as {creator})")
+    if not ID_RE.fullmatch(ticket_id):
+        raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like T-20250101-001)"])
+    if outcome not in CLOSE_OUTCOMES:
+        raise TicketInvalid([f"outcome must be one of: {', '.join(CLOSE_OUTCOMES)}"])
+    if note is not None:
+        errors = []
+        if not 1 <= len(note) <= CLOSE_NOTE_MAX:
+            errors.append(f"note must be 1 to {CLOSE_NOTE_MAX} characters")
+        else:
+            errors += check_secrets("close note", note)
+        if errors:
+            raise TicketInvalid(errors)
+    return set_status(ticket_id, CLOSE_OUTCOMES[outcome],
+                      allowed_from=("open", "claimed"), close_note=note)
