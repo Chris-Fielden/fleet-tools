@@ -201,11 +201,6 @@ class Decision:
         return f"{self.ticket['id']}  would launch {self.agent} ({model}) in {self.worktree}"
 
 
-def _oldest_first_key(t: dict):
-    day, seq = t["id"].split("-")[1:]
-    return (t["created_at"], day, int(seq))
-
-
 def _judge(t: dict, tickets: dict, claimed: list[dict], settings: dict) -> Decision:
     d = Decision(ticket=t, name=t["branch"].removeprefix("task/"))
 
@@ -262,7 +257,7 @@ def decide(tickets: list[dict], settings: dict) -> list[Decision]:
     claimed = [t for t in tickets if t["status"] == "claimed"]
     decisions = []
     picked = False
-    for t in sorted((t for t in tickets if t["status"] == "open"), key=_oldest_first_key):
+    for t in sorted((t for t in tickets if t["status"] == "open"), key=tk.oldest_first_key):
         d = _judge(t, by_id, claimed, settings)
         if d.eligible:
             if picked:
@@ -292,7 +287,7 @@ def is_merged(repo: Path, branch: str, since: str | None = None) -> bool:
 def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None):
     """Set claimed tickets whose branch was merged to done. Yields the changed
     tickets."""
-    for t in sorted((t for t in tickets if t["status"] == "claimed"), key=_oldest_first_key):
+    for t in sorted((t for t in tickets if t["status"] == "claimed"), key=tk.oldest_first_key):
         repo = settings["projects_dir"] / t["repo"]
         if repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir():
             log("RECONCILE_SKIP", f"{t['id']} repo folder {repo} not found")

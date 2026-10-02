@@ -22,14 +22,16 @@ launching, no hooks in this phase.
   temporary folder and never touch the real one.
 - Writes are atomic: write to a temp file in the same folder, then
   `os.replace` it into place.
-- New ids come from a counter guarded by a lock file (`fcntl.flock`), so two
-  `ticket new` commands at the same moment never get the same id.
+- New ids come from counters kept in `$FLEET_HOME/tickets/.counters`, updated
+  under the store lock file (`fcntl.flock`), so two `ticket new` commands at
+  the same moment never get the same id. A counter never goes below the
+  highest id already on disk, so a lost counters file cannot cause a repeat.
 
 ## The ticket format
 
 | Field | Type | Rules |
 | --- | --- | --- |
-| id | string | Assigned by the tool: `T-YYYYMMDD-NNN` (NNN restarts at 001 each day). Never accepted from the caller. |
+| id | string | Assigned by the tool: a short id, prefix plus number (see "Ticket ids"). Never accepted from the caller. Older `T-YYYYMMDD-NNN` ids are still valid. |
 | type | string | One of: build, review, fix, question. |
 | repo | string | 1 to 64 characters: letters, digits, `.`, `_`, `-`. |
 | branch | string | Must start with `task/`, then 1 to 64 characters: lowercase letters, digits, `-`. |
@@ -43,10 +45,38 @@ launching, no hooks in this phase.
 | verdict | object or null | Always null in phase 1. |
 | close_note | string, optional | 1 to 500 characters, gitleaks-checked. Set by `ticket close --note`. Absent otherwise. |
 | base_commit | string, optional | Git commit id (7 to 40 hex characters): main's tip when the dispatcher claimed the ticket. Reconcile only counts a `Merge <branch>` commit made after it. Absent on tickets claimed before this field existed (they count any merge in main's history). |
+| seq | integer, optional | Creation sequence, 1 or more, counting up across all tickets. Set by the tool; the tie-breaker when `created_at` is equal. Absent on tickets made before short ids (they count as 0). |
 | created_at | string | UTC time, ISO 8601, set by the tool. |
 | updated_at | string | UTC time, ISO 8601, set by the tool. |
 
-Unknown fields are rejected when reading a ticket file.
+Unknown fields are rejected when reading a ticket file. The counters file is not a ticket and is ignored by `list`.
+
+### Ticket ids
+
+A new ticket's id is a prefix by kind plus a number that counts up per prefix,
+with no padding: `BD-1`, `BD-2`, `FX-1`, `EM-1`.
+
+| Prefix | For |
+| --- | --- |
+| BD | build |
+| FX | fix |
+| RV | review |
+| QN | question |
+| ID | investigate (ideas) |
+| EM | any ticket whose `priority` is `urgent` (wins over the type prefix) |
+
+- The prefix comes from one lookup table (`TYPE_PREFIX`, plus
+  `EMERGENCY_PREFIX`) in `fleet/ticket.py`. The `investigate` type and the
+  `priority` field are added by another ticket; once they exist, `ID` and `EM`
+  apply with no further change here.
+- The prefix is fixed when the ticket is created and never changes, even if
+  its priority changes later.
+- Existing `T-YYYYMMDD-NNN` tickets keep their ids and work everywhere (show,
+  close, approve, parent links, Kaneo cards, the map file).
+- Nothing reads meaning out of an id. Anything that sorts oldest first
+  (the dispatcher, reconcile) uses `created_at`, then `seq`, then the id only
+  to keep the order stable. `ticket list` is the same order, reversed.
+- Kaneo card titles use the id: `[BD-1] title`.
 
 ### Who created it
 

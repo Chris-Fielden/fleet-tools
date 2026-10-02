@@ -196,7 +196,7 @@ def test_kaneo_down_ticket_new_still_succeeds_with_warning():
     r = run("new", *new_args())
     assert r.returncode == 0
     tid = r.stdout.strip()
-    assert tid.startswith("T-")
+    assert tid == "BD-1"
     assert r.stderr.count("\n") == 1 and "warning" in r.stderr
     assert "Traceback" not in r.stderr
     assert (fleet_home() / "tickets" / f"{tid}.json").exists()
