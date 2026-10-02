@@ -561,3 +561,88 @@ def test_once_refuses_inside_agent(projects, herdr_log, monkeypatch):
     monkeypatch.setenv("CLAUDECODE", "1")
     assert dispatch_main(["--once"]) == 1
     assert not herdr_log.exists()
+
+
+# --- review fixes: retry, folder checks, rollback ----------------------------
+
+def test_once_retry_after_failed_launch(projects, herdr_log, monkeypatch):
+    repo = real_repo(projects)
+    monkeypatch.setenv("FAKE_HERDR_STATE", "idle")
+    t = mk(branch="task/job")
+    assert dispatch_main(["--once"]) == 1
+    assert not (repo / ".worktrees" / "job").exists()  # cleaned up
+    assert git(repo, "branch", "--list", "task/job").strip() == ""
+    monkeypatch.setenv("FAKE_HERDR_STATE", "working")
+    assert dispatch_main(["--once"]) == 0
+    assert tk.load_ticket(t["id"])["status"] == "claimed"
+
+
+def test_failed_launch_keeps_a_branch_that_has_work(projects, herdr_log, monkeypatch):
+    repo = real_repo(projects)
+    monkeypatch.setenv("FAKE_HERDR_STATE", "idle")
+    mk(branch="task/job")
+    real_start = __import__("fleet.launch", fromlist=["x"]).start_agent
+
+    def start_and_commit(d, folder, workspace, warn):
+        (folder / "w.txt").write_text("w")
+        git(folder, "add", "-A")
+        git(folder, "commit", "-q", "-m", "work")
+        return real_start(d, folder, workspace, warn)
+    monkeypatch.setattr("fleet.launch.start_agent", start_and_commit)
+    assert dispatch_main(["--once"]) == 1
+    assert (repo / ".worktrees" / "job").is_dir()
+    assert "CLEANUP_SKIPPED" in dp.log_path().read_text()
+
+
+def _fix_setup(projects):
+    repo = real_repo(projects)
+    parent = mk(branch="task/job")
+    tk.set_status(parent["id"], "done", allowed_from=("open",), assignee="claude")
+    fix = mk(type="fix", branch="task/job", parent=parent["id"])
+    return repo, fix
+
+
+def test_fix_refuses_plain_folder(projects, herdr_log):
+    repo, fix = _fix_setup(projects)
+    git(repo, "branch", "task/job")
+    (repo / ".worktrees" / "job").mkdir(parents=True)
+    assert dispatch_main(["--once"]) == 1
+    assert tk.load_ticket(fix["id"])["status"] == "open"
+    assert not herdr_log.exists()
+
+
+def test_fix_refuses_symlink_and_wrong_branch(projects, herdr_log):
+    repo, fix = _fix_setup(projects)
+    git(repo, "worktree", "add", "-q", str(repo / ".worktrees" / "other"), "-b", "task/other")
+    (repo / ".worktrees" / "job").symlink_to(repo / ".worktrees" / "other")
+    git(repo, "branch", "task/job")
+    assert dispatch_main(["--once"]) == 1
+    (repo / ".worktrees" / "job").unlink()
+    git(repo, "worktree", "add", "-q", str(repo / ".worktrees" / "job"), "task/job")
+    git(repo / ".worktrees" / "job", "checkout", "-q", "-b", "task/elsewhere")
+    assert dispatch_main(["--once"]) == 1
+    assert tk.load_ticket(fix["id"])["status"] == "open"
+    assert not herdr_log.exists()
+
+
+def test_writer_file_error_rolls_back(projects, herdr_log, monkeypatch):
+    real_repo(projects)
+    t = mk(branch="task/job")
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr("fleet.launch.Path.write_text", boom)
+    assert dispatch_main(["--once"]) == 1
+    assert tk.load_ticket(t["id"])["status"] == "open"
+    assert "LAUNCH_FAILED" in dp.log_path().read_text()
+
+
+def test_herdr_reply_that_is_not_an_object(projects, herdr_log, monkeypatch, env):
+    real_repo(projects)
+    t = mk(branch="task/job")
+    stub = env / "null-herdr"
+    stub.write_text("#!/bin/sh\necho null\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("FLEET_HERDR", str(stub))
+    assert dispatch_main(["--once"]) == 1
+    assert tk.load_ticket(t["id"])["status"] == "open"

@@ -55,6 +55,8 @@ def herdr(*args: str) -> dict:
         data = json.loads(proc.stdout)
     except ValueError:
         raise LaunchError(f"herdr {args[0]} {args[1]} did not print JSON") from None
+    if not isinstance(data, dict):
+        raise LaunchError(f"herdr {args[0]} {args[1]} did not print a JSON object")
     return data
 
 
@@ -113,25 +115,67 @@ def _run(cmd: list[str], cwd: Path):
         raise LaunchError(f"{cmd[0]} failed: {exc}") from None
 
 
-def make_worktree(d: dp.Decision) -> Path:
-    """Create the task folder (a fix ticket reuses an existing one)."""
+def _git_out(folder: Path, *args: str) -> str | None:
+    proc = _run(["git", *args], folder)
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def check_reusable(d: dp.Decision, folder: Path) -> None:
+    """A fix ticket may reuse a folder only if it really is a worktree of this
+    repo, directly under .worktrees, on the ticket's branch."""
+    repo = d.repo_path.resolve()
+    if folder.is_symlink() or folder.resolve().parent != repo / ".worktrees":
+        raise LaunchError(f"{folder} is not a plain folder inside {repo / '.worktrees'}")
+    top = _git_out(folder, "rev-parse", "--show-toplevel")
+    common = _git_out(folder, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    branch = _git_out(folder, "symbolic-ref", "--short", "HEAD")
+    if top is None or Path(top).resolve() != folder.resolve():
+        raise LaunchError(f"{folder} is not a git worktree")
+    if common is None or Path(common).resolve() != (repo / ".git").resolve():
+        raise LaunchError(f"{folder} belongs to a different repo")
+    if branch != d.ticket["branch"]:
+        raise LaunchError(f"{folder} is on {branch or 'no branch'}, not {d.ticket['branch']}")
+
+
+def make_worktree(d: dp.Decision) -> tuple[Path, bool]:
+    """Create the task folder (a fix ticket reuses a valid existing one).
+    Returns the folder and whether this call created it."""
     folder = d.repo_path / ".worktrees" / d.name
-    if d.ticket["type"] == "fix" and folder.is_dir():
-        return folder
+    if d.ticket["type"] == "fix" and (folder.exists() or folder.is_symlink()):
+        check_reusable(d, folder)
+        return folder, False
     proc = _run(["bash", "scripts/new-task.sh", d.name], d.repo_path)
     if proc.returncode != 0 or not folder.is_dir():
         tail = (proc.stdout + proc.stderr).strip().splitlines()
         raise LaunchError(f"scripts/new-task.sh {d.name} failed"
                           + (f": {tail[-1][:200]}" if tail else ""))
-    return folder
+    return folder, True
+
+
+def discard_new_worktree(d: dp.Decision, folder: Path, base: str) -> None:
+    """After a failed launch, remove the folder and branch this run created so
+    the ticket can be retried. Plain (non-forced) git commands only, and only
+    if the branch is still exactly at the base commit."""
+    if _git_out(d.repo_path, "rev-parse", d.ticket["branch"]) != base:
+        dp.log("CLEANUP_SKIPPED", f"{d.ticket['id']} {d.ticket['branch']} has new commits")
+        return
+    for cmd in (["worktree", "remove", str(folder)], ["branch", "-d", d.ticket["branch"]]):
+        proc = _run(["git", *cmd], d.repo_path)
+        if proc.returncode != 0:
+            dp.log("CLEANUP_SKIPPED", f"{d.ticket['id']} git {cmd[0]} failed")
+            return
+    dp.log("CLEANUP", f"{d.ticket['id']} removed {d.worktree} and {d.ticket['branch']}")
 
 
 def record_writer(folder: Path, agent: str, ticket_id: str) -> None:
     proc = _run(["git", "rev-parse", "--absolute-git-dir"], folder)
     if proc.returncode != 0:
         raise LaunchError(f"cannot find the git folder of {folder}")
-    (Path(proc.stdout.strip()) / "fleet-writer").write_text(f"{agent} {ticket_id}\n",
-                                                            encoding="utf-8")
+    try:
+        (Path(proc.stdout.strip()) / "fleet-writer").write_text(f"{agent} {ticket_id}\n",
+                                                                encoding="utf-8")
+    except OSError as exc:
+        raise LaunchError(f"cannot write the writer file: {exc}") from None
 
 
 def start_agent(d: dp.Decision, folder: Path, workspace: str, warn) -> str:
@@ -170,11 +214,14 @@ def launch(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
                             assignee=d.agent, base_commit=base)
     dp.log("CLAIMED", f"{t['id']} {d.agent} {t['branch']} base {base[:12]}")
     kaneo.mirror_quietly(claimed, warn)
+    folder, created = None, False
     try:
-        folder = make_worktree(d)
+        folder, created = make_worktree(d)
         record_writer(folder, d.agent, t["id"])
         tab = start_agent(d, folder, find_workspace(settings["herdr_workspace"]), warn)
-    except LaunchError as exc:
+    except (LaunchError, OSError, subprocess.TimeoutExpired) as exc:
+        if created:
+            discard_new_worktree(d, folder, base)
         reopened = tk.set_status(t["id"], "open", allowed_from=("claimed",), assignee=None)
         kaneo.mirror_quietly(reopened, warn)
         dp.log("LAUNCH_FAILED", f"{t['id']} {exc}")
