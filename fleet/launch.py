@@ -229,20 +229,28 @@ def start_agent(d: dp.Decision, folder: Path, workspace: str, warn) -> str:
     return tab
 
 
+def main_tip(repo: Path) -> str | None:
+    head = dp.main_branch(repo)
+    tip = dp._git(repo, "rev-parse", head).stdout.strip() if head else ""
+    return tip if tk.COMMIT_RE.fullmatch(tip) else None
+
+
 def launch(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
     """Claim and launch one eligible ticket. Returns (exit code, message)."""
     t = d.ticket
-    head = dp.main_branch(d.repo_path)
-    base = dp._git(d.repo_path, "rev-parse", head).stdout.strip() if head else ""
-    if not tk.COMMIT_RE.fullmatch(base):
+    base = main_tip(d.repo_path)
+    if base is None:
         return 1, f"cannot read the current commit of {d.repo_path}"
     claimed = tk.set_status(t["id"], "claimed", allowed_from=("open",),
                             assignee=d.agent, base_commit=base)
-    dp.log("CLAIMED", f"{t['id']} {d.agent} {t['branch']} base {base[:12]}")
     kaneo.mirror_quietly(claimed, warn)
     folder, made, initial = None, "nothing", None
     try:
+        dp.log("CLAIMED", f"{t['id']} {d.agent} {t['branch']} base {base[:12]}")
         folder, made = make_worktree(d)
+        # new-task.sh may fetch and advance main: the baseline is main as it is now.
+        base = main_tip(d.repo_path) or base
+        tk.set_status(t["id"], "claimed", allowed_from=("claimed",), base_commit=base)
         initial = _git_out(folder, "rev-parse", "HEAD")
         record_writer(folder, d.agent, t["id"])
         tab = start_agent(d, folder, find_workspace(settings["herdr_workspace"]), warn)

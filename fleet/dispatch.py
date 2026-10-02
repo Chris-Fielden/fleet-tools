@@ -11,6 +11,7 @@ import copy
 import fcntl
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ DEFAULTS = {
 }
 LAUNCH_TYPES = ("build", "fix")
 MAIN_BRANCHES = ("main", "master")
+TASK_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{1,40}")  # what scripts/new-task.sh accepts
 
 
 class SettingsError(Exception):
@@ -224,6 +226,11 @@ def _judge(t: dict, tickets: dict, claimed: list[dict], settings: dict) -> Decis
         d.skip = problem
         return d
     # 4. Branch
+    if not TASK_NAME_RE.fullmatch(d.name):
+        d.skip = (f"branch {t['branch']} can't be used by scripts/new-task.sh (the name after "
+                  "task/ must be 2 to 41 lowercase letters, numbers or dashes, "
+                  "starting with a letter or number)")
+        return d
     for other in claimed:
         if other["branch"] == t["branch"]:
             d.skip = f"branch {t['branch']} is in use by claimed ticket {other['id']}"

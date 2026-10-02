@@ -697,3 +697,46 @@ def test_bad_fleet_herdr_value_rolls_back(projects, herdr_log, monkeypatch):
     monkeypatch.setenv("FLEET_HERDR", "'unclosed")
     assert dispatch_main(["--once"]) == 1
     assert tk.load_ticket(t["id"])["status"] == "open"
+
+
+@pytest.mark.parametrize("branch, ok", [("task/ab", True), ("task/a", False), ("task/-ab", False),
+                                        ("task/" + "a" * 41, True), ("task/" + "a" * 42, False)])
+def test_branch_name_must_fit_new_task_script(projects, capsys, branch, ok):
+    real_repo(projects)
+    mk(branch=branch)
+    out = dry(capsys)
+    assert ("would launch" in out) is ok
+    assert ("new-task.sh" in out) is (not ok)
+
+
+def test_base_commit_is_refreshed_after_new_task_runs(projects, herdr_log):
+    repo = real_repo(projects)
+    t = mk(branch="task/job")
+    real = __import__("fleet.launch", fromlist=["x"]).make_worktree
+
+    def advancing(d):  # new-task.sh fetched an old "Merge task/job" into main
+        merge_branch(repo, "task/job")
+        git(repo, "branch", "-D", "task/job")
+        return real(d)
+    import fleet.launch
+    old = fleet.launch.make_worktree
+    fleet.launch.make_worktree = advancing
+    try:
+        assert dispatch_main(["--once"]) == 0
+    finally:
+        fleet.launch.make_worktree = old
+    assert tk.load_ticket(t["id"])["base_commit"] == git(repo, "rev-parse", "main").strip()
+    assert dispatch_main(["--reconcile"]) == 0
+    assert tk.load_ticket(t["id"])["status"] == "claimed"
+
+
+def test_log_failure_after_claim_rolls_back(projects, herdr_log, monkeypatch):
+    real_repo(projects)
+    t = mk(branch="task/job")
+
+    def boom(kind, message):
+        if kind == "CLAIMED":
+            raise OSError("disk full")
+    monkeypatch.setattr("fleet.launch.dp.log", boom)
+    assert dispatch_main(["--once"]) == 1
+    assert tk.load_ticket(t["id"])["status"] == "open"
