@@ -102,7 +102,7 @@ def _cmd_show(args) -> int:
         return 0
     print(f"{t['id']}  {t['title']}")
     for name in ("status", "type", "repo", "branch", "commit", "parent",
-                 "created_by", "assignee", "verdict", "close_note", "created_at", "updated_at"):
+                 "created_by", "assignee", "verdict", "close_note", "base_commit", "created_at", "updated_at"):
         value = t.get(name)
         print(f"  {name + ':':<12} {'-' if value is None else value}")
     print()

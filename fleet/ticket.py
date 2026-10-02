@@ -25,7 +25,7 @@ FIELDS = (
     "created_by", "assignee", "status", "verdict", "created_at", "updated_at",
 )
 # Optional fields: may be absent from a stored ticket.
-OPTIONAL_FIELDS = ("close_note",)
+OPTIONAL_FIELDS = ("close_note", "base_commit")
 CLOSE_NOTE_MAX = 500
 AGENTS = ("claude", "codex")
 CLOSE_OUTCOMES = {"done": "done", "failed": "failed", "cancelled": "cancelled"}
@@ -190,6 +190,9 @@ def validate_stored(data) -> list[str]:
     note = data.get("close_note")
     if "close_note" in data and (not _is_str(note) or not 1 <= len(note) <= CLOSE_NOTE_MAX):
         errors.append(f"close_note must be 1 to {CLOSE_NOTE_MAX} characters")
+    base = data.get("base_commit")
+    if "base_commit" in data and (not _is_str(base) or not COMMIT_RE.fullmatch(base)):
+        errors.append("base_commit must be a git commit id (7 to 40 hex characters)")
     for name in ("created_at", "updated_at"):
         if not _is_str(data[name]) or not TIME_RE.fullmatch(data[name]):
             errors.append(f"{name} must be a UTC ISO 8601 time like 2025-01-01T00:00:00Z")
@@ -352,7 +355,7 @@ _KEEP = object()
 
 
 def set_status(ticket_id: str, status: str, *, allowed_from, assignee=_KEEP,
-               close_note: str | None = None) -> dict:
+               close_note: str | None = None, base_commit: str | None = None) -> dict:
     """Move a ticket to `status` atomically, under the store lock. Refuses
     unless its current status is in `allowed_from`. Returns the new ticket."""
     if status not in STATUSES:
@@ -370,6 +373,10 @@ def set_status(ticket_id: str, status: str, *, allowed_from, assignee=_KEEP,
             ticket["assignee"] = assignee
         if close_note is not None:
             ticket["close_note"] = close_note
+        if base_commit is not None:
+            if not COMMIT_RE.fullmatch(base_commit):
+                raise TicketError("base_commit must be a git commit id")
+            ticket["base_commit"] = base_commit
         ticket["updated_at"] = _now()
         _write_atomic(_ticket_path(ticket_id), ticket)
     return ticket

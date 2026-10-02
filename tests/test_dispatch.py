@@ -1,6 +1,7 @@
 import fcntl
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -386,3 +387,177 @@ def test_requires_a_mode(capsys):
     with pytest.raises(SystemExit) as e:
         dispatch_main([])
     assert e.value.code == 2
+
+
+# --- reconcile: reused branch, exact whitespace, settings --------------------
+
+def test_claim_records_main_commit_and_reconcile_ignores_older_merge(projects):
+    repo = make_repo(projects)
+    old = claim(mk(branch="task/again"))
+    merge_branch(repo, "task/again")  # an earlier ticket's work, merged long ago
+    tk.set_status(old["id"], "done", allowed_from=("claimed",))
+    base = git(repo, "rev-parse", "main").strip()
+    reused = tk.set_status(mk(branch="task/again", type="fix", parent=old["id"])["id"],
+                           "claimed", allowed_from=("open",), assignee="claude", base_commit=base)
+    assert dispatch_main(["--reconcile"]) == 0
+    assert tk.load_ticket(reused["id"])["status"] == "claimed"  # old merge doesn't count
+    git(repo, "checkout", "-q", "task/again")
+    (repo / "again2.txt").write_text("more")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "fix")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "-q", "--no-ff", "-m", "Merge task/again", "task/again")
+    assert dispatch_main(["--reconcile"]) == 0
+    assert tk.load_ticket(reused["id"])["status"] == "done"
+
+
+def test_base_commit_is_validated():
+    t = mk()
+    with pytest.raises(tk.TicketError, match="base_commit"):
+        tk.set_status(t["id"], "claimed", allowed_from=("open",), base_commit="nope")
+    data = dict(tk.load_ticket(t["id"]), base_commit="nope")
+    assert any("base_commit" in e for e in tk.validate_stored(data))
+
+
+@pytest.mark.parametrize("message", [" Merge task/sp", "Merge task/sp ", "Merge  task/sp"])
+def test_reconcile_whitespace_must_match(projects, message):
+    repo = make_repo(projects)
+    t = claim(mk(branch="task/sp"))
+    git(repo, "checkout", "-q", "-b", "task/sp")
+    (repo / "s.txt").write_text("s")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "work")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "-q", "--no-ff", "--cleanup=verbatim", "-m", message, "task/sp")
+    assert dispatch_main(["--reconcile"]) == 0
+    assert tk.load_ticket(t["id"])["status"] == "claimed"
+
+
+def test_settings_unknown_home_folder(env):
+    (env / "fleet").mkdir(exist_ok=True)
+    (env / "fleet" / "dispatch.json").write_text(
+        json.dumps({"projects_dir": "~no-such-user-xyz/projects"}))
+    with pytest.raises(dp.SettingsError, match="home folder"):
+        dp.load_settings()
+    assert dispatch_main(["--dry-run"]) == 2
+
+
+# --- dispatch --once (fake herdr) --------------------------------------------
+
+REAL_NEW_TASK = Path(__file__).resolve().parent.parent / "scripts" / "new-task.sh"
+
+
+@pytest.fixture
+def herdr_log(env, monkeypatch):
+    log = env / "herdr.log"
+    monkeypatch.setenv("FLEET_HERDR", f"{sys.executable} {Path(__file__).parent / 'fake_herdr.py'}")
+    monkeypatch.setenv("FAKE_HERDR_LOG", str(log))
+    monkeypatch.setattr("fleet.launch.POLL_INTERVAL", 0.01)
+    monkeypatch.setattr("fleet.launch.START_TIMEOUT", 0.3)
+    return log
+
+
+def calls(log):
+    return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+def real_repo(projects, name="app"):
+    repo = make_repo(projects, name)
+    (repo / "scripts" / "new-task.sh").write_text(REAL_NEW_TASK.read_text())
+    (repo / ".gitignore").write_text(".worktrees/\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "real new-task")
+    return repo
+
+
+def test_once_full_run(projects, herdr_log, capsys):
+    repo = real_repo(projects)
+    t = mk(branch="task/job")
+    assert dispatch_main(["--once"]) == 0
+    got = tk.load_ticket(t["id"])
+    assert got["status"] == "claimed" and got["assignee"] == "claude"
+    assert got["base_commit"] == git(repo, "rev-parse", "main").strip()
+    wt = repo / ".worktrees" / "job"
+    assert wt.is_dir()
+    gitdir = Path(git(wt, "rev-parse", "--absolute-git-dir").strip())
+    assert (gitdir / "fleet-writer").read_text().split() == ["claude", t["id"]]
+    assert "fleet-writer" not in git(wt, "status", "--porcelain")
+    c = calls(herdr_log)
+    name = t["id"].lower()
+    assert ["workspace", "list"] in c
+    assert ["tab", "create", "--workspace", "w1", "--cwd", str(wt),
+            "--label", t["id"], "--no-focus"] in c
+    start = next(x for x in c if x[:2] == ["agent", "start"])
+    assert start == ["agent", "start", name, "--kind", "claude", "--pane", "w1:p7",
+                     "--", "--model", "sonnet"]
+    prompt = next(x for x in c if x[:2] == ["agent", "prompt"])
+    assert prompt[2] == name and f"You are working ticket {t['id']}" in prompt[3]
+    assert ["tab", "close", "w1:t7"] not in c
+    assert "launched claude (sonnet) in tab w1:t7" in capsys.readouterr().out
+
+
+def test_once_launch_failure_closes_tab_and_reopens(projects, herdr_log, monkeypatch, capsys):
+    real_repo(projects)
+    monkeypatch.setenv("FAKE_HERDR_STATE", "idle")
+    t = mk(branch="task/job")
+    assert dispatch_main(["--once"]) == 1
+    got = tk.load_ticket(t["id"])
+    assert got["status"] == "open" and got["assignee"] is None
+    c = calls(herdr_log)
+    assert [x for x in c if x[:2] == ["tab", "close"]] == [["tab", "close", "w1:t7"]]
+    assert "LAUNCH_FAILED" in (env_log := dp.log_path().read_text()) and t["id"] in env_log
+
+
+def test_once_unknown_workspace_fails_without_closing_anything(projects, herdr_log, monkeypatch):
+    real_repo(projects)
+    monkeypatch.setenv("FAKE_HERDR_WORKSPACE", "other")
+    t = mk(branch="task/job")
+    assert dispatch_main(["--once"]) == 1
+    assert tk.load_ticket(t["id"])["status"] == "open"
+    assert not any(x[:2] == ["tab", "close"] for x in calls(herdr_log))
+
+
+def test_once_never_passes_bypass_flags(projects, herdr_log):
+    real_repo(projects)
+    mk(branch="task/job")
+    assert dispatch_main(["--once"]) == 0
+    flags = [a for c in calls(herdr_log) for a in c if a.startswith("-")]
+    assert flags and set(flags) <= {"--workspace", "--cwd", "--label", "--no-focus", "--kind",
+                                    "--pane", "--", "--model"}
+
+
+def test_once_fix_goes_to_parent_agent_and_reuses_folder(projects, herdr_log):
+    repo = real_repo(projects)
+    parent = mk(branch="task/job")
+    tk.set_status(parent["id"], "done", allowed_from=("open",), assignee="codex")
+    git(repo, "worktree", "add", "-q", str(repo / ".worktrees" / "job"), "-b", "task/job")
+    fix = mk(type="fix", branch="task/job", parent=parent["id"])
+    assert dispatch_main(["--once"]) == 0
+    assert tk.load_ticket(fix["id"])["assignee"] == "codex"
+    start = next(x for x in calls(herdr_log) if x[:2] == ["agent", "start"])
+    assert start[3:5] == ["--kind", "codex"] and "--model" not in start
+    assert (repo / ".worktrees" / "job").is_dir()
+
+
+def test_once_respects_capacity(projects, herdr_log, capsys):
+    real_repo(projects)
+    mk(branch="task/one")
+    second = mk(branch="task/two")
+    assert dispatch_main(["--once"]) == 0
+    n = len(calls(herdr_log))
+    capsys.readouterr()
+    assert dispatch_main(["--once"]) == 0
+    assert tk.load_ticket(second["id"])["status"] == "open"
+    assert len(calls(herdr_log)) == n
+    assert "at capacity" in capsys.readouterr().out
+
+
+def test_once_with_nothing_to_do(projects, herdr_log, capsys):
+    assert dispatch_main(["--once"]) == 0
+    assert "no open tickets" in capsys.readouterr().out
+
+
+def test_once_refuses_inside_agent(projects, herdr_log, monkeypatch):
+    monkeypatch.setenv("CLAUDECODE", "1")
+    assert dispatch_main(["--once"]) == 1
+    assert not herdr_log.exists()

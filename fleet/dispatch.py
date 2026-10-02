@@ -92,7 +92,11 @@ def load_settings() -> dict:
         except ValueError as exc:
             raise SettingsError(f"{path} is not valid JSON: {exc}") from None
         _merge(settings, given, path)
-    settings["projects_dir"] = Path(settings["projects_dir"]).expanduser()
+    try:
+        settings["projects_dir"] = Path(settings["projects_dir"]).expanduser()
+    except RuntimeError:
+        raise SettingsError(f"projects_dir '{settings['projects_dir']}' starts with ~ "
+                            "but that home folder can't be found") from None
     return settings
 
 
@@ -263,16 +267,19 @@ def decide(tickets: list[dict], settings: dict) -> list[Decision]:
 
 # --- reconcile ---------------------------------------------------------------
 
-def is_merged(repo: Path, branch: str) -> bool:
-    """True if main has a merge commit whose message is exactly `Merge <branch>`."""
+def is_merged(repo: Path, branch: str, since: str | None = None) -> bool:
+    """True if main has a merge commit whose message is exactly `Merge <branch>`.
+    With `since` (a commit id), only merges made after that commit count, so an
+    old merge of a reused branch name doesn't match."""
     main = main_branch(repo)
     if main is None:
         return False
-    out = _git(repo, "log", main, "--merges", "--format=%B%x00")
+    out = _git(repo, "log", f"{since}..{main}" if since else main, "--merges", "--format=%B%x00")
     if out.returncode != 0:
         return False
     # Whole messages, NUL-separated: a subject match with extra text doesn't count.
-    return any(m.strip() == f"Merge {branch}" for m in out.stdout.split("\0"))
+    # Strip only the newlines git adds around each message, not spaces.
+    return any(m.strip("\n") == f"Merge {branch}" for m in out.stdout.split("\0"))
 
 
 def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None):
@@ -283,7 +290,7 @@ def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None):
         if repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir():
             log("RECONCILE_SKIP", f"{t['id']} repo folder {repo} not found")
             continue
-        if not is_merged(repo, t["branch"]):
+        if not is_merged(repo, t["branch"], t.get("base_commit")):
             log("RECONCILE_SKIP", f"{t['id']} {t['branch']} not merged")
             continue
         try:

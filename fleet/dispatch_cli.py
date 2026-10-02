@@ -1,4 +1,4 @@
-"""The `dispatch` command (Part A: --dry-run and --reconcile)."""
+"""The `dispatch` command: --dry-run, --reconcile and --once."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import sys
 
 from . import dispatch as dp
 from . import kaneo
+from . import launch as lc
 from . import ticket as tk
 
 
@@ -25,6 +26,8 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="show what would be launched; changes nothing")
     mode.add_argument("--reconcile", action="store_true",
                       help="mark claimed tickets whose branch was merged as done")
+    mode.add_argument("--once", action="store_true",
+                      help="reconcile, then launch the first eligible ticket")
     return p
 
 
@@ -50,6 +53,23 @@ def _cmd_reconcile(settings: dict) -> int:
     return 0
 
 
+def _cmd_once(settings: dict) -> int:
+    _cmd_reconcile(settings)
+    decisions = dp.decide(tk.list_tickets(), settings)
+    for d in decisions:
+        if d.eligible:
+            code, message = lc.launch(d, settings, _warn)
+            print(message)
+            return code
+    if not decisions:
+        print("nothing to launch: no open tickets")
+        dp.log("DECISION", "nothing to launch: no open tickets")
+    for d in decisions:
+        print(f"nothing launched; {d.line()}")
+        dp.log("DECISION", f"{d.ticket['id']} skip: {d.skip}")
+    return 0
+
+
 def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
     who = tk.current_creator()
@@ -60,7 +80,9 @@ def main(argv=None) -> int:
     try:
         settings = dp.load_settings()
         with dp.single_instance():
-            return _cmd_dry_run(settings) if args.dry_run else _cmd_reconcile(settings)
+            if args.dry_run:
+                return _cmd_dry_run(settings)
+            return _cmd_once(settings) if args.once else _cmd_reconcile(settings)
     except dp.AlreadyRunning:
         print("dispatch: another dispatch is already running; nothing to do.")
         return 0
