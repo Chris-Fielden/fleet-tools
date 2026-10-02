@@ -95,7 +95,7 @@ def load_settings() -> dict:
             raise SettingsError(f"{path} is not valid JSON: {exc}") from None
         _merge(settings, given, path)
     try:
-        settings["projects_dir"] = Path(settings["projects_dir"]).expanduser()
+        settings["projects_dir"] = Path(settings["projects_dir"]).expanduser().absolute()
     except RuntimeError:
         raise SettingsError(f"projects_dir '{settings['projects_dir']}' starts with ~ "
                             "but that home folder can't be found") from None

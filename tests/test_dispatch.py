@@ -752,3 +752,35 @@ def test_launch_and_log_failing_together_still_reopens(projects, herdr_log, monk
     monkeypatch.setattr("fleet.launch.dp.log", boom)           # and so does every log write
     assert dispatch_main(["--once"]) == 1
     assert tk.load_ticket(t["id"])["status"] == "open"
+
+
+def test_partial_new_task_is_cleaned_up(projects, herdr_log):
+    repo = real_repo(projects)
+    script = repo / "scripts" / "new-task.sh"
+    script.write_text(script.read_text() + "\nexit 3\n")  # fails after making the folder
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "script fails at the end")
+    t = mk(branch="task/job")
+    assert dispatch_main(["--once"]) == 1
+    assert tk.load_ticket(t["id"])["status"] == "open"
+    assert not (repo / ".worktrees" / "job").exists()
+    assert git(repo, "branch", "--list", "task/job").strip() == ""
+
+
+def test_relative_projects_dir_is_made_absolute(env, monkeypatch):
+    (env / "fleet").mkdir(exist_ok=True)
+    (env / "fleet" / "dispatch.json").write_text(json.dumps({"projects_dir": "rel/projects"}))
+    monkeypatch.chdir(env)
+    assert dp.load_settings()["projects_dir"] == env / "rel" / "projects"
+
+
+def test_startup_wait_is_bounded_by_the_deadline(monkeypatch):
+    import fleet.launch as lc
+    seen = []
+    monkeypatch.setattr(lc, "START_TIMEOUT", 5.0)
+    monkeypatch.setattr(lc, "POLL_INTERVAL", 0.01)
+    monkeypatch.setattr(lc, "agent_state", lambda n, timeout=120: seen.append(timeout) or "idle")
+    with pytest.raises(lc.LaunchError):
+        monkeypatch.setattr(lc, "START_TIMEOUT", 0.05)
+        lc.wait_until_working("x")
+    assert seen and max(seen) <= 0.05

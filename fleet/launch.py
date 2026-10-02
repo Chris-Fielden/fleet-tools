@@ -53,14 +53,14 @@ class AgentMayBeRunning(LaunchError):
 
 # --- herdr -------------------------------------------------------------------
 
-def herdr(*args: str) -> dict:
+def herdr(*args: str, timeout: float = 120) -> dict:
     """Run one herdr command and return its parsed JSON."""
     try:
         cmd = shlex.split(os.environ.get("FLEET_HERDR", "herdr")) + list(args)
     except ValueError:
         raise LaunchError("FLEET_HERDR is not a valid command line") from None
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=max(timeout, 1))
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise LaunchError(f"herdr {args[0]} {args[1]} failed: {exc}") from None
     if proc.returncode != 0:
@@ -104,8 +104,8 @@ def find_workspace(name: str) -> str:
     raise LaunchError(f"herdr has no workspace '{name}'")
 
 
-def agent_state(name: str) -> str | None:
-    for a in _dicts(herdr("agent", "list")):
+def agent_state(name: str, timeout: float = 120) -> str | None:
+    for a in _dicts(herdr("agent", "list", timeout=timeout)):
         if a.get("name") == name:
             state = a.get("status", a.get("agent_status", a.get("state")))
             return state if isinstance(state, str) else None
@@ -115,7 +115,7 @@ def agent_state(name: str) -> str | None:
 def wait_until_working(name: str) -> None:
     deadline = time.monotonic() + START_TIMEOUT
     while True:
-        if agent_state(name) == "working":
+        if agent_state(name, deadline - time.monotonic()) == "working":
             return
         if time.monotonic() >= deadline:
             raise LaunchError(f"agent {name} was not working after {START_TIMEOUT:.0f}s")
@@ -169,12 +169,36 @@ def make_worktree(d: dp.Decision) -> tuple[Path, str]:
             if proc.returncode != 0:
                 raise LaunchError(f"git worktree add for {branch} failed")
             return folder, "checkout"
-    proc = _run(["bash", "scripts/new-task.sh", d.name], d.repo_path)
+    existed = dp.branch_exists(d.repo_path, branch)
+    try:
+        proc = _run(["bash", "scripts/new-task.sh", d.name], d.repo_path)
+    except LaunchError:
+        _discard_partial(d, folder, existed)
+        raise
     if proc.returncode != 0 or not folder.is_dir():
+        _discard_partial(d, folder, existed)
         tail = (proc.stdout + proc.stderr).strip().splitlines()
         raise LaunchError(f"scripts/new-task.sh {d.name} failed"
                           + (f": {tail[-1][:200]}" if tail else ""))
     return folder, "branch"
+
+
+def _discard_partial(d: dp.Decision, folder: Path, existed: bool) -> None:
+    """new-task.sh failed: remove a half-made folder and branch, but only a
+    branch it just created that has no commits beyond main."""
+    branch = d.ticket["branch"]
+    if existed or not dp.branch_exists(d.repo_path, branch):
+        return
+    main = dp.main_branch(d.repo_path)
+    if _run(["git", "merge-base", "--is-ancestor", branch, main or "main"], d.repo_path).returncode:
+        _safe_log("CLEANUP_SKIPPED", f"{d.ticket['id']} {branch} has commits beyond main")
+        return
+    if folder.exists():
+        if _run(["git", "worktree", "remove", str(folder)], d.repo_path).returncode:
+            _safe_log("CLEANUP_SKIPPED", f"{d.ticket['id']} could not remove {d.worktree}")
+            return
+    _run(["git", "branch", "-d", branch], d.repo_path)
+    _safe_log("CLEANUP", f"{d.ticket['id']} removed partly made {d.worktree}")
 
 
 def discard_new_worktree(d: dp.Decision, folder: Path, made: str, initial: str | None) -> None:
