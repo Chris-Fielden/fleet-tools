@@ -160,6 +160,9 @@ def make_worktree(d: dp.Decision) -> tuple[Path, str]:
     "branch" (a new branch and folder)."""
     folder = d.repo_path / ".worktrees" / d.name
     branch = d.ticket["branch"]
+    wt_root = d.repo_path / ".worktrees"
+    if wt_root.is_symlink() or (wt_root.exists() and wt_root.resolve().parent != d.repo_path.resolve()):
+        raise LaunchError(f"{wt_root} is not a plain folder inside the repo")
     if d.ticket["type"] == "fix":
         if folder.exists() or folder.is_symlink():
             check_reusable(d, folder)
@@ -168,6 +171,7 @@ def make_worktree(d: dp.Decision) -> tuple[Path, str]:
             proc = _run(["git", "worktree", "add", str(folder), branch], d.repo_path)
             if proc.returncode != 0:
                 raise LaunchError(f"git worktree add for {branch} failed")
+            check_reusable(d, folder)
             return folder, "checkout"
     existed = dp.branch_exists(d.repo_path, branch)
     try:
@@ -180,6 +184,7 @@ def make_worktree(d: dp.Decision) -> tuple[Path, str]:
         tail = (proc.stdout + proc.stderr).strip().splitlines()
         raise LaunchError(f"scripts/new-task.sh {d.name} failed"
                           + (f": {tail[-1][:200]}" if tail else ""))
+    check_reusable(d, folder)
     return folder, "branch"
 
 
@@ -201,7 +206,7 @@ def _discard_partial(d: dp.Decision, folder: Path, existed: bool) -> None:
     _safe_log("CLEANUP", f"{d.ticket['id']} removed partly made {d.worktree}")
 
 
-def discard_new_worktree(d: dp.Decision, folder: Path, made: str, initial: str | None) -> None:
+def discard_new_worktree(d: dp.Decision, folder: Path, made: str, initial: str | None) -> bool:
     """After a failed launch, remove what this run created so the ticket can be
     retried: the folder, and the branch too if this run made it. Plain
     (non-forced) git commands only, and only if the folder is still exactly at
@@ -209,7 +214,7 @@ def discard_new_worktree(d: dp.Decision, folder: Path, made: str, initial: str |
     ticket = d.ticket["id"]
     if initial is None or _git_out(folder, "rev-parse", "HEAD") != initial:
         _safe_log("CLEANUP_SKIPPED", f"{ticket} {d.name} has new commits or cannot be checked")
-        return
+        return False
     steps = [["worktree", "remove", str(folder)]]
     if made == "branch":
         steps.append(["branch", "-d", d.ticket["branch"]])
@@ -220,8 +225,9 @@ def discard_new_worktree(d: dp.Decision, folder: Path, made: str, initial: str |
             proc = None
         if proc is None or proc.returncode != 0:
             _safe_log("CLEANUP_SKIPPED", f"{ticket} git {cmd[0]} failed")
-            return
+            return False
     _safe_log("CLEANUP", f"{ticket} removed {d.worktree}" + (" and its branch" if made == "branch" else ""))
+    return True
 
 
 def record_writer(folder: Path, agent: str, ticket_id: str) -> None:
@@ -291,14 +297,17 @@ def launch(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
         return 1, (f"{t['id']}  launch failed: {exc}. The agent may still be running, so the "
                    "ticket stays claimed; close the tab by hand, then `ticket close` it")
     except (LaunchError, OSError, subprocess.TimeoutExpired) as exc:
+        kept = ""
         if made != "nothing":
             try:
-                discard_new_worktree(d, folder, made, initial)
+                if not discard_new_worktree(d, folder, made, initial):
+                    kept = ("; the task folder and branch were kept because they may hold work, "
+                            "so a human must look before this can be retried")
             except (LaunchError, OSError, subprocess.TimeoutExpired):
-                pass
+                kept = "; cleanup failed, so a human must look before this can be retried"
         reopened = tk.set_status(t["id"], "open", allowed_from=("claimed",), assignee=None)
         kaneo.mirror_quietly(reopened, warn)
         _safe_log("LAUNCH_FAILED", f"{t['id']} {exc}")
-        return 1, f"{t['id']}  launch failed: {exc}; ticket put back to open"
+        return 1, f"{t['id']}  launch failed: {exc}; ticket put back to open{kept}"
     _safe_log("LAUNCHED", f"{t['id']} {d.agent} ({d.model or 'default'}) tab {tab} in {d.worktree}")
     return 0, f"{t['id']}  launched {d.agent} ({d.model or 'default'}) in tab {tab}"

@@ -784,3 +784,16 @@ def test_startup_wait_is_bounded_by_the_deadline(monkeypatch):
         monkeypatch.setattr(lc, "START_TIMEOUT", 0.05)
         lc.wait_until_working("x")
     assert seen and max(seen) <= 0.05
+
+
+def test_symlinked_worktrees_folder_is_refused(projects, herdr_log, env):
+    repo = real_repo(projects)
+    outside = env / "outside"
+    outside.mkdir()
+    (repo / ".gitignore").write_text(".worktrees\n")  # a symlink isn't matched by ".worktrees/"
+    git(repo, "commit", "-q", "-am", "ignore")
+    (repo / ".worktrees").symlink_to(outside)
+    t = mk(branch="task/job")
+    assert dispatch_main(["--once"]) == 1
+    assert tk.load_ticket(t["id"])["status"] == "open"
+    assert list(outside.iterdir()) == [] and not herdr_log.exists()

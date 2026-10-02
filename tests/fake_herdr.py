@@ -26,6 +26,9 @@ elif cmd == "agent list":
              if json.loads(line)[:2] == ["agent", "start"]]
     out = {"result": {"agents": [
         {"name": n, "status": os.environ.get("FAKE_HERDR_STATE", "working")} for n in names]}}
-else:
+elif cmd in ("agent prompt", "tab close"):
     out = {"result": {}}
+else:
+    print(json.dumps({"error": f"fake herdr: unsupported command {cmd}"}), file=sys.stderr)
+    sys.exit(1)
 print(json.dumps(out))
