@@ -740,3 +740,15 @@ def test_log_failure_after_claim_rolls_back(projects, herdr_log, monkeypatch):
     monkeypatch.setattr("fleet.launch.dp.log", boom)
     assert dispatch_main(["--once"]) == 1
     assert tk.load_ticket(t["id"])["status"] == "open"
+
+
+def test_launch_and_log_failing_together_still_reopens(projects, herdr_log, monkeypatch):
+    real_repo(projects)
+    t = mk(branch="task/job")
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr("fleet.launch.Path.write_text", boom)  # writer file fails
+    monkeypatch.setattr("fleet.launch.dp.log", boom)           # and so does every log write
+    assert dispatch_main(["--once"]) == 1
+    assert tk.load_ticket(t["id"])["status"] == "open"

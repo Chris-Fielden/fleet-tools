@@ -34,6 +34,14 @@ summary: what changed, how you verified it, and the review verdict.
 """
 
 
+def _safe_log(kind: str, message: str) -> None:
+    """Log during rollback: a log failure must never stop the rollback."""
+    try:
+        dp.log(kind, message)
+    except OSError:
+        pass
+
+
 class LaunchError(Exception):
     pass
 
@@ -176,7 +184,7 @@ def discard_new_worktree(d: dp.Decision, folder: Path, made: str, initial: str |
     the commit it was created at."""
     ticket = d.ticket["id"]
     if initial is None or _git_out(folder, "rev-parse", "HEAD") != initial:
-        dp.log("CLEANUP_SKIPPED", f"{ticket} {d.name} has new commits or cannot be checked")
+        _safe_log("CLEANUP_SKIPPED", f"{ticket} {d.name} has new commits or cannot be checked")
         return
     steps = [["worktree", "remove", str(folder)]]
     if made == "branch":
@@ -187,9 +195,9 @@ def discard_new_worktree(d: dp.Decision, folder: Path, made: str, initial: str |
         except LaunchError:
             proc = None
         if proc is None or proc.returncode != 0:
-            dp.log("CLEANUP_SKIPPED", f"{ticket} git {cmd[0]} failed")
+            _safe_log("CLEANUP_SKIPPED", f"{ticket} git {cmd[0]} failed")
             return
-    dp.log("CLEANUP", f"{ticket} removed {d.worktree}" + (" and its branch" if made == "branch" else ""))
+    _safe_log("CLEANUP", f"{ticket} removed {d.worktree}" + (" and its branch" if made == "branch" else ""))
 
 
 def record_writer(folder: Path, agent: str, ticket_id: str) -> None:
@@ -255,15 +263,18 @@ def launch(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
         record_writer(folder, d.agent, t["id"])
         tab = start_agent(d, folder, find_workspace(settings["herdr_workspace"]), warn)
     except AgentMayBeRunning as exc:
-        dp.log("LAUNCH_FAILED", f"{t['id']} {exc}; ticket stays claimed, needs a human")
+        _safe_log("LAUNCH_FAILED", f"{t['id']} {exc}; ticket stays claimed, needs a human")
         return 1, (f"{t['id']}  launch failed: {exc}. The agent may still be running, so the "
                    "ticket stays claimed; close the tab by hand, then `ticket close` it")
     except (LaunchError, OSError, subprocess.TimeoutExpired) as exc:
         if made != "nothing":
-            discard_new_worktree(d, folder, made, initial)
+            try:
+                discard_new_worktree(d, folder, made, initial)
+            except (LaunchError, OSError, subprocess.TimeoutExpired):
+                pass
         reopened = tk.set_status(t["id"], "open", allowed_from=("claimed",), assignee=None)
         kaneo.mirror_quietly(reopened, warn)
-        dp.log("LAUNCH_FAILED", f"{t['id']} {exc}")
+        _safe_log("LAUNCH_FAILED", f"{t['id']} {exc}")
         return 1, f"{t['id']}  launch failed: {exc}; ticket put back to open"
-    dp.log("LAUNCHED", f"{t['id']} {d.agent} ({d.model or 'default'}) tab {tab} in {d.worktree}")
+    _safe_log("LAUNCHED", f"{t['id']} {d.agent} ({d.model or 'default'}) tab {tab} in {d.worktree}")
     return 0, f"{t['id']}  launched {d.agent} ({d.model or 'default'}) in tab {tab}"
