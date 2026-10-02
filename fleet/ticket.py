@@ -354,6 +354,8 @@ def set_status(ticket_id: str, status: str, *, allowed_from, assignee=None,
     unless its current status is in `allowed_from`. Returns the new ticket."""
     if status not in STATUSES:
         raise TicketError(f"unknown status: {status}")
+    if assignee is not None and assignee not in AGENTS:
+        raise TicketError(f"assignee must be one of: {', '.join(AGENTS)}")
     with _locked():
         ticket = load_ticket(ticket_id)
         if ticket["status"] not in allowed_from:

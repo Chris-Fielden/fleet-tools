@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 
 from . import dispatch as dp
@@ -66,6 +67,9 @@ def main(argv=None) -> int:
     except dp.SettingsError as exc:
         print(f"dispatch: {exc}", file=sys.stderr)
         return 2
+    except subprocess.TimeoutExpired:
+        print("dispatch: a git command took too long; try again", file=sys.stderr)
+        return 1
     except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
         print(f"dispatch: {exc}", file=sys.stderr)
         return 1

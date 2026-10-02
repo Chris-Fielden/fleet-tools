@@ -268,8 +268,11 @@ def is_merged(repo: Path, branch: str) -> bool:
     main = main_branch(repo)
     if main is None:
         return False
-    out = _git(repo, "log", main, "--merges", "--format=%s")
-    return out.returncode == 0 and f"Merge {branch}" in out.stdout.splitlines()
+    out = _git(repo, "log", main, "--merges", "--format=%B%x00")
+    if out.returncode != 0:
+        return False
+    # Whole messages, NUL-separated: a subject match with extra text doesn't count.
+    return any(m.strip() == f"Merge {branch}" for m in out.stdout.split("\0"))
 
 
 def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None):

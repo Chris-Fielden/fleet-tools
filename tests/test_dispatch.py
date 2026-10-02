@@ -327,6 +327,26 @@ def test_reconcile_needs_exact_message(projects, capsys):
     assert tk.load_ticket(t["id"])["status"] == "claimed"
 
 
+def test_reconcile_needs_whole_message(projects):
+    repo = make_repo(projects)
+    t = claim(mk(branch="task/extra"))
+    git(repo, "checkout", "-q", "-b", "task/extra")
+    (repo / "e.txt").write_text("e")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "work")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "-q", "--no-ff", "-m", "Merge task/extra", "-m", "more text", "task/extra")
+    assert dispatch_main(["--reconcile"]) == 0
+    assert tk.load_ticket(t["id"])["status"] == "claimed"
+
+
+def test_set_status_rejects_bad_assignee():
+    t = mk()
+    with pytest.raises(tk.TicketError, match="assignee"):
+        tk.set_status(t["id"], "claimed", allowed_from=("open",), assignee="bob")
+    assert tk.load_ticket(t["id"])["status"] == "open"
+
+
 def test_reconcile_ignores_open_tickets(projects):
     repo = make_repo(projects)
     t = mk(branch="task/x")
