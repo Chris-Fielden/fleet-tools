@@ -7,6 +7,7 @@ permission-bypass flags: the only agent argument is `--model`.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -394,13 +395,22 @@ def research_folder(ticket_id: str, settings: dict) -> Path:
     # Never write through a link: it could lead out of the folder.
     if claude_dir.is_symlink() or target.is_symlink():
         raise LaunchError(f"{claude_dir} contains a symlink; not writing the guard settings through it")
-    claude_dir.mkdir(parents=True, exist_ok=True)
+    folder.mkdir(parents=True, exist_ok=True)
+    # research_dir itself was checked; this catches a folder that is, or sits in, its own repo.
+    if dp._git(folder, "rev-parse", "--show-toplevel").returncode == 0:
+        raise LaunchError(f"{folder} is inside a git repo; research folders must not be")
+    claude_dir.mkdir(exist_ok=True)
     if claude_dir.resolve().parent != folder.resolve():
         raise LaunchError(f"{claude_dir} is not a plain folder inside {folder}")
     fd, tmp = tempfile.mkstemp(dir=claude_dir, prefix=".tmp-", suffix=".json")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps(hooks, indent=2) + "\n")
-    os.replace(tmp, target)  # replaces a leftover file or link itself, never what it points at
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(hooks, indent=2) + "\n")
+        os.replace(tmp, target)  # replaces a leftover file or link itself, never what it points at
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
     return folder
 
 
@@ -426,7 +436,7 @@ def launch_research(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
         _safe_log("LAUNCH_FAILED", f"{t['id']} {exc}; ticket stays claimed, needs a human")
         return 1, (f"{t['id']}  launch failed: {exc}. The agent may still be running, so the "
                    "ticket stays claimed; close the tab by hand, then close the ticket")
-    except (LaunchError, OSError) as exc:
+    except (LaunchError, OSError, subprocess.TimeoutExpired) as exc:
         reopened = tk.set_status(t["id"], before, allowed_from=("claimed",), assignee=None,
                                  started_at="")
         kaneo.mirror_quietly(reopened, warn)

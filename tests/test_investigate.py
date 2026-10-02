@@ -515,6 +515,40 @@ def test_symlinked_claude_folder_is_not_written_through(projects, herdr_log, env
     assert tk.load_ticket(t["id"])["status"] == "proposed" and not herdr_log.exists()
 
 
+def test_git_timeout_during_research_launch_rolls_back(projects, herdr_log, monkeypatch):
+    t = idea()
+
+    def slow(*a, **k):
+        raise __import__("subprocess").TimeoutExpired("git", 60)
+    monkeypatch.setattr("fleet.launch.dp._git", slow)
+    assert dispatch_main(["--once"]) == 1
+    got = tk.load_ticket(t["id"])
+    assert got["status"] == "proposed" and got["assignee"] is None and "started_at" not in got
+
+
+def test_ticket_folder_that_is_its_own_repo_is_refused(projects, herdr_log, env):
+    t = idea()
+    folder = env / "home" / "fleet-research" / t["id"]
+    folder.mkdir(parents=True)
+    __import__("subprocess").run(["git", "init", "-q", str(folder)], check=True)
+    assert dispatch_main(["--once"]) == 1
+    assert tk.load_ticket(t["id"])["status"] == "proposed"
+    assert not (folder / ".claude").exists() and not herdr_log.exists()
+
+
+def test_failed_settings_write_leaves_no_temp_file(projects, herdr_log, env, monkeypatch):
+    t = idea()
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+    real_replace = __import__("os").replace
+    monkeypatch.setattr("fleet.launch.os.replace",
+                        lambda src, dst: boom() if str(dst).endswith("settings.json") else real_replace(src, dst))
+    assert dispatch_main(["--once"]) == 1
+    claude = env / "home" / "fleet-research" / t["id"] / ".claude"
+    assert list(claude.iterdir()) == []
+
+
 def test_research_dir_inside_a_git_repo_is_refused(projects, env):
     repo = projects / "somerepo"
     repo.mkdir()
