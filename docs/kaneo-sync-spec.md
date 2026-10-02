@@ -41,7 +41,7 @@ A file `$FLEET_HOME/kaneo.json`, created by the human, never by the tool:
 | Ticket | Kaneo |
 | --- | --- |
 | repo | A project with that exact name in the workspace. Create it if missing. |
-| status | A column in that project named exactly after the status (proposed, open, claimed, done, failed, cancelled). Create missing columns. Mark done and cancelled as final columns. |
+| status | A column in the project, matched by name case-insensitively: proposed -> Proposed, open -> To Do, claimed -> In Progress, done -> Done, failed -> Failed, cancelled -> Done with " (cancelled)" on the title (Kaneo has no per-card archive). Missing columns are created, Done and Failed are final, and the order is made Proposed, To Do, In Progress, In Review, Done, Failed. In Review is unused. Per-status columns made by the older sync (open, claimed, cancelled) are deleted only when empty. |
 | id + title | Task title: `[T-20261002-001] Phase 1 review follow-ups` |
 | body + other fields | Task description: the body, then a fenced block listing type, branch, commit, parent, created_by, assignee and the verdict line if any. |
 | type | Priority `no-priority` for now. |

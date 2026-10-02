@@ -60,9 +60,9 @@ def test_creates_project_columns_and_card(kaneo):
     assert [p["name"] for p in kaneo.projects] == ["fleet-tools"]
     pid = kaneo.projects[0]["id"]
     cols = {c["name"]: c for c in kaneo.columns[pid]}
-    assert set(cols) == {"open"}
+    assert list(cols) == ["Proposed", "To Do", "In Progress", "In Review", "Done", "Failed"]
     task = only_task(kaneo)
-    assert task["status"] == cols["open"]["slug"]
+    assert task["status"] == cols["To Do"]["slug"]
     assert task["title"] == f"[{tid}] Phase 1 review follow-ups"
     assert task["priority"] == "no-priority"
     assert task["description"].startswith("Details.\n\n```\ntype: build\nbranch: task/demo\n")
@@ -73,10 +73,9 @@ def test_final_columns_are_marked_final(kaneo):
     tid = new_ticket()
     edit_ticket(tid, status="done")
     run("sync")
-    done = [c for cols in kaneo.columns.values() for c in cols if c["name"] == "done"]
-    assert done and done[0]["isFinal"] is True
-    open_col = [c for cols in kaneo.columns.values() for c in cols if c["name"] == "open"]
-    assert open_col[0]["isFinal"] is False
+    cols = {c["name"]: c for cols in kaneo.columns.values() for c in cols}
+    assert cols["Done"]["isFinal"] is True and cols["Failed"]["isFinal"] is True
+    assert not any(cols[n]["isFinal"] for n in ("Proposed", "To Do", "In Progress", "In Review"))
 
 
 def test_second_sync_is_unchanged_with_no_writes(kaneo):
@@ -97,7 +96,7 @@ def test_status_title_and_body_changes_update_the_same_card(kaneo):
     edit_ticket(tid, status="claimed")
     r = run("sync")
     assert f"{tid}  updated" in r.stdout
-    assert only_task(kaneo)["status"] == "claimed"
+    assert only_task(kaneo)["status"] == "in-progress"
 
     edit_ticket(tid, title="New title", body="New body")
     r = run("sync")
@@ -132,7 +131,7 @@ def test_dry_run_sends_no_writes(kaneo):
     r = run("sync", "--dry-run")
     assert f"{tid}  would update" in r.stdout
     assert kaneo.writes == []
-    assert only_task(kaneo)["status"] == "open"
+    assert only_task(kaneo)["status"] == "to-do"
 
 
 @pytest.mark.parametrize("mode", [0o644, 0o640, 0o604, 0o660])
@@ -215,7 +214,7 @@ def test_approve_mirrors_the_card(kaneo):
     assert [t["status"] for t in kaneo.tasks.values() if pid_ticket in t["title"]] == ["proposed"]
     r = run("approve", pid_ticket)
     assert r.returncode == 0, r.stderr
-    assert [t["status"] for t in kaneo.tasks.values() if pid_ticket in t["title"]] == ["open"]
+    assert [t["status"] for t in kaneo.tasks.values() if pid_ticket in t["title"]] == ["to-do"]
     assert tid
 
 
@@ -308,4 +307,91 @@ def test_sync_uses_the_ticket_as_it_is_now_not_a_stale_snapshot(kaneo, monkeypat
     edit_ticket(tid, status="claimed")
     outcomes = dict(kn.sync([stale]))
     assert outcomes[tid] == "updated"
-    assert only_task(kaneo)["status"] == "claimed"
+    assert only_task(kaneo)["status"] == "in-progress"
+
+
+def names(kaneo):
+    return [c["name"] for c in kaneo.columns[kaneo.projects[0]["id"]]]
+
+
+def slug_of(kaneo, name):
+    return next(c["slug"] for c in kaneo.columns[kaneo.projects[0]["id"]] if c["name"] == name)
+
+
+def test_each_status_lands_in_its_column(kaneo):
+    want = {"proposed": "Proposed", "open": "To Do", "claimed": "In Progress",
+            "done": "Done", "failed": "Failed", "cancelled": "Done"}
+    ids = {}
+    for status in want:
+        tid = new_ticket()
+        edit_ticket(tid, status=status)
+        ids[tid] = status
+    run("sync")
+    for t in kaneo.tasks.values():
+        status = ids[t["title"].split("]")[0][1:]]
+        assert t["status"] == slug_of(kaneo, want[status])
+        assert t["title"].endswith("(cancelled)") == (status == "cancelled")
+    assert not any(c["name"] in ("open", "claimed", "cancelled")
+                   for c in kaneo.columns[kaneo.projects[0]["id"]])
+
+
+def test_existing_columns_are_reused_case_insensitively_and_order_fixed(kaneo):
+    tid = new_ticket()
+    pid = kaneo.projects[0]["id"]
+    kaneo.tasks.clear()
+    (fleet_home() / "kaneo-map.json").unlink()
+    kaneo.columns[pid] = [
+        {"id": "k1", "projectId": pid, "name": "to do", "slug": "to-do", "isFinal": False, "position": 0},
+        {"id": "k2", "projectId": pid, "name": "IN PROGRESS", "slug": "in-progress", "isFinal": False, "position": 1},
+        {"id": "k3", "projectId": pid, "name": "In Review", "slug": "in-review", "isFinal": False, "position": 2},
+        {"id": "k4", "projectId": pid, "name": "DONE", "slug": "done", "isFinal": False, "position": 3},
+    ]
+    run("sync")
+    cols = kaneo.columns[pid]
+    assert [c["name"].lower() for c in cols] == [
+        "proposed", "to do", "in progress", "in review", "done", "failed"]
+    assert [c["position"] for c in cols] == list(range(6))
+    assert len(cols) == 6  # nothing duplicated
+    assert next(c for c in cols if c["id"] == "k4")["isFinal"] is True
+    assert only_task(kaneo)["status"] == "to-do"
+    assert any(r["path"] == f"/column/reorder/{pid}" for r in kaneo.writes)
+    kaneo.requests.clear()
+    assert f"{tid}  unchanged" in run("sync").stdout
+    assert kaneo.writes == []  # already in order: no reorder sent
+
+
+def test_cards_move_out_of_legacy_columns_which_are_then_deleted(kaneo):
+    tid = new_ticket()
+    pid = kaneo.projects[0]["id"]
+    old = {"id": "c-old", "projectId": pid, "name": "open", "slug": "open",
+           "isFinal": False, "position": 0}
+    kaneo.columns[pid].append(old)
+    only_task(kaneo)["status"] = "open"
+    r = run("sync")
+    assert f"{tid}  updated" in r.stdout
+    assert only_task(kaneo)["status"] == "to-do"
+    assert "open" not in names(kaneo)
+
+
+def test_legacy_column_with_a_foreign_card_is_kept(kaneo):
+    tid = new_ticket()
+    pid = kaneo.projects[0]["id"]
+    kaneo.columns[pid].append({"id": "c-old", "projectId": pid, "name": "claimed",
+                               "slug": "claimed", "isFinal": False, "position": 9})
+    kaneo.tasks["human"] = {"id": "human", "projectId": pid, "status": "claimed",
+                            "title": "mine", "position": 0}
+    run("sync")
+    assert "claimed" in names(kaneo)
+    assert "human" in kaneo.tasks
+    assert tid
+
+
+def test_dry_run_changes_no_columns(kaneo):
+    new_ticket()
+    pid = kaneo.projects[0]["id"]
+    kaneo.columns[pid] = [{"id": "c-old", "projectId": pid, "name": "open", "slug": "open",
+                           "isFinal": False, "position": 0}]
+    kaneo.requests.clear()
+    assert run("sync", "--dry-run").returncode == 0
+    assert kaneo.writes == []
+    assert names(kaneo) == ["open"]

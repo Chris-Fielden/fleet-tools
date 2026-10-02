@@ -8,7 +8,10 @@ Kaneo endpoints used (https://kaneo.app/docs/llms.txt, API reference):
   POST /project                   create a project (name, workspaceId, icon, slug)
   GET  /column/{projectId}        list a project's columns
   POST /column/{projectId}        create a column (name, isFinal)
-  PUT  /column/{id}               mark an existing done/cancelled column final
+  PUT  /column/{id}               mark an existing Done/Failed column final
+  PUT  /column/reorder/{projectId}  set column positions (columns: [{id, position}])
+  DELETE /column/{id}             remove a leftover column (409 if it holds tasks)
+  GET  /task/tasks/{projectId}    board view; used to check a column is empty
   POST /task/{projectId}          create a task (title, description, priority, status)
   GET  /task/{id}?view=detail     read a task, to compare before updating
   PUT  /task/{id}                 update a task (title, description, priority,
@@ -34,7 +37,17 @@ from pathlib import Path
 from . import ticket as tk
 
 TIMEOUT = 10  # seconds per request
-FINAL_STATUSES = ("done", "cancelled")
+# Columns, left to right. Tickets use Kaneo's own To Do / In Progress / Done;
+# Proposed and Failed are ours. In Review is created so the order is right,
+# but nothing is put there yet (the dispatcher phase will).
+COLUMNS = ("Proposed", "To Do", "In Progress", "In Review", "Done", "Failed")
+FINAL_COLUMNS = ("Done", "Failed")
+# Kaneo has no per-card archive call, so a cancelled ticket sits in Done,
+# marked in its title.
+STATUS_COLUMN = {"proposed": "Proposed", "open": "To Do", "claimed": "In Progress",
+                 "done": "Done", "cancelled": "Done", "failed": "Failed"}
+# Per-status columns an earlier version of the sync created.
+LEGACY_COLUMNS = ("open", "claimed", "cancelled")
 PRIORITY = "no-priority"
 
 
@@ -184,7 +197,8 @@ def _load_map() -> dict:
 # --- mapping -----------------------------------------------------------------
 
 def card_title(t: dict) -> str:
-    return f"[{t['id']}] {t['title']}"
+    suffix = " (cancelled)" if t["status"] == "cancelled" else ""
+    return f"[{t['id']}] {t['title']}{suffix}"
 
 
 def card_description(t: dict) -> str:
@@ -231,22 +245,71 @@ class _Board:
         self._projects[repo] = found
         return found
 
-    def column_slug(self, project_id: str, status: str):
+    def _columns_of(self, project_id: str) -> dict[str, dict]:
+        """Columns by lower-cased name, in board order."""
         cols = self._columns.get(project_id)
         if cols is None:
             listing = self.c.request("GET", f"/column/{project_id}")
-            cols = {c["name"]: c for c in listing or [] if isinstance(c, dict)}
+            found = [c for c in listing or [] if isinstance(c, dict)]
+            found.sort(key=lambda c: c.get("position") or 0)
+            cols = {}
+            for c in found:
+                cols.setdefault(c["name"].lower(), c)
             self._columns[project_id] = cols
-        final = status in FINAL_STATUSES
-        if status not in cols:
-            if not self.create:
-                return None
-            cols[status] = self.c.request("POST", f"/column/{project_id}", body={
-                "name": status, "isFinal": final})
-        elif final and not cols[status].get("isFinal") and self.create:
-            self.c.request("PUT", f"/column/{cols[status]['id']}", body={"isFinal": True})
-            cols[status]["isFinal"] = True
-        return cols[status]["slug"]
+            if self.create:
+                self._fix_board(project_id, cols)
+        return cols
+
+    def _fix_board(self, project_id: str, cols: dict[str, dict]) -> None:
+        """Create the missing columns, mark Done/Failed final, fix the order."""
+        for name in COLUMNS:
+            final = name in FINAL_COLUMNS
+            col = cols.get(name.lower())
+            if col is None:
+                cols[name.lower()] = self.c.request("POST", f"/column/{project_id}", body={
+                    "name": name, "isFinal": final})
+            elif final and not col.get("isFinal"):
+                self.c.request("PUT", f"/column/{col['id']}", body={"isFinal": True})
+                col["isFinal"] = True
+        ours = [name.lower() for name in COLUMNS]
+        extras = [k for k in cols if k not in ours]  # the human's own columns
+        order = ours[:ours.index("done")] + extras + ours[ours.index("done"):]
+        have = sorted(cols, key=lambda k: cols[k].get("position") or 0)
+        if have != order:
+            self.c.request("PUT", f"/column/reorder/{project_id}", body={
+                "columns": [{"id": cols[k]["id"], "position": i} for i, k in enumerate(order)]})
+            for i, k in enumerate(order):
+                cols[k]["position"] = i
+
+    def column_slug(self, project_id: str, status: str):
+        col = self._columns_of(project_id).get(STATUS_COLUMN[status].lower())
+        return None if col is None else col["slug"]
+
+    def prune(self) -> None:
+        """Delete columns an earlier sync created (open, claimed, cancelled),
+        but only when nothing is in them. Best effort: Kaneo itself also
+        refuses (409) to delete a column that holds cards."""
+        if not self.create:
+            return
+        for pid, cols in self._columns.items():
+            for name in LEGACY_COLUMNS:
+                col = cols.get(name)
+                if col is None:
+                    continue
+                try:
+                    if self._is_empty(pid, col["slug"]):
+                        self.c.request("DELETE", f"/column/{col['id']}")
+                        del cols[name]
+                except (KaneoError, KeyError, TypeError, AttributeError):
+                    pass  # leave it; the next sync tries again
+
+    def _is_empty(self, project_id: str, slug: str) -> bool:
+        board = self.c.request("GET", f"/task/tasks/{project_id}",
+                               query={"status": slug, "limit": 1})
+        columns = board["data"]["columns"]
+        if not isinstance(columns, list):
+            return False
+        return not any(col["tasks"] for col in columns)
 
 
 def _mirror(t: dict, board: _Board, tasks: dict, dry_run: bool) -> str:
@@ -317,6 +380,7 @@ def sync(tickets: list[dict], dry_run: bool = False):
             except (KeyError, TypeError, AttributeError):
                 outcome = "error: Kaneo sent a reply in an unexpected shape"
             yield t["id"], outcome
+        board.prune()
 
 
 def mirror_quietly(ticket: dict, warn) -> None:

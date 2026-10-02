@@ -55,6 +55,22 @@ class FakeKaneo:
             self.projects.append(p)
             self.columns[p["id"]] = []
             return 200, p
+        if parts[:2] == ["column", "reorder"] and len(parts) == 3 and method == "PUT":
+            cols = self.columns[parts[2]]
+            for item in body["columns"]:
+                next(c for c in cols if c["id"] == item["id"])["position"] = item["position"]
+            cols.sort(key=lambda c: c["position"])
+            return 200, cols
+        if parts[0] == "column" and len(parts) == 2 and method == "DELETE":
+            for cols in self.columns.values():
+                for c in cols:
+                    if c["id"] == parts[1]:
+                        if any(t["projectId"] == c["projectId"] and t["status"] == c["slug"]
+                               for t in self.tasks.values()):
+                            return 409, {"error": "The column still contains tasks"}
+                        cols.remove(c)
+                        return 200, c
+            return 400, {"error": "unknown column"}
         if parts[0] == "column" and len(parts) == 2 and method == "PUT":
             for cols in self.columns.values():
                 for c in cols:
@@ -65,11 +81,18 @@ class FakeKaneo:
         if parts[0] == "column" and len(parts) == 2:
             cols = self.columns[parts[1]]
             if method == "GET":
-                return 200, cols
+                return 200, sorted(cols, key=lambda c: c.get("position", 0))
             c = {"id": self.next_id("c"), "projectId": parts[1], "name": body["name"],
+                 "position": len(cols),
                  "slug": body["name"].lower().replace(" ", "-"), "isFinal": body.get("isFinal", False)}
             cols.append(c)
             return 200, c
+        if parts[:2] == ["task", "tasks"] and len(parts) == 3:
+            want = query.get("status", [None])[0]
+            found = [t for t in self.tasks.values() if t["projectId"] == parts[2]
+                     and (want is None or t["status"] == want)]
+            return 200, {"data": {"columns": [{"id": "x", "tasks": found}],
+                                  "archivedTasks": [], "plannedTasks": []}}
         if parts[0] == "task" and len(parts) == 2:
             if method == "POST":
                 if self.fail_title and self.fail_title in body["title"]:
@@ -119,6 +142,6 @@ class FakeKaneo:
                 self.end_headers()
                 self.wfile.write(raw)
 
-            do_GET = do_POST = do_PUT = _do
+            do_GET = do_POST = do_PUT = do_DELETE = _do
 
         return H
