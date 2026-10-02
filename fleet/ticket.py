@@ -29,8 +29,10 @@ FIELDS = (
     "created_by", "assignee", "status", "verdict", "created_at", "updated_at",
 )
 # Optional fields: may be absent from a stored ticket.
-OPTIONAL_FIELDS = ("close_note", "base_commit", "seq", "priority", "risk")
+OPTIONAL_FIELDS = ("close_note", "base_commit", "seq", "priority", "risk", "notes", "started_at")
 CLOSE_NOTE_MAX = 500
+NOTE_MAX = 4000
+NOTES_LIMIT = 50  # notes per ticket
 BODY_MAX = 4000
 AGENTS = ("claude", "codex")
 CLOSE_OUTCOMES = {"done": "done", "failed": "failed", "cancelled": "cancelled"}
@@ -192,8 +194,6 @@ def _check_common(f: dict, errors: list[str]) -> None:
     parent = f.get("parent")
     if t in ("review", "fix") and parent is None:
         errors.append(f"a {t} ticket needs a parent ticket id")
-    elif t == "build" and parent is not None:
-        errors.append("a build ticket must not have a parent")
     elif parent is not None and (not _is_str(parent) or not ID_RE.fullmatch(parent)):
         errors.append("parent must be a ticket id like BD-12 or T-20250101-001")
 
@@ -209,6 +209,17 @@ def _check_common(f: dict, errors: list[str]) -> None:
     body = f.get("body")
     if not _is_str(body) or not 1 <= len(body) <= BODY_MAX:
         errors.append(f"body must be 1 to {BODY_MAX} characters")
+
+
+def _check_notes(notes) -> list[str]:
+    if not isinstance(notes, list) or not 1 <= len(notes) <= NOTES_LIMIT:
+        return [f"notes must be a list of 1 to {NOTES_LIMIT} notes"]
+    for n in notes:
+        if (not isinstance(n, dict) or set(n) != {"at", "by", "text"} or not _is_time(n["at"])
+                or n["by"] not in CREATORS or not _is_str(n["text"])
+                or not 1 <= len(n["text"]) <= NOTE_MAX):
+            return [f"each note must have a time (at), a creator (by) and text of 1 to {NOTE_MAX} characters"]
+    return []
 
 
 def validate_new(fields: dict) -> list[str]:
@@ -255,6 +266,10 @@ def validate_stored(data) -> list[str]:
         errors.append("base_commit must be a git commit id (7 to 40 hex characters)")
     if "risk" in data and data["risk"] not in rk.LEVELS:
         errors.append(f"risk must be one of: {', '.join(rk.LEVELS)}")
+    if "started_at" in data and not _is_time(data["started_at"]):
+        errors.append("started_at must be a UTC ISO 8601 time like 2025-01-01T00:00:00Z")
+    if "notes" in data:
+        errors += _check_notes(data["notes"])
     seq = data.get("seq")
     if "seq" in data and (not isinstance(seq, int) or isinstance(seq, bool) or seq < 1):
         errors.append("seq must be a whole number, 1 or more")
@@ -429,8 +444,9 @@ def create_ticket(fields: dict) -> dict:
 
     t = fields["type"]
     # Investigate tickets always wait for approval; everything else starts
-    # open (the human approves at merge).
-    status = "proposed" if t == "investigate" else "open"
+    # open (the human approves at merge). A build ticket that follows up an
+    # investigation (it has a parent) also waits for approval.
+    status = "proposed" if t == "investigate" or (t == "build" and fields.get("parent")) else "open"
     try:
         start_risk = rk.starting_level(t, fields["repo"])
     except rk.RiskError as exc:
@@ -441,9 +457,11 @@ def create_ticket(fields: dict) -> dict:
         parent = fields.get("parent")
         if parent is not None:
             try:
-                _load_path(_ticket_path(parent), parent)
+                parent_ticket = _load_path(_ticket_path(parent), parent)
             except TicketError:
                 raise TicketInvalid([f"parent ticket {parent} does not exist or is unreadable"]) from None
+            if t == "build" and parent_ticket["type"] != "investigate":
+                raise TicketInvalid(["a build ticket's parent must be an investigate ticket"])
         now = _now()
         new_id, seq = _assign_ids(id_prefix(fields))
         ticket = {
@@ -494,7 +512,8 @@ _KEEP = object()
 
 
 def set_status(ticket_id: str, status: str, *, allowed_from, assignee=_KEEP,
-               close_note: str | None = None, base_commit: str | None = None) -> dict:
+               close_note: str | None = None, base_commit: str | None = None,
+               started_at: str | None = None) -> dict:
     """Move a ticket to `status` atomically, under the store lock. Refuses
     unless its current status is in `allowed_from`. Returns the new ticket."""
     if status not in STATUSES:
@@ -516,7 +535,32 @@ def set_status(ticket_id: str, status: str, *, allowed_from, assignee=_KEEP,
             if not COMMIT_RE.fullmatch(base_commit):
                 raise TicketError("base_commit must be a git commit id")
             ticket["base_commit"] = base_commit
+        if started_at is not None:
+            ticket["started_at"] = started_at
         ticket["updated_at"] = _now()
+        _write_atomic(_ticket_path(ticket_id), ticket)
+    return ticket
+
+
+def add_note(ticket_id: str, text: str) -> dict:
+    """Append a note (findings, a remark) to a ticket. Anyone may add one, so
+    it is checked for secrets and kept small."""
+    if not ID_RE.fullmatch(ticket_id):
+        raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
+    if not _is_str(text) or not 1 <= len(text) <= NOTE_MAX:
+        raise TicketInvalid([f"note must be 1 to {NOTE_MAX} characters"])
+    errors = check_secrets("note", text)
+    if errors:
+        raise TicketInvalid(errors)
+    who = current_creator()
+    with _locked():
+        ticket = load_ticket(ticket_id)
+        notes = ticket.get("notes", [])
+        if len(notes) >= NOTES_LIMIT:
+            raise TicketError(f"{ticket_id} already has {NOTES_LIMIT} notes, the most it can hold")
+        now = _now()
+        ticket["notes"] = notes + [{"at": now, "by": who, "text": text}]
+        ticket["updated_at"] = now
         _write_atomic(_ticket_path(ticket_id), ticket)
     return ticket
 

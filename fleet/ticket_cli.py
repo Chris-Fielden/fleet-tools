@@ -56,6 +56,10 @@ def _build_parser() -> argparse.ArgumentParser:
         outcome.add_argument(f"--{name}", dest="outcome", action="store_const", const=name)
     close.add_argument("--note")
 
+    note = sub.add_parser("note", help="add a note to a ticket (findings, remarks)")
+    note.add_argument("id")
+    note.add_argument("text")
+
     risk = sub.add_parser("risk", help="show a ticket's risk level, judge a diff, or raise a level")
     risk.add_argument("id", nargs="?")
     risk.add_argument("--diff", metavar="BASE...BRANCH",
@@ -134,6 +138,9 @@ def _cmd_show(args) -> int:
         print(f"  {name + ':':<12} {'-' if value is None else value}")
     print()
     print(t["body"])
+    for n in t.get("notes", []):
+        print(f"\n--- note by {n['by']}, {n['at']} ---")
+        print(n["text"])
     return 0
 
 
@@ -147,6 +154,13 @@ def _cmd_approve(args) -> int:
 def _cmd_close(args) -> int:
     t = tk.close_ticket(args.id, args.outcome, args.note)
     print(f"{t['id']} closed (now {t['status']})")
+    kaneo.mirror_quietly(t, _warn)
+    return 0
+
+
+def _cmd_note(args) -> int:
+    t = tk.add_note(args.id, args.text)
+    print(f"{t['id']} note added ({len(t['notes'])} so far)")
     kaneo.mirror_quietly(t, _warn)
     return 0
 
@@ -240,7 +254,7 @@ def _cmd_sync(args) -> int:
 def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
     handler = {"new": _cmd_new, "list": _cmd_list, "show": _cmd_show, "approve": _cmd_approve,
-               "close": _cmd_close, "risk": _cmd_risk, "gate": _cmd_gate,
+               "close": _cmd_close, "note": _cmd_note, "risk": _cmd_risk, "gate": _cmd_gate,
                "sync": _cmd_sync}
     try:
         return handler[args.command](args)

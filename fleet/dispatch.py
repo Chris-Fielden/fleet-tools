@@ -25,6 +25,8 @@ DEFAULTS = {
     "max_running": 1,
     "projects_dir": "~/projects",
     "herdr_workspace": "fleet",
+    "auto_investigate": True,
+    "max_investigations_per_day": 3,
 }
 LAUNCH_TYPES = ("build", "fix")
 MAIN_BRANCHES = ("main", "master")
@@ -129,6 +131,15 @@ def _merge(settings: dict, given, path: Path) -> None:
         if isinstance(n, bool) or not isinstance(n, int) or n < 1:
             raise SettingsError(f"{path}: max_running must be a whole number, 1 or more")
         settings["max_running"] = n
+    if "auto_investigate" in given:
+        if not isinstance(given["auto_investigate"], bool):
+            raise SettingsError(f"{path}: auto_investigate must be true or false")
+        settings["auto_investigate"] = given["auto_investigate"]
+    if "max_investigations_per_day" in given:
+        n = given["max_investigations_per_day"]
+        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+            raise SettingsError(f"{path}: max_investigations_per_day must be a whole number, 0 or more")
+        settings["max_investigations_per_day"] = n
     for key in ("projects_dir", "herdr_workspace"):
         if key in given:
             if not isinstance(given[key], str) or not given[key].strip():
@@ -187,6 +198,7 @@ class Decision:
     model: str | None = None
     name: str | None = None  # branch without "task/"
     repo_path: Path | None = None
+    research: bool = False  # an investigate ticket: no task folder, no branch
 
     @property
     def eligible(self) -> bool:
@@ -200,6 +212,8 @@ class Decision:
         if self.skip:
             return f"{self.ticket['id']}  skip: {self.skip}"
         model = self.model or "default"
+        if self.research:
+            return f"{self.ticket['id']}  would launch {self.agent} ({model}) to investigate (read-only)"
         return f"{self.ticket['id']}  would launch {self.agent} ({model}) in {self.worktree}"
 
 
@@ -257,16 +271,53 @@ def decide(tickets: list[dict], settings: dict) -> list[Decision]:
     oldest first within each (whoever filed them). Only the first eligible
     one stays eligible (rule 6); later ones are marked as waiting."""
     by_id = {t["id"]: t for t in tickets}
-    claimed = [t for t in tickets if t["status"] == "claimed"]
+    # Investigations are read-only: they neither fill the capacity nor hold a
+    # branch. They have their own rules (decide_investigations).
+    claimed = [t for t in tickets if t["status"] == "claimed" and t["type"] != "investigate"]
     decisions = []
     picked = False
-    open_tickets = sorted((t for t in tickets if t["status"] == "open"),
+    open_tickets = sorted((t for t in tickets if t["status"] == "open" and t["type"] != "investigate"),
                           key=lambda t: (t.get("priority") != "urgent", *tk.oldest_first_key(t)))
     for t in open_tickets:
         d = _judge(t, by_id, claimed, settings)
         if d.eligible:
             if picked:
                 d.skip = "only one ticket is started per run"
+            picked = True
+        decisions.append(d)
+    return decisions
+
+
+def started_today(tickets: list[dict], now: datetime | None = None) -> int:
+    """How many investigations were started today (UTC)."""
+    today = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+    return sum(1 for t in tickets
+               if t["type"] == "investigate" and t.get("started_at", "").startswith(today))
+
+
+def decide_investigations(tickets: list[dict], settings: dict, now: datetime | None = None) -> list[Decision]:
+    """One Decision per waiting investigate ticket (proposed, or open once a
+    human approved it): human-filed first, then oldest first. Only the first
+    eligible one stays eligible, so one investigation starts per run.
+
+    A proposed ticket needs `auto_investigate`; an approved one does not.
+    Every start counts against `max_investigations_per_day`."""
+    agent = settings["builder"]
+    used = started_today(tickets, now)
+    waiting = sorted((t for t in tickets if t["type"] == "investigate" and t["status"] in ("proposed", "open")),
+                     key=lambda t: (t["created_by"] != "human", *tk.oldest_first_key(t)))
+    decisions = []
+    picked = False
+    for t in waiting:
+        d = Decision(ticket=t, name=t["id"].lower(), agent=agent,
+                     model=settings["models"].get(agent), research=True)
+        if t["status"] == "proposed" and not settings["auto_investigate"]:
+            d.skip = "auto_investigate is off; approve it to investigate"
+        elif used >= settings["max_investigations_per_day"]:
+            d.skip = f"daily limit reached ({used} of {settings['max_investigations_per_day']} investigations started today)"
+        elif picked:
+            d.skip = "only one investigation is started per run"
+        else:
             picked = True
         decisions.append(d)
     return decisions
@@ -297,7 +348,8 @@ def is_merged(repo: Path, branch: str, since: str | None = None) -> bool:
 def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None):
     """Set claimed tickets whose branch was merged to done. Yields the changed
     tickets."""
-    for t in sorted((t for t in tickets if t["status"] == "claimed"), key=tk.oldest_first_key):
+    for t in sorted((t for t in tickets if t["status"] == "claimed" and t["type"] != "investigate"),
+                    key=tk.oldest_first_key):
         repo = settings["projects_dir"] / t["repo"]
         if repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir():
             log("RECONCILE_SKIP", f"{t['id']} repo folder {repo} not found")
