@@ -280,8 +280,8 @@ def test_rule_builder_setting(projects, capsys):
 
 def test_rule_only_first_eligible(projects, capsys):
     make_repo(projects)
-    a = mk(branch="task/a")
-    b = mk(branch="task/b")
+    a = mk(branch="task/aa")
+    b = mk(branch="task/bb")
     out = dry(capsys)
     assert f"{a['id']}  would launch" in out
     assert f"{b['id']}  skip: only one ticket is started per run" in out
