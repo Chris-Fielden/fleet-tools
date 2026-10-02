@@ -11,6 +11,7 @@ import json
 import os
 import shlex
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -388,8 +389,18 @@ def research_folder(ticket_id: str, settings: dict) -> Path:
     if folder.is_symlink() or (root.exists() and folder.resolve().parent != root.resolve()):
         raise LaunchError(f"{folder} is not a plain folder inside {root}")
     hooks = guard_hook_settings()
-    (folder / ".claude").mkdir(parents=True, exist_ok=True)
-    (folder / ".claude" / "settings.json").write_text(json.dumps(hooks, indent=2) + "\n", encoding="utf-8")
+    claude_dir = folder / ".claude"
+    target = claude_dir / "settings.json"
+    # Never write through a link: it could lead out of the folder.
+    if claude_dir.is_symlink() or target.is_symlink():
+        raise LaunchError(f"{claude_dir} contains a symlink; not writing the guard settings through it")
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    if claude_dir.resolve().parent != folder.resolve():
+        raise LaunchError(f"{claude_dir} is not a plain folder inside {folder}")
+    fd, tmp = tempfile.mkstemp(dir=claude_dir, prefix=".tmp-", suffix=".json")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(hooks, indent=2) + "\n")
+    os.replace(tmp, target)  # replaces a leftover file or link itself, never what it points at
     return folder
 
 
@@ -398,7 +409,7 @@ def launch_research(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
     On a failed launch the ticket goes back to the status it had."""
     t = d.ticket
     before = t["status"]
-    problem = dp.research_dir_problem(settings)
+    problem = dp.research_problem(settings)
     if problem:
         return 1, f"{t['id']}  not launched: {problem}"
     # started_at is saved with the claim, so a start can never go uncounted;

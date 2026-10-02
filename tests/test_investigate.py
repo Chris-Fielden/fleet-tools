@@ -483,6 +483,46 @@ def test_missing_guard_hooks_stop_the_launch(projects, herdr_log, monkeypatch, e
     assert not herdr_log.exists()
 
 
+def test_codex_builder_gets_no_investigations(projects, herdr_log, env, capsys):
+    t = idea()
+    (env / "fleet" / "dispatch.json").write_text(json.dumps(
+        {"projects_dir": str(projects), "builder": "codex"}))
+    assert dispatch_main(["--dry-run"]) == 0
+    assert "investigations need builder claude" in capsys.readouterr().out
+    d = dp.decide_investigations(tk.list_tickets(), dp.load_settings())[0]
+    code, message = lc.launch_research(d, dp.load_settings(), lambda m: None)
+    assert code == 1 and "builder claude" in message
+    assert tk.load_ticket(t["id"])["status"] == "proposed" and not herdr_log.exists()
+
+
+@pytest.mark.parametrize("link", ["dir", "file"])
+def test_symlinked_claude_folder_is_not_written_through(projects, herdr_log, env, link):
+    t = idea()
+    victim = env / "victim"
+    victim.mkdir()
+    folder = env / "home" / "fleet-research" / t["id"]
+    (folder / ".claude").parent.mkdir(parents=True)
+    if link == "dir":
+        (folder / ".claude").symlink_to(victim)
+    else:
+        (folder / ".claude").mkdir()
+        (victim / "settings.json").write_text("keep")
+        (folder / ".claude" / "settings.json").symlink_to(victim / "settings.json")
+    assert dispatch_main(["--once"]) == 1
+    assert sorted(p.name for p in victim.iterdir()) == (["settings.json"] if link == "file" else [])
+    if link == "file":
+        assert (victim / "settings.json").read_text() == "keep"
+    assert tk.load_ticket(t["id"])["status"] == "proposed" and not herdr_log.exists()
+
+
+def test_research_dir_inside_a_git_repo_is_refused(projects, env):
+    repo = projects / "somerepo"
+    repo.mkdir()
+    __import__("subprocess").run(["git", "init", "-q", str(repo)], check=True)
+    set_research_dir(env, projects, repo / "research")
+    assert "inside a git repo" in dp.research_dir_problem(dp.load_settings())
+
+
 # --- the real `herdr agent list` shape -----------------------------------------
 
 def test_agent_list_parsing_against_a_real_capture(monkeypatch):

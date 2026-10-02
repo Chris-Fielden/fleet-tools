@@ -196,7 +196,9 @@ dispatcher refuses to launch, and skips the ticket, if it does. Because this
 repo's `.claude/settings.json` is not loaded outside the repo, the dispatcher
 writes `<research_dir>/<ID>/.claude/settings.json` wiring the same `PreToolUse`
 guard hooks, by absolute path to this repo's `.claude/hooks` scripts, and
-refuses to launch if they are missing. The prompt names `projects_dir`. Its
+refuses to launch if they are missing, or if `.claude` or the settings file is a
+symlink. `research_dir` must not be inside a git repo. Only Claude's hooks are
+wired, so investigations are refused when `builder` is `codex`. The prompt names `projects_dir`. Its
 prompt says it is read-only and may use the web and the repos, record findings with
 `ticket note ID TEXT`, and file follow-up `build` tickets with
 `--parent ID` (these start `proposed`). No permission-bypass flag is passed,

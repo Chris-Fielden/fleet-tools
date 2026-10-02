@@ -108,12 +108,27 @@ def load_settings() -> dict:
     return settings
 
 
+def research_problem(settings: dict) -> str | None:
+    """Why no research agent can be launched right now, or None. Only Claude's
+    guard hooks are wired into the research folder, so a Codex builder (whose
+    guards live in .codex) is refused rather than run unguarded."""
+    if settings["builder"] != "claude":
+        return (f"investigations need builder claude (the research folder only gets Claude's "
+                f"guard hooks), not {settings['builder']}")
+    return research_dir_problem(settings)
+
+
 def research_dir_problem(settings: dict) -> str | None:
     """Why research agents can't work in research_dir, or None. It must not be
     inside the fleet's private folder (the ticket store and the Kaneo key), nor
     contain it: the guard hooks only watch what an agent does through its own
     tools, and a research agent there would sit next to the secrets."""
     here = settings["research_dir"].resolve()
+    ancestor = here
+    while not ancestor.exists() and ancestor != ancestor.parent:
+        ancestor = ancestor.parent
+    if _git(ancestor, "rev-parse", "--show-toplevel").returncode == 0:
+        return f"research_dir {settings['research_dir']} is inside a git repo; it must not be one"
     homes = {tk.fleet_home().resolve(), (tk._real_home() / ".fleet").resolve()}
     for private in sorted(homes):
         if here == private or here.is_relative_to(private) or private.is_relative_to(here):
@@ -319,7 +334,7 @@ def decide_investigations(tickets: list[dict], settings: dict, now: datetime | N
     Every start counts against `max_investigations_per_day`."""
     agent = settings["builder"]
     used = started_today(tickets, now)
-    folder_problem = research_dir_problem(settings)
+    folder_problem = research_problem(settings)
     waiting = sorted((t for t in tickets if t["type"] == "investigate" and t["status"] in ("proposed", "open")),
                      key=lambda t: (t["created_by"] != "human", *tk.oldest_first_key(t)))
     decisions = []
