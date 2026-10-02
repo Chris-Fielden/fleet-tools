@@ -27,6 +27,7 @@ FIELDS = (
 # Optional fields: may be absent from a stored ticket.
 OPTIONAL_FIELDS = ("close_note", "base_commit")
 CLOSE_NOTE_MAX = 500
+BODY_MAX = 4000
 AGENTS = ("claude", "codex")
 CLOSE_OUTCOMES = {"done": "done", "failed": "failed", "cancelled": "cancelled"}
 # Fields a caller may supply when creating a ticket. Everything else in
@@ -105,6 +106,17 @@ def _is_str(value) -> bool:
     return isinstance(value, str)
 
 
+def _is_time(value) -> bool:
+    """True for a real UTC time like 2025-01-01T00:00:00Z (rejects 2025-13-45...)."""
+    if not _is_str(value) or not TIME_RE.fullmatch(value):
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    return True
+
+
 def _check_common(f: dict, errors: list[str]) -> None:
     """Field-level rules shared by creation and reading. Parent existence is
     checked separately because it needs the store."""
@@ -147,8 +159,8 @@ def _check_common(f: dict, errors: list[str]) -> None:
         errors.append("title must be a single line")
 
     body = f.get("body")
-    if not _is_str(body) or not 1 <= len(body) <= 4000:
-        errors.append("body must be 1 to 4000 characters")
+    if not _is_str(body) or not 1 <= len(body) <= BODY_MAX:
+        errors.append(f"body must be 1 to {BODY_MAX} characters")
 
 
 def validate_new(fields: dict) -> list[str]:
@@ -194,7 +206,7 @@ def validate_stored(data) -> list[str]:
     if "base_commit" in data and (not _is_str(base) or not COMMIT_RE.fullmatch(base)):
         errors.append("base_commit must be a git commit id (7 to 40 hex characters)")
     for name in ("created_at", "updated_at"):
-        if not _is_str(data[name]) or not TIME_RE.fullmatch(data[name]):
+        if not _is_time(data[name]):
             errors.append(f"{name} must be a UTC ISO 8601 time like 2025-01-01T00:00:00Z")
     return errors
 

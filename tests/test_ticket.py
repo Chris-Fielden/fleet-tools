@@ -271,6 +271,36 @@ def test_cli_body_file(tmp_path):
     assert run("new", *new_args(), "--body-file", str(f)).returncode == 2  # both given
 
 
+def test_cli_body_file_too_large_is_refused_unread(tmp_path):
+    f = tmp_path / "big.txt"
+    f.write_text("x" * (tk.BODY_MAX * 4 + 1))
+    r = run("new", *new_args(body=None), "--body-file", str(f))
+    assert r.returncode == 2
+    assert "too large" in r.stderr
+
+
+def test_cli_body_file_just_over_char_limit_still_rejected(tmp_path):
+    f = tmp_path / "b.txt"
+    f.write_text("x" * (tk.BODY_MAX + 1))
+    assert run("new", *new_args(body=None), "--body-file", str(f)).returncode == 2
+
+
+@pytest.mark.parametrize("stamp,ok", [
+    ("2025-01-01T00:00:00Z", True),
+    ("2024-02-29T23:59:59Z", True),
+    ("2025-13-01T00:00:00Z", False),
+    ("2025-02-30T00:00:00Z", False),
+    ("2025-01-01T24:00:00Z", False),
+    ("2025-01-01T00:60:00Z", False),
+    ("0000-01-01T00:00:00Z", False),
+])
+def test_stored_timestamps_are_parsed(stamp, ok):
+    data = tk.load_ticket(make()["id"])
+    data["created_at"] = stamp
+    errors = tk.validate_stored(data)
+    assert (not any("created_at" in e for e in errors)) is ok
+
+
 def test_cli_show_missing_and_bad_id():
     assert run("show", "T-20250101-001").returncode == 1
     assert run("show", "../x").returncode == 2
