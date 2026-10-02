@@ -255,9 +255,11 @@ class _Board:
             cols = {}
             for c in found:
                 cols.setdefault(c["name"].lower(), c)
-            self._columns[project_id] = cols
             if self.create:
+                # Cache only once the board is complete, so a failure here is
+                # retried by the next ticket instead of leaving a half board.
                 self._fix_board(project_id, cols)
+            self._columns[project_id] = cols
         return cols
 
     def _fix_board(self, project_id: str, cols: dict[str, dict]) -> None:

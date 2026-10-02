@@ -327,6 +327,7 @@ def test_each_status_lands_in_its_column(kaneo):
         edit_ticket(tid, status=status)
         ids[tid] = status
     run("sync")
+    assert len(kaneo.tasks) == len(want)
     for t in kaneo.tasks.values():
         status = ids[t["title"].split("]")[0][1:]]
         assert t["status"] == slug_of(kaneo, want[status])
@@ -395,3 +396,19 @@ def test_dry_run_changes_no_columns(kaneo):
     assert run("sync", "--dry-run").returncode == 0
     assert kaneo.writes == []
     assert names(kaneo) == ["open"]
+
+
+def test_failed_column_setup_is_retried_for_the_next_ticket(kaneo):
+    a = new_ticket(title="alpha")
+    kaneo.projects.clear(); kaneo.columns.clear(); kaneo.tasks.clear()
+    (fleet_home() / "kaneo-map.json").unlink()
+    b = new_ticket(title="beta")  # builds the project again, fine
+    kaneo.projects.clear(); kaneo.columns.clear(); kaneo.tasks.clear()
+    (fleet_home() / "kaneo-map.json").unlink()
+    kaneo.fail_column = "In Progress"
+    r = run("sync")
+    lines = {ln.split()[0]: ln for ln in r.stdout.splitlines()}
+    assert sorted("error:" in ln for ln in lines.values()) == [False, True]
+    assert sorted(ln.split()[1] for ln in lines.values()) == ["created", "error:"]
+    assert len(kaneo.tasks) == 1 and next(iter(kaneo.tasks.values()))["status"] == "to-do"
+    assert len(names(kaneo)) == 6

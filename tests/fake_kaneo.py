@@ -17,6 +17,7 @@ class FakeKaneo:
         self.tasks: dict[str, dict] = {}
         self.requests: list[dict] = []
         self.fail_title: str | None = None   # POST /task with this in the title -> 500
+        self.fail_column: str | None = None  # POST /column with this name -> 500 (once)
         self.fail_all = False                # every request -> 500, body echoes the key
         self.redirect_to: str | None = None  # every request -> 302 to this URL
         self._n = 0
@@ -82,6 +83,9 @@ class FakeKaneo:
             cols = self.columns[parts[1]]
             if method == "GET":
                 return 200, sorted(cols, key=lambda c: c.get("position", 0))
+            if self.fail_column == body["name"]:
+                self.fail_column = None
+                return 500, {"error": "boom"}
             c = {"id": self.next_id("c"), "projectId": parts[1], "name": body["name"],
                  "position": len(cols),
                  "slug": body["name"].lower().replace(" ", "-"), "isFinal": body.get("isFinal", False)}
