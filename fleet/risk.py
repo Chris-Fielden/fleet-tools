@@ -72,7 +72,7 @@ def parse_rules(data) -> dict:
     if default not in LEVELS:
         raise RiskError(f"{RULES_NAME}: 'default' must be one of: {', '.join(LEVELS)}")
     rules = []
-    raw_rules = data.get("rules") or []
+    raw_rules = data.get("rules", [])
     if not isinstance(raw_rules, list):
         raise RiskError(f"{RULES_NAME}: 'rules' must be a list")
     for i, r in enumerate(raw_rules):
@@ -88,10 +88,10 @@ def parse_rules(data) -> dict:
             needle = contains.lower()
             rules.append({"level": r["level"], "text": f"contains '{contains}'",
                           "match": lambda p, n=needle: n in p.lower()})
-    start = data.get("ticket_start") or {}
+    start = data.get("ticket_start", {})
     if not isinstance(start, dict):
         raise RiskError(f"{RULES_NAME}: 'ticket_start' must be an object")
-    by_type, by_repo = start.get("by_type") or {}, start.get("by_repo") or {}
+    by_type, by_repo = start.get("by_type", {}), start.get("by_repo", {})
     for table in (by_type, by_repo):
         if not isinstance(table, dict) or any(v not in LEVELS for v in table.values()):
             raise RiskError(f"{RULES_NAME}: 'ticket_start' levels must be one of: {', '.join(LEVELS)}")

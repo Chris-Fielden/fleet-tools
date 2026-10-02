@@ -88,6 +88,10 @@ run_review() {
   local kind="$1" model="$2"
   local out=".reviews/${branch//\//-}-$sha-$kind.md"
   local rc=0
+  # Written under another name and renamed only when complete and checked, so a
+  # half-finished review can never satisfy the merge gate.
+  local part="$out.partial"
+  rm -f "$part"
   case "$kind" in
     codex)
       command -v codex >/dev/null 2>&1 || { echo "Codex isn't installed. Install it, or run with REVIEWER=claude."; return 1; }
@@ -107,7 +111,7 @@ run_review() {
       # `|| rc=$?` keeps the reviewer's failure (pipefail) instead of losing it
       # when this function is called inside an `||` list.
       { echo "Reviewer: Codex${model:+ ($model)}"; echo "Commit: $full_sha"; echo; \
-        codex exec -s read-only --ephemeral "${model_args[@]}" "$prompt" </dev/null; } | tee "$out" || rc=$?
+        codex exec -s read-only --ephemeral "${model_args[@]}" "$prompt" </dev/null; } | tee "$part" || rc=$?
       ;;
     claude)
       model="${model:-sonnet}"
@@ -117,22 +121,23 @@ run_review() {
         AGENT_RULES_OFF=1 claude -p "$prompt" \
           --model "$model" \
           --allowedTools "Read" "Grep" "Glob" "Bash(git diff *)" "Bash(git log *)" "Bash(git show *)" \
-          --disallowedTools "Edit" "Write" "NotebookEdit"; } | tee "$out" || rc=$?
+          --disallowedTools "Edit" "Write" "NotebookEdit"; } | tee "$part" || rc=$?
       ;;
   esac
   echo
   if [[ "$rc" != "0" ]]; then
-    rm -f "$out"
+    rm -f "$part"
     echo "The $kind review failed (exit $rc), so no review was saved."
     return 1
   fi
   # The review is only about the commit in its header: if the checkout moved
   # while the reviewer ran, it does not count.
   if [[ "$(git rev-parse HEAD)" != "$full_sha" ]]; then
-    rm -f "$out"
+    rm -f "$part"
     echo "HEAD changed during the $kind review, so it was discarded. Run it again."
     return 1
   fi
+  mv -f "$part" "$out"   # only now can the merge gate see it
   echo "Saved to $out"
 }
 

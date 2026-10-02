@@ -70,6 +70,8 @@ def test_bad_rules_files_are_refused():
                 '{"default": "low", "rules": [{"level": "x", "glob": "a"}]}',
                 '{"default": "low", "rules": [{"level": "low", "glob": "a", "contains": "b"}]}',
                 '{"default": "low", "rules": 5}', '{"default": "low", "ticket_start": 5}',
+                '{"default": "low", "rules": false}', '{"default": "low", "rules": {}}',
+                '{"default": "low", "ticket_start": false}', '{"default": "low", "ticket_start": {"by_type": []}}',
                 'nope']:
         with pytest.raises(rk.RiskError):
             rk.load_rules(bad)
@@ -426,6 +428,22 @@ def test_review_sh_discards_a_review_if_head_moved(task, env):
     r = run_review(task, env / "bin", REVIEWER="codex")
     assert r.returncode == 1 and "HEAD changed" in r.stdout
     assert not list((task / ".reviews").glob("*.md"))
+
+
+def test_review_sh_pass_then_failure_never_publishes_a_review(task, env):
+    commit_in(task, "fleet/x.py")
+    seen = env / "seen.txt"
+    odd = env / "bin" / "codex"
+    odd.parent.mkdir(exist_ok=True)
+    odd.write_text('#!/bin/sh\n[ "$1" = login ] && exit 0\n'
+                   'echo "VERDICT: PASS"\nsleep 1\n'
+                   f'ls .reviews > {seen}\nexit 3\n')
+    odd.chmod(odd.stat().st_mode | stat.S_IEXEC)
+    r = run_review(task, env / "bin", REVIEWER="codex")
+    assert r.returncode == 1
+    # while the reviewer was still running, nothing the gate could read existed
+    assert not [n for n in seen.read_text().split() if n.endswith(".md")]
+    assert list((task / ".reviews").iterdir()) == []
 
 
 def test_review_sh_rejects_unknown_reviewer(task, env):
