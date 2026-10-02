@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from . import kaneo
@@ -64,8 +65,13 @@ def _warn(message: str) -> None:
 def _cmd_new(args) -> int:
     if args.body_file is not None:
         try:
+            # Body is at most BODY_MAX characters (up to 4 bytes each in UTF-8);
+            # refuse oversized files before reading them into memory.
+            limit = tk.BODY_MAX * 4
+            if os.path.getsize(args.body_file) > limit:
+                raise tk.TicketInvalid([f"body file {args.body_file} is too large (over {limit} bytes)"])
             with open(args.body_file, encoding="utf-8") as fh:
-                body = fh.read()
+                body = fh.read(limit + 1)
         except (OSError, UnicodeDecodeError) as exc:
             raise tk.TicketInvalid([f"cannot read body file {args.body_file}: {exc}"]) from None
     else:
