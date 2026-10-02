@@ -92,6 +92,7 @@ PYTHONS = re.compile(r"^python(\d+(\.\d+)?)?$")
 # above it), they would read ~/.fleet along the way.
 TREE_WALKERS = {"find", "rg", "ag", "fd", "fdfind", "tar", "zip", "rsync", "du", "tree"}
 RECURSIVE_FLAG = re.compile(r"^(-[a-zA-Z]*[rRa][a-zA-Z]*|--recursive|--archive|-d\s*recurse)$")
+REDIRECT_MARK = "\x02"  # words after this are redirection targets, not arguments
 SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", ";;", "|&", "{", "}"}
 # Shell keywords that can sit in front of a command: `if ship ...; then`.
 KEYWORDS = {"if", "then", "else", "elif", "while", "until", "do", "!", "{", "}", "fi", "done"}
@@ -105,24 +106,46 @@ def _segments(command):
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|(){}<>\n")
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
-    out, current = [], []
+    out, current, redirects = [], [], []
+    pending_target = False
     for tok in lexer:
+        # A redirection (> file, 2>> log, < in) can sit anywhere, even before
+        # the program name. Its target still gets the path checks, but it is
+        # never mistaken for the program.
+        if set(tok) <= set("<>&|") and set(tok) & set("<>"):
+            if current and current[-1].isdigit():
+                current.pop()  # the 2 in 2>file
+            pending_target = True
+            continue
+        if pending_target and not (set(tok) <= set(";&|(){}<>\n")):
+            redirects.append(tok)
+            pending_target = False
+            continue
+        pending_target = False
         # shlex glues neighbouring punctuation together (");" or "&&("), so any
         # all-punctuation token containing a separator character ends a command.
         if tok in SEPARATORS or (set(tok) <= set(";&|(){}<>\n") and set(tok) & set(";&|(){}\n")):
-            if current:
-                out.append(current)
-            current = []
+            if current or redirects:
+                out.append(current + ([REDIRECT_MARK] + redirects if redirects else []))
+            current, redirects = [], []
         else:
             current.append(tok)
-    if current:
-        out.append(current)
+    if current or redirects:
+        out.append(current + ([REDIRECT_MARK] + redirects if redirects else []))
     return out
 
 
-def _unwrap(words):
+CHDIR_OPTS = {"env": {"-C", "--chdir"}, "sudo": {"-D", "--chdir"}}
+
+
+def _unwrap(words, chdirs=None):
     """Strip VAR=value settings and wrapper programs. Returns (program, args),
-    or a nested command string for `bash -c "..."` as ("-c", [string])."""
+    or a nested command string for `bash -c "..."` as ("-c", [string]).
+    Folder changes made by wrappers (env -C DIR) are added to `chdirs`."""
+    if chdirs is None:
+        chdirs = []
+    if REDIRECT_MARK in words:
+        words = words[:words.index(REDIRECT_MARK)]
     i = 0
     while i < len(words):
         w = words[i]
@@ -145,7 +168,13 @@ def _unwrap(words):
                 i += 1  # the duration
                 continue
             while i < len(words) and (words[i].startswith("-") or re.match(r"^\w+=", words[i])):
-                i += 2 if words[i] in WRAPPER_OPTS_WITH_VALUE else 1
+                opt = words[i]
+                for flag in CHDIR_OPTS.get(name, ()):
+                    if opt == flag and i + 1 < len(words):
+                        chdirs.append(words[i + 1])
+                    elif opt.startswith(flag + "=") or (len(flag) == 2 and opt.startswith(flag) and len(opt) > 2):
+                        chdirs.append(opt.split("=", 1)[1] if "=" in opt else opt[2:])
+                i += 2 if opt in WRAPPER_OPTS_WITH_VALUE or opt in CHDIR_OPTS.get(name, ()) else 1
             continue
         if name in SHELLS or PYTHONS.match(name):
             rest = words[i + 1:]
@@ -283,7 +312,7 @@ def scan_command(command, places, depth=0, cwd_known=True):
     if isinstance(places, str):
         places = [places]
     if depth > MAX_DEPTH:
-        return ("odd", None) if FLEET_WORDS.search(command) else None
+        return ("odd", None)
     try:
         command, subs = _pull_quoted_subs(command)
         segments = _segments(command)
@@ -301,9 +330,26 @@ def scan_command(command, places, depth=0, cwd_known=True):
                 reason = scan_command(subs[int(k)], places, depth + 1, cwd_known)
                 if reason:
                     return reason
-        name, args = _unwrap(words)
+        chdirs = []
+        name, args = _unwrap(words, chdirs)
+        if name == "tar":  # tar -C DIR / --directory=DIR
+            for k, a in enumerate(args):
+                if a in ("-C", "--directory") and k + 1 < len(args):
+                    chdirs.append(args[k + 1])
+                elif a.startswith("--directory="):
+                    chdirs.append(a.split("=", 1)[1])
+        # Where this one command runs: here, unless a wrapper moved it.
+        here, here_known = places, cwd_known
+        for d in chdirs:
+            e = _expand(d)
+            if e is None:
+                here_known = False
+            elif here_known:
+                here = [_resolve(e, p) for p in here]
+        if here_known and chdirs and any(is_under_fleet(p) for p in here):
+            return ("fleet", None)
         if name == "-c":
-            reason = scan_command(args[0] if args else "", places, depth + 1, cwd_known)
+            reason = scan_command(args[0] if args else "", here, depth + 1, here_known)
             if reason:
                 return reason
             continue
@@ -327,15 +373,15 @@ def scan_command(command, places, depth=0, cwd_known=True):
         operands = []
         for w in words:
             value = w.split("=", 1)[1] if re.match(r"^\w+=", w) else w
-            if not value or value.startswith("-"):
+            if not value or value.startswith("-") or value == REDIRECT_MARK:
                 continue
             expanded = _expand(value)
             if expanded is None:
                 operands.append(None)  # can't tell where it points
                 continue
-            if cwd_known and any(is_under_fleet(expanded, p) for p in places):
+            if here_known and any(is_under_fleet(expanded, p) for p in here):
                 return ("fleet", None)
-            if not cwd_known and is_under_fleet(expanded, "/"):
+            if not here_known and is_under_fleet(expanded, "/"):
                 return ("fleet", None)
             operands.append(expanded)
         # Whole-tree searches started at your home folder or above, or from a
@@ -350,12 +396,12 @@ def scan_command(command, places, depth=0, cwd_known=True):
                     continue
                 o = _expand(a)
                 if o is None or o.startswith(("/", ".", "~")) or "/" in o or (
-                        cwd_known and any(os.path.exists(os.path.join(p, o)) for p in places)):
+                        here_known and any(os.path.exists(os.path.join(p, o)) for p in here)):
                     paths.append(o)
-            if any(o is None for o in paths) or not cwd_known:
+            if any(o is None for o in paths) or not here_known:
                 return ("tree", name)
-            roots = ([_resolve(o, p) for o in paths for p in places]
-                     or [os.path.realpath(p) for p in places])
+            roots = ([_resolve(o, p) for o in paths for p in here]
+                     or [os.path.realpath(p) for p in here])
             if any(_is_ancestor_of_fleet(r) for r in roots):
                 return ("tree", name)
     return None
@@ -411,7 +457,7 @@ def main():
              "or `ticket new` instead. In tests, set FLEET_HOME to a temporary folder.")
     if found and found[0] == "odd":
         deny("That command is too unusual for the safety rules to check (unbalanced "
-             "quotes). Write it more simply.")
+             "quotes or very deep nesting). Write it more simply.")
     if found and found[0] == "tree":
         deny(f"Don't run `{found[1]}` across your home folder or above: it would read "
              "the fleet's private folder (~/.fleet) on the way. Search inside the "

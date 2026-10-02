@@ -6,6 +6,7 @@ with the tool call as JSON on standard input. Nothing here reads or writes the
 real ~/.fleet; the paths are only built as strings.
 """
 
+import shlex
 import json
 import os
 import pwd
@@ -365,3 +366,51 @@ def test_many_cds_stay_fast_and_bounded(tmp_path):
     dirs = " && ".join(f"(cd /tmp/d{i})" for i in range(20))
     reason = bash(dirs + " && cd /tmp/x && rg key", tmp_path)
     assert reason and "~/.fleet" in reason
+
+
+# --- fifth review round ------------------------------------------------------------
+
+@pytest.mark.parametrize("command", [
+    "> /tmp/ship.log ship BD-4",
+    "2>/dev/null dispatch --once",
+    "< /dev/null idea something",
+    "echo hi; >>/tmp/x.log ticket sync",
+])
+def test_leading_redirections_do_not_hide_commands(tmp_path, command):
+    reason = bash(command, tmp_path)
+    assert reason and "Only the human runs" in reason
+
+
+def test_redirect_into_fleet_still_blocked(tmp_path):
+    reason = bash("echo x 2> ~/.fleet/x", tmp_path)
+    assert reason and "~/.fleet" in reason
+
+
+def test_ordinary_redirections_allowed(tmp_path):
+    assert bash("python3 -m pytest -q > out.txt 2>&1", tmp_path) is None
+    assert bash("sort < data.txt > sorted.txt", tmp_path) is None
+
+
+@pytest.mark.parametrize("command", [
+    "env -C ~ rg --hidden key .",
+    "env --chdir=$HOME grep -r key .",
+    "sudo -D ~ find . -name '*.json'",
+    "tar -C ~ -cf /tmp/all.tar .",
+    "env -C $DIR rg key",
+])
+def test_wrapper_folder_changes_are_followed(tmp_path, command):
+    reason = bash(command, tmp_path)
+    assert reason and "~/.fleet" in reason
+
+
+def test_wrapper_folder_change_inside_project_allowed(tmp_path):
+    (tmp_path / "tests").mkdir()
+    assert bash("env -C tests rg key .", tmp_path) is None
+
+
+def test_too_deep_nesting_fails_closed(tmp_path):
+    cmd = "rg key ~"
+    for _ in range(8):
+        cmd = "bash -c " + shlex.quote(cmd)
+    reason = bash(cmd, tmp_path)
+    assert reason and "too unusual" in reason
