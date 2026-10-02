@@ -1,0 +1,15 @@
+# Project settings for Codex in this repo.
+# Codex only reads this file after you trust the project (it asks the first
+# time you run `codex` here). Hooks are in .codex/hooks.json next to this file.
+
+# Codex may edit files in the current task worktree, and nothing outside it.
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+# Codex blocks network access for the commands it runs unless this is on.
+# Two things in the kit need it: scripts/ask-claude.sh and the Claude review
+# (REVIEWER=claude scripts/review.sh), because both call Claude over the
+# internet. Leave it false until you want Codex to use them, then set it to
+# true. It also lets Codex's commands reach any website, so turn it on
+# knowingly.
+network_access = false

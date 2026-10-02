@@ -1,0 +1,39 @@
+{
+  "description": "Agent rules kit: the same guards Claude Code uses (see .claude/settings.json), applied to Codex.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/guard_bash.py\"'",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "^(apply_patch|Edit|Write)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/guard_edits.py\"'",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/check_before_stop.py\"'",
+            "timeout": 600,
+            "statusMessage": "Running scripts/check.sh before finishing"
+          }
+        ]
+      }
+    ]
+  }
+}

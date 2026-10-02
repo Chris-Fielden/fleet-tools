@@ -1,0 +1,14 @@
+# Task workspaces and local review notes stay out of git
+.worktrees/
+.reviews/
+
+# Secrets never go in git
+.env
+.env.*
+!.env.example
+
+# Your personal Claude Code settings
+.claude/settings.local.json
+
+# Python cache files
+__pycache__/
