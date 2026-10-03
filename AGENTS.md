@@ -11,8 +11,9 @@ rulebook for every agent here, you included. The short version:
 2. The work isn't done until `scripts/check.sh` passes and your changes are
    committed. Don't weaken or skip checks.
 3. A different model reviews every change. **You are the author, so Claude
-   reviews your work:** run `REVIEWER=claude scripts/review.sh`, then fix
-   every MUST FIX item, commit, and run the checks again.
+   reviews your work:** run `scripts/review.sh` (it picks Claude for you, and
+   runs both reviewers on high-risk branches), then fix every MUST FIX item,
+   commit, and run the checks again.
 4. Only the human merges, with `ship` (or `scripts/finish-task.sh`). Never run
    either, and never push to main.
 5. GitOps: change the cluster by committing YAML under `k8s/`. Never run
@@ -36,8 +37,8 @@ default (`medium`). The rules are read from the base branch, so a branch can't
 weaken its own rules.
 
 - **low** (for example `docs/**`, `tests/**`) and **medium**: one review by
-  the other model. As the author, you get Claude:
-  `REVIEWER=claude scripts/review.sh`.
+  the other model. As the author, you get Claude: just run
+  `scripts/review.sh`.
 - **high** (for example `k8s/**`, `.claude/**`, `.codex/**`, `CLAUDE.md`,
   `AGENTS.md`, the core scripts, anything touching secrets or auth,
   dependency files, and the ticket/risk code): **both reviewers**, Codex and
