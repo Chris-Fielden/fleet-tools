@@ -81,7 +81,7 @@ def _build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--dir", default=".", help="the git repo (default: here)")
     gate.add_argument("--repo", help="only tickets filed against this repo name count")
     gate.add_argument("--worktree", required=True, help="the task worktree holding .reviews/")
-    gate.add_argument("--field", choices=("risk", "confirm", "ok"),
+    gate.add_argument("--field", choices=("risk", "confirm", "ok", "reviews"),
                       help="print just one value instead of the report")
 
     sync = sub.add_parser("sync", help="mirror every ticket onto the Kaneo board")
@@ -245,6 +245,8 @@ def _cmd_gate(args) -> int:
         print(g["confirm"])
     elif args.field == "ok":
         print("yes" if not g["problems"] else "no")
+    elif args.field == "reviews":
+        print(" ".join(sorted(g["reviews"])))
     else:
         print(f"Risk level: {g['level'].upper()}  (files say {g['diff_level']}, "
               f"ticket says {g['stored'] or 'nothing: no ticket found'})")

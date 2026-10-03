@@ -187,12 +187,60 @@ def test_ship_runs_both_reviewers_when_the_gate_needs_them(real_task, capsys):
     assert tk.load_ticket(t["id"])["status"] == "done"
 
 
-def test_ship_leaves_lower_risk_reviewing_alone(real_task, capsys):
+def answer(monkeypatch, text):
+    """Pretend a terminal is attached and the human types `text`."""
+    monkeypatch.setattr("fleet.ship_cli.sys.stdin", type("TTY", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr("builtins.input", lambda prompt="": text)
+
+
+def test_ship_without_a_terminal_does_not_offer_a_review(real_task, capsys):
     wt, t = real_task
     commit_in(wt, "fleet/x.py")
-    assert ship_main([t["id"]]) == 0
+    assert ship_main([t["id"]]) == 0  # the fake finish-task has no gate of its own
     assert not (wt / ".reviews").exists()
     assert "running both reviewers" not in capsys.readouterr().out
+
+
+def test_ship_offers_a_review_when_the_tip_has_none_and_merges(real_task, env, monkeypatch):
+    wt, t = real_task
+    commit_in(wt, "fleet/x.py")
+    run_review(wt, env / "bin")
+    full = commit_in(wt, "fleet/y.py")  # a small fix after the review
+    assert reviewers(wt, full) == set()
+    answer(monkeypatch, "y")
+    assert ship_main([t["id"]]) == 0
+    assert reviewers(wt, full) == {"codex"}
+    assert tk.load_ticket(t["id"])["status"] == "done"
+
+
+def test_ship_declined_offer_still_goes_to_the_gate(real_task, monkeypatch):
+    wt, t = real_task
+    full = commit_in(wt, "fleet/x.py")
+    answer(monkeypatch, "n")
+    assert ship_main([t["id"]]) == 0  # the (fake) merge script decides, not ship
+    assert reviewers(wt, full) == set()
+
+
+def test_ship_offer_review_failure_stops_the_merge(real_task, env, monkeypatch, capsys):
+    wt, t = real_task
+    commit_in(wt, "fleet/x.py")
+    (env / "bin" / "codex").write_text("#!/bin/sh\nexit 1\n")
+    answer(monkeypatch, "y")
+    assert ship_main([t["id"]]) == 1
+    assert "did not complete" in capsys.readouterr().err
+    assert not (env / "finish.log").exists()
+
+
+def test_ship_does_not_offer_when_a_review_exists_but_failed(real_task, env, monkeypatch):
+    wt, t = real_task
+    commit_in(wt, "fleet/x.py")
+    fake_tool(env / "bin", "codex", verdict="FAIL")
+    run_review(wt, env / "bin")
+    asked = []
+    answer(monkeypatch, "y")
+    monkeypatch.setattr("builtins.input", lambda prompt="": asked.append(prompt) or "y")
+    assert ship_main([t["id"]]) == 0
+    assert asked == []
 
 
 def test_ship_does_not_rerun_reviews_that_pass(real_task, env, capsys):

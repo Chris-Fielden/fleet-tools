@@ -41,21 +41,40 @@ def _gate(repo: Path, wt: Path, branch: str, *fields: str) -> subprocess.Complet
          "--worktree", str(wt), "--repo", repo.name, *fields], capture_output=True, text=True)
 
 
+def _confirm(question: str) -> bool:
+    """Ask on the terminal; anything but an explicit yes (or no terminal) is no."""
+    if not sys.stdin.isatty():
+        return False
+    try:
+        return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
 def _review_if_needed(repo: Path, name: str, branch: str, script: Path) -> str | None:
-    """When the gate wants reviews from both Codex and Claude (high risk) and
-    does not have them yet, run them now so one command is enough. Returns a
+    """When the gate wants reviews and lacks them, run them now: both reviewers
+    without asking at high risk, or (after a yes) the usual one when the tip
+    has no review at all. The merge script still applies the gate afterwards. Returns a
     one-line problem, or None. Anything else the gate dislikes is left for the
     merge script to report: this never decides whether a merge is allowed."""
     wt = repo / ".worktrees" / name
     review = repo / "scripts" / "review.sh"
     if not wt.is_dir() or not review.is_file():
         return None
-    if _gate(repo, wt, branch, "--field", "risk").stdout.strip() != "high":
-        return None
     if _gate(repo, wt, branch, "--field", "ok").stdout.strip() == "yes":
         return None
-    print(f"ship: {branch} is high risk and lacks passing reviews; running both reviewers")
-    env = dict(os.environ, REVIEWER="both")
+    env = dict(os.environ)
+    if _gate(repo, wt, branch, "--field", "risk").stdout.strip() == "high":
+        print(f"ship: {branch} is high risk and lacks passing reviews; running both reviewers")
+        env["REVIEWER"] = "both"
+    else:
+        # Below high risk, only the case where the tip has no review at all
+        # (small fixes committed after the review) is offered; a review that
+        # exists but is not a PASS is for the human to look at.
+        if _gate(repo, wt, branch, "--field", "reviews").stdout.strip():
+            return None
+        if not _confirm(f"ship: {branch} has no review of its latest commit. Run scripts/review.sh now?"):
+            return None
     env.setdefault("FLEET_TICKET", str(Path(__file__).resolve().parent.parent / "bin" / "ticket"))
     try:
         done = subprocess.run(["bash", str(review)], cwd=wt, env=env)
