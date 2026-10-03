@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 from . import dispatch as dp
 from . import kaneo
@@ -74,17 +76,18 @@ def _ask_yes_no(question: str) -> bool:
         return False
 
 
-def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=False) -> int:
+def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None) -> int:
     """The steps of one --once run; returns the exit code. `reserve()` is called
     before each launch and says whether it may go ahead (False: the daily limit
     is reached; it may raise OSError, which refuses the launch). `offer(ticket)`
     says whether to relaunch a claimed ticket whose agent is gone. `retry_tabs`
-    (--watch) retries closing the tabs of tickets done on an earlier cycle."""
+    (--watch; a launch.KeptTabs) retries closing the tabs of tickets done on an
+    earlier cycle."""
     code = 0
     _reconcile(settings, emit, warn)
-    if retry_tabs:
+    if retry_tabs is not None:
         done = {t["id"] for t in tk.list_tickets() if t["status"] == "done"}
-        kept = [i for i in lc.kept_tab_ids() if i in done]
+        kept = [i for i in retry_tabs.poll() if i in done]
         for ticket_id, reason in lc.retry_kept_tabs(kept, settings, warn):
             emit(f"{ticket_id}  tab closed: {reason}")
     for t in lc.finish_investigations(tk.list_tickets(), warn):
@@ -140,17 +143,22 @@ def _cmd_once(settings: dict) -> int:
     return _cycle(settings, print, _warn, offer=offer)
 
 
-def _cmd_watch(settings: dict, clock: dp.Clock | None = None) -> int:
+def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None) -> int:
     """Run the --once steps every watch_interval_seconds until Ctrl+C, printing
     a line only when it was not printed by the cycle before. At most
     max_launches_per_day launches are attempted per UTC day; after that it only
-    reconciles."""
+    reconciles. If HEAD of the checkout this code runs from (`head()`) changes,
+    it logs WATCH_RESTART and raises WatchRestart: main re-executes after
+    releasing the lock, so the new code runs."""
     clock = clock or dp.Clock()
     interval, cap = settings["watch_interval_seconds"], settings["max_launches_per_day"]
     print(f"watching every {interval}s, at most {cap} launches a day (Ctrl+C to stop)", flush=True)
     lc._safe_log("WATCH_START", f"every {interval}s, max {cap} launches a day")
     previous: set[str] = set()
     announced = None
+    head = head or dp.code_head
+    started_at = head()
+    kept_tabs = lc.KeptTabs(clock.now)
 
     def today() -> str:
         return clock.now().strftime("%Y-%m-%d")
@@ -171,7 +179,7 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None) -> int:
             lines: list[str] = []
             try:
                 _cycle(settings, lines.append, lambda m: lines.append(f"warning: {m}"), reserve=reserve,
-                       retry_tabs=True)
+                       retry_tabs=kept_tabs)
             except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
                 lines.append(f"error: {exc}")
             for line in lines:
@@ -190,13 +198,27 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None) -> int:
                 print(message, flush=True)
                 lc._safe_log("LAUNCH_CAP", message)
             clock.sleep(interval)
+            now_head = head()
+            if started_at and now_head and now_head != started_at:
+                message = f"new code in the fleet-tools checkout ({started_at[:8]} -> {now_head[:8]}); restarting"
+                print(message, flush=True)
+                lc._safe_log("WATCH_RESTART", message)
+                raise dp.WatchRestart()
     except KeyboardInterrupt:
         print("\nwatch stopped", flush=True)
         lc._safe_log("WATCH_STOP", "interrupted")
         return 0
 
 
+def _exec_self(argv: list[str]) -> None:
+    """Replace this process with a fresh run of the same command (tests swap
+    this out). The lock is already released."""
+    script = Path(__file__).resolve().parent.parent / "bin" / "dispatch"
+    os.execv(sys.executable, [sys.executable, str(script), *argv])
+
+
 def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = _build_parser().parse_args(argv)
     who = tk.current_creator()
     if who != "human":
@@ -211,6 +233,8 @@ def main(argv=None) -> int:
             if args.watch:
                 return _cmd_watch(settings)
             return _cmd_once(settings) if args.once else _cmd_reconcile(settings)
+    except dp.WatchRestart:
+        pass   # the lock is released by now: re-execute below
     except dp.AlreadyRunning:
         print("dispatch: another dispatch is already running; nothing to do.")
         return 0
@@ -223,3 +247,9 @@ def main(argv=None) -> int:
     except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
         print(f"dispatch: {exc}", file=sys.stderr)
         return 1
+    try:
+        _exec_self(argv)
+    except OSError as exc:
+        print(f"dispatch: could not restart: {exc}", file=sys.stderr)
+        return 1
+    return 0

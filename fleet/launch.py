@@ -14,6 +14,7 @@ import shlex
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import dispatch as dp
@@ -534,26 +535,63 @@ def _close_finished_tab(ticket_id: str, settings: dict) -> tuple[bool, str]:
     return closed, reason
 
 
-def kept_tab_ids() -> list[str]:
-    """Tickets whose tab reconcile kept (TAB_KEPT) and that were not closed
-    (TAB_CLOSED) or found gone (TAB_GONE) since, oldest first. A kept tab
-    "with no tab found" has nothing to retry."""
-    kept: dict[str, None] = {}
+KEPT_TAB_MAX_AGE = timedelta(hours=24)   # stop retrying a kept tab after this long
+
+
+def _log_time(stamp: str) -> datetime | None:
     try:
-        lines = dp.log_path().read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    for line in lines:
-        parts = line.split(" ", 3)
-        if len(parts) < 3:
-            continue
-        kind, ticket_id = parts[1], parts[2]
-        rest = parts[3] if len(parts) > 3 else ""
-        if kind == "TAB_KEPT" and not rest.startswith("no tab found"):
-            kept[ticket_id] = None
-        elif kind in ("TAB_CLOSED", "TAB_GONE"):
-            kept.pop(ticket_id, None)
-    return list(kept)
+        return datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+class KeptTabs:
+    """Tickets whose tab reconcile kept (TAB_KEPT) and that were not closed
+    (TAB_CLOSED), found gone (TAB_GONE) or given up on (TAB_GIVEUP) since. A
+    kept tab "with no tab found" has nothing to retry. The log is read
+    incrementally: each poll reads only what was appended since the last one
+    (and starts over if the file shrank). A tab kept longer than `max_age`
+    ago is given up on, logged once as TAB_GIVEUP."""
+
+    def __init__(self, now, max_age: timedelta = KEPT_TAB_MAX_AGE):
+        self.now, self.max_age = now, max_age
+        self._offset = 0
+        self._kept: dict[str, datetime] = {}
+
+    def _read_new(self) -> None:
+        try:
+            with open(dp.log_path(), "rb") as fh:
+                size = os.fstat(fh.fileno()).st_size
+                if size < self._offset:
+                    self._offset, self._kept = 0, {}
+                fh.seek(self._offset)
+                data = fh.read()
+        except OSError:
+            return
+        end = data.rfind(b"\n") + 1   # a half-written last line waits for the next poll
+        self._offset += end
+        for line in data[:end].decode("utf-8", "replace").splitlines():
+            parts = line.split(" ", 3)
+            if len(parts) < 3:
+                continue
+            kind, ticket_id = parts[1], parts[2]
+            rest = parts[3] if len(parts) > 3 else ""
+            if kind == "TAB_KEPT" and not rest.startswith("no tab found"):
+                when = _log_time(parts[0])
+                if when is not None:
+                    self._kept[ticket_id] = when
+            elif kind in ("TAB_CLOSED", "TAB_GONE", "TAB_GIVEUP"):
+                self._kept.pop(ticket_id, None)
+
+    def poll(self) -> list[str]:
+        """Ticket ids still worth retrying, oldest first."""
+        self._read_new()
+        cutoff = self.now() - self.max_age
+        for ticket_id, when in list(self._kept.items()):
+            if when < cutoff:
+                del self._kept[ticket_id]
+                _safe_log("TAB_GIVEUP", f"{ticket_id} tab kept since {when:%Y-%m-%dT%H:%M:%SZ}; not retrying any more")
+        return list(self._kept)
 
 
 def retry_kept_tabs(ticket_ids: list[str], settings: dict, warn=lambda m: None) -> list[tuple[str, str]]:
@@ -571,7 +609,7 @@ def retry_kept_tabs(ticket_ids: list[str], settings: dict, warn=lambda m: None) 
         return []
     closed = []
     for ticket_id in ticket_ids:
-        ok, reason, closed_id = _close_tab_in(ticket_id, tabs, agents)
+        ok, reason, closed_id = _close_tab_in(ticket_id, tabs, agents, by_label=False)
         if ok:
             _safe_log("TAB_CLOSED", f"{ticket_id} {reason}")
             closed.append((ticket_id, reason))
@@ -582,15 +620,19 @@ def retry_kept_tabs(ticket_ids: list[str], settings: dict, warn=lambda m: None) 
     return closed
 
 
-def _close_tab_in(ticket_id: str, tabs: list[dict], agents: list[dict]) -> tuple[bool, str, str | None]:
-    """Close the ticket's tab if the safety rules allow: (closed, reason, tab id)."""
+def _close_tab_in(ticket_id: str, tabs: list[dict], agents: list[dict],
+                  by_label: bool = True) -> tuple[bool, str, str | None]:
+    """Close the ticket's tab if the safety rules allow: (closed, reason, tab id).
+    `by_label` allows falling back to a tab labelled with the ticket id when its
+    agent is not listed; a retry on a later cycle must not, since by then the
+    label may belong to a tab the human opened."""
     agent = next((a for a in agents if a.get("name") == ticket_id.lower()), None)
     tab = None
     if agent is not None:
         tab = next((x for x in tabs if x.get("tab_id") == agent.get("tab_id")), None)
         if tab is None:
             agent = None  # it lives in another workspace: its state says nothing about a tab here
-    if tab is None:
+    if tab is None and by_label:
         matches = [x for x in tabs if x.get("label") == ticket_id]
         if len(matches) > 1:
             return False, f"{len(matches)} tabs are labelled {ticket_id}", None
