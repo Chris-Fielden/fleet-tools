@@ -306,6 +306,27 @@ def test_reconcile_ignores_the_state_of_an_agent_in_another_workspace(projects, 
     assert "working" in dp.log_path().read_text()
 
 
+@pytest.mark.parametrize("other_state, other_focused", [("working", False), ("blocked", False),
+                                                        ("unknown", False), ("idle", True)])
+def test_reconcile_keeps_a_tab_shared_with_an_unfinished_agent(projects, herdr_log, env, monkeypatch,
+                                                               other_state, other_focused):
+    t = merged_claimed(projects)
+    path = world(env, monkeypatch, t["id"], status="idle")
+    data = json.loads(path.read_text())
+    data["agents"].append({"name": "someone-else", "agent_status": other_state, "tab_id": "w3:t4",
+                           "focused": other_focused})
+    path.write_text(json.dumps(data))
+    assert dispatch_main(["--reconcile"]) == 0
+    assert not any(x[:2] == ["tab", "close"] for x in calls(herdr_log))
+    assert "TAB_KEPT" in dp.log_path().read_text()
+
+
+def test_launch_count_with_a_bad_day_is_refused(projects):
+    dp.launches_path().write_text(json.dumps({"day": None, "count": 3}))
+    with pytest.raises(OSError, match="bad day"):
+        dp.launches_today("2026-10-02")
+
+
 def test_reconcile_with_herdr_unreachable_still_marks_done(projects):
     t = merged_claimed(projects)
     assert dispatch_main(["--reconcile"]) == 0   # conftest points FLEET_HERDR at nothing

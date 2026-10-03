@@ -43,6 +43,7 @@ if world is not None and cmd in ("workspace list", "workspace create", "tab list
         out = {"result": {"tab": {"tab_id": f"{ws}:t{n}"}, "root_pane": {"pane_id": f"{ws}:p{n}"}}}
     elif cmd == "tab close":
         world["tabs"] = [t for t in world["tabs"] if t["tab_id"] != args[2]]
+        world["agents"] = [a for a in world["agents"] if a.get("tab_id") != args[2]]
         out = {"result": {}}
     else:
         out = {"result": {"agents": world["agents"]}}

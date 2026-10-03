@@ -204,8 +204,9 @@ already running" message and exit 0.
 When reconcile (`--reconcile`, `--once` or `--watch`) marks a ticket `done`, it
 looks for that ticket's tab in `herdr_workspace`: the tab of the agent named
 after the ticket, else the one tab labelled with the ticket id. It closes it
-only if its agent is `idle` or `done`. It never closes a tab whose agent is
-`working`, `blocked` or `unknown`, a focused tab, a label shared by several
+only if its agent, and every other agent in that tab, is `idle` or `done`. It
+never closes a tab with an agent that is `working`, `blocked` or `unknown`, a
+focused tab, a label shared by several
 tabs, or anything when herdr cannot be asked. The ticket is done either way.
 Each ticket logs one line: `TAB_CLOSED <id> <tab> (agent <state>)` or
 `TAB_KEPT <id> <reason>`.

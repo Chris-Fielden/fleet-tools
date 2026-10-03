@@ -113,6 +113,10 @@ def launches_today(day: str) -> int:
         raise OSError(f"cannot read {launches_path()}: {exc}") from None
     if isinstance(count, bool) or not isinstance(count, int) or count < 0:
         raise OSError(f"{launches_path()} has a bad count")
+    try:
+        datetime.strptime(saved, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        raise OSError(f"{launches_path()} has a bad day") from None
     return count if saved == day else 0
 
 

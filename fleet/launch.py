@@ -520,7 +520,8 @@ def _close_finished_tab(ticket_id: str, settings: dict) -> tuple[bool, str]:
         if not isinstance(tabs, list):
             raise LaunchError("herdr tab list did not return .result.tabs as a list")
         tabs = [x for x in tabs if isinstance(x, dict)]
-        agent = next((a for a in list_agents() if a.get("name") == ticket_id.lower()), None)
+        agents = list_agents()
+        agent = next((a for a in agents if a.get("name") == ticket_id.lower()), None)
     except LaunchError as exc:
         return False, f"herdr could not be asked ({exc})"
     tab = None
@@ -536,10 +537,14 @@ def _close_finished_tab(ticket_id: str, settings: dict) -> tuple[bool, str]:
     if tab is None or not isinstance(tab.get("tab_id"), str):
         return False, "no tab found; nothing to close"
     state = agent.get("agent_status") if agent is not None else tab.get("agent_status")
-    if tab.get("focused") or (agent is not None and agent.get("focused")):
+    # Closing a tab ends every pane in it, so every agent in it must be finished.
+    in_tab = [a for a in agents if a.get("tab_id") == tab["tab_id"]]
+    if tab.get("focused") or any(a.get("focused") for a in in_tab):
         return False, f"tab {tab['tab_id']} is focused"
-    if state not in RESEARCH_DONE_STATES:
-        return False, f"tab {tab['tab_id']} agent is {state or 'unknown'}, not idle or done"
+    for a in [{"agent_status": state}] + in_tab:
+        if a.get("agent_status") not in RESEARCH_DONE_STATES:
+            return False, (f"tab {tab['tab_id']} has an agent that is "
+                           f"{a.get('agent_status') or 'unknown'}, not idle or done")
     try:
         herdr("tab", "close", tab["tab_id"])
     except LaunchError as exc:
