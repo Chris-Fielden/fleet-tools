@@ -9,6 +9,8 @@ Claude Code -- <config>/projects/**/*.jsonl (config: CLAUDE_CONFIG_DIR or
   output_tokens, cache_creation_input_tokens, cache_read_input_tokens) and a
   timestamp. Claude Code records no plan limit or reset time locally, so we
   total tokens over the last 5 hours and 7 days and mark the limit unknown.
+  Totals are split into fresh input (input + cache creation), output and
+  cache reads, because cache reads count far less against plan limits.
   Lines are de-duplicated by (message.id, requestId). recorded_at is the
   newest message timestamp.
 
@@ -53,21 +55,36 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None
 
 
-def _lines(path: Path):
+def _local(iso: str | None) -> str | None:
+    """An ISO UTC string shown in the local time zone with a short label."""
+    dt = _ts(iso)
+    if dt is None:
+        return iso
+    try:
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M %Z").strip()
+    except (ValueError, OverflowError, OSError):
+        return iso
+
+
+def _lines(path: Path, unreadable: list | None = None):
+    """Yield each JSON object line. A file that cannot be read is appended to
+    `unreadable` (if given) instead of being skipped silently."""
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             for raw in fh:
                 try:
                     obj = json.loads(raw)
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
                 if isinstance(obj, dict):
                     yield obj
     except OSError:
-        return
+        if unreadable is not None:
+            unreadable.append(str(path))
 
 
-def _files(root: Path, pattern: str, since: datetime) -> list[Path]:
+def _files(root: Path, pattern: str, since: datetime,
+           unreadable: list | None = None) -> list[Path]:
     """Files under root modified since `since`, newest first."""
     found = []
     if root.is_dir():
@@ -75,6 +92,8 @@ def _files(root: Path, pattern: str, since: datetime) -> list[Path]:
             try:
                 m = p.stat().st_mtime
             except OSError:
+                if unreadable is not None:
+                    unreadable.append(str(p))
                 continue
             if m >= since.timestamp():
                 found.append((m, p))
@@ -82,20 +101,26 @@ def _files(root: Path, pattern: str, since: datetime) -> list[Path]:
 
 
 def _window(tokens=None, used_percent=None, resets_at=None, recorded_at=None,
-            stale=False) -> dict:
+            stale=False, breakdown=None) -> dict:
     return {"tokens": tokens, "used_percent": used_percent,
             "resets_at": _iso(resets_at), "recorded_at": _iso(recorded_at),
-            "stale": stale}
+            "stale": stale, "breakdown": breakdown}
+
+
+def _int(v) -> int:
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
 
 
 def claude_usage(home: Path, now: datetime) -> dict:
     root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude") / "projects"
     t5, t7 = now - FIVE_HOURS, now - WEEK
-    five = week = 0
+    zero = {"fresh_input": 0, "output": 0, "cache_read": 0}
+    five, week = dict(zero), dict(zero)
     newest = None
     seen = set()
-    for path in _files(root, "*.jsonl", t7):
-        for obj in _lines(path):
+    unreadable: list[str] = []
+    for path in _files(root, "*.jsonl", t7, unreadable):
+        for obj in _lines(path, unreadable):
             msg = obj.get("message")
             usage = msg.get("usage") if isinstance(msg, dict) else None
             ts = _ts(obj.get("timestamp"))
@@ -109,25 +134,34 @@ def claude_usage(home: Path, now: datetime) -> dict:
                 if key in seen:
                     continue
                 seen.add(key)
-            n = sum(v for v in (usage.get(k) for k in (
-                "input_tokens", "output_tokens",
-                "cache_creation_input_tokens", "cache_read_input_tokens"))
-                    if isinstance(v, int) and not isinstance(v, bool))
-            week += n
-            if ts >= t5:
-                five += n
+            parts = {
+                "fresh_input": _int(usage.get("input_tokens"))
+                + _int(usage.get("cache_creation_input_tokens")),
+                "output": _int(usage.get("output_tokens")),
+                "cache_read": _int(usage.get("cache_read_input_tokens")),
+            }
+            for k, v in parts.items():
+                week[k] += v
+                if ts >= t5:
+                    five[k] += v
             if newest is None or ts > newest:
                 newest = ts
     return {
         "tool": "claude", "limit_known": False,
-        "five_hour": _window(tokens=five, recorded_at=newest),
-        "weekly": _window(tokens=week, recorded_at=newest),
+        "five_hour": _window(tokens=sum(five.values()), recorded_at=newest, breakdown=five),
+        "weekly": _window(tokens=sum(week.values()), recorded_at=newest, breakdown=week),
         "note": "limit unknown: Claude Code does not record its plan limit locally",
+        "unreadable": unreadable,
     }
 
 
 def _pct(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
+    try:
+        return math.isfinite(v)
+    except OverflowError:  # integer too large to convert to float
+        return False
 
 
 def _codex_window(rl, recorded_at: datetime, length: timedelta, now: datetime) -> dict:
@@ -146,8 +180,9 @@ def _codex_window(rl, recorded_at: datetime, length: timedelta, now: datetime) -
 def codex_usage(home: Path, now: datetime) -> dict:
     root = Path(os.environ.get("CODEX_HOME") or home / ".codex") / "sessions"
     best = None  # (recorded_at, rate_limits)
-    for path in _files(root, "rollout-*.jsonl", now - WEEK):
-        for obj in _lines(path):
+    unreadable: list[str] = []
+    for path in _files(root, "rollout-*.jsonl", now - WEEK, unreadable):
+        for obj in _lines(path, unreadable):
             payload = obj.get("payload")
             rl = payload.get("rate_limits") if isinstance(payload, dict) else None
             ts = _ts(obj.get("timestamp"))
@@ -157,7 +192,7 @@ def codex_usage(home: Path, now: datetime) -> dict:
             if usable and ts is not None and now - WEEK <= ts <= now and (best is None or ts > best[0]):
                 best = (ts, rl)
     out = {"tool": "codex", "limit_known": False, "five_hour": _window(),
-           "weekly": _window(),
+           "weekly": _window(), "unreadable": unreadable,
            "note": "limit unknown: no Codex rate-limit record found in the last 7 days"}
     if best:
         at, rl = best
@@ -175,19 +210,35 @@ def collect(home: Path | None = None, now: datetime | None = None) -> list[dict]
     return [claude_usage(home, now), codex_usage(home, now)]
 
 
+def _n(n: int) -> str:
+    try:
+        return f"{n:,}"
+    except ValueError:  # beyond Python's int-to-string digit limit
+        return "huge"
+
+
 def _text(w: dict, label: str) -> str:
     if w["used_percent"] is not None:
         s = f"{label} {w['used_percent']:g}% used"
         if w["resets_at"]:
-            s += f", resets {w['resets_at']}"
+            s += f", resets {_local(w['resets_at'])}"
     elif w["tokens"] is not None:
-        s = f"{label} {w['tokens']:,} tokens, limit unknown"
+        b = w.get("breakdown")
+        s = f"{label} {_n(w['tokens'])} tokens"
+        if b:
+            s += (f" ({_n(b['fresh_input'])} fresh input, {_n(b['output'])} output,"
+                  f" {_n(b['cache_read'])} cache reads)")
+        s += ", limit unknown"
     else:
         return f"{label} unknown"
     if w["recorded_at"]:
-        s += f" [recorded {w['recorded_at']}{', STALE' if w['stale'] else ''}]"
+        s += f" [recorded {_local(w['recorded_at'])}{', STALE' if w['stale'] else ''}]"
     return s
 
 
 def line(r: dict) -> str:
-    return f"{r['tool']:<7} {_text(r['five_hour'], '5h')}  |  {_text(r['weekly'], 'week')}"
+    out = f"{r['tool']:<7} {_text(r['five_hour'], '5h')}  |  {_text(r['weekly'], 'week')}"
+    bad = r.get("unreadable")
+    if bad:
+        out += f"  |  WARNING: {len(bad)} log file(s) could not be read, figures may be incomplete"
+    return out
