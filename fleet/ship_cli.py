@@ -32,6 +32,40 @@ def _reconcile() -> int:
     return subprocess.run([sys.executable, str(dispatch), "--reconcile"]).returncode
 
 
+def _gate(repo: Path, wt: Path, branch: str, *fields: str) -> subprocess.CompletedProcess:
+    """`ticket gate` the way the merge script calls it: the exact same gate."""
+    ticket = Path(__file__).resolve().parent.parent / "bin" / "ticket"
+    base = dp.main_branch(repo) or "main"
+    return subprocess.run(
+        [sys.executable, str(ticket), "gate", "--base", base, "--branch", branch, "--dir", str(repo),
+         "--worktree", str(wt), "--repo", repo.name, *fields], capture_output=True, text=True)
+
+
+def _review_if_needed(repo: Path, name: str, branch: str, script: Path) -> str | None:
+    """When the gate wants reviews from both Codex and Claude (high risk) and
+    does not have them yet, run them now so one command is enough. Returns a
+    one-line problem, or None. Anything else the gate dislikes is left for the
+    merge script to report: this never decides whether a merge is allowed."""
+    wt = repo / ".worktrees" / name
+    review = repo / "scripts" / "review.sh"
+    if not wt.is_dir() or not review.is_file():
+        return None
+    if _gate(repo, wt, branch, "--field", "risk").stdout.strip() != "high":
+        return None
+    if _gate(repo, wt, branch, "--field", "ok").stdout.strip() == "yes":
+        return None
+    print(f"ship: {branch} is high risk and lacks passing reviews; running both reviewers")
+    env = dict(os.environ, REVIEWER="both")
+    env.setdefault("FLEET_TICKET", str(Path(__file__).resolve().parent.parent / "bin" / "ticket"))
+    try:
+        done = subprocess.run(["bash", str(review)], cwd=wt, env=env)
+    except OSError as exc:
+        return f"could not run {review}: {exc}"
+    if done.returncode != 0:
+        return f"the reviews of {branch} did not complete (exit {done.returncode}); nothing was merged"
+    return None
+
+
 def main(argv=None) -> int:
     p = _Parser(prog="ship")
     p.add_argument("id", help="ticket id, like BD-17")
@@ -67,6 +101,10 @@ def main(argv=None) -> int:
     if not script.is_file():
         return _fail(f"{repo} has no scripts/finish-task.sh")
 
+    problem = _review_if_needed(repo, name, branch, script)
+    if problem:
+        return _fail(problem)
+
     # Same terminal, same prompts: nothing is answered or skipped on the
     # human's behalf. FLEET_HOME and the rest of the environment carry over.
     try:
@@ -76,11 +114,20 @@ def main(argv=None) -> int:
     if done.returncode != 0:
         return _fail(f"finish-task refused {branch} (exit {done.returncode}); nothing was reconciled")
 
-    if _reconcile() != 0:
-        return _fail(f"{branch} finished, but dispatch --reconcile failed; run it yourself")
-    after = tk.load_ticket(t["id"])
-    if after["status"] == "done":
-        print(f"ship: {t['id']} merged and marked done")
+    # finish-task also exits 0 when the human answers no at its prompt, so ask
+    # git, not the exit code, whether the merge happened.
+    if not dp.is_merged(repo, branch, t.get("base_commit")):
+        return _fail(f"{t['id']} was not merged (cancelled?); it is still claimed")
+    later = "; run `dispatch --reconcile` to move the card to Done"
+    try:
+        _reconcile()
+        status = tk.load_ticket(t["id"])["status"]
+    except (OSError, tk.TicketError) as exc:
+        print(f"ship: {t['id']} merged, but the card was not updated ({exc}){later}")
         return 0
-    # finish-task also exits 0 when the human answers no at its prompt.
-    return _fail(f"{t['id']} was not merged (cancelled?); it is still {after['status']}")
+    if status == "done":
+        print(f"ship: {t['id']} merged and marked done")
+    else:
+        # e.g. a running `dispatch --watch` holds the lock; it reconciles on its next pass
+        print(f"ship: {t['id']} merged, but is still {status}{later}")
+    return 0

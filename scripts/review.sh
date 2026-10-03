@@ -5,7 +5,8 @@
 # Usage:  scripts/review.sh
 #
 # Which reviewer runs:
-#   REVIEWER=auto   (default) the other company's model than the author:
+#   REVIEWER=auto   (default) HIGH-risk branches get both reviewers (see below);
+#                   otherwise the other company's model than the author:
 #                   Codex when Claude wrote the work, Claude when Codex did.
 #                   Run by hand, it uses Codex if installed, otherwise Claude.
 #   REVIEWER=codex  OpenAI's Codex CLI (signs in with your ChatGPT account)
@@ -47,6 +48,19 @@ if [[ "$(git rev-list --count "$base..HEAD")" == "0" ]]; then
 fi
 
 reviewer="${REVIEWER:-auto}"
+if [[ "$reviewer" == "auto" ]]; then
+  # A high-risk branch needs a PASS from both reviewers before it can merge, so
+  # ask the same gate the merge script uses and run both up front. If the gate
+  # cannot be asked, fall through to the single reviewer picked below.
+  ticket_cmd="${FLEET_TICKET:-ticket}"
+  repo_name="$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")"
+  level="$("$ticket_cmd" gate --base "$base" --branch "$branch" --dir "$root" --worktree "$root" \
+            --repo "$repo_name" --field risk 2>/dev/null || true)"
+  if [[ "$level" == "high" ]]; then
+    echo "This branch is HIGH risk: running both reviewers (Codex and Claude)."
+    reviewer="both"
+  fi
+fi
 if [[ "$reviewer" == "auto" ]]; then
   # Pick a reviewer from the other company than the author when we can tell.
   if [[ -n "${CLAUDECODE:-}" ]]; then
