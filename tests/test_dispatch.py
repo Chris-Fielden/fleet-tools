@@ -786,6 +786,60 @@ def test_startup_wait_is_bounded_by_the_deadline(monkeypatch):
     assert seen and max(seen) <= 0.05
 
 
+def test_herdr_query_is_not_given_more_time_than_asked(monkeypatch):
+    import fleet.launch as lc
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append(kw["timeout"])
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(lc.subprocess, "run", fake_run)
+    lc.herdr("agent", "list", timeout=0.2)
+    assert seen == [0.2]
+
+
+def test_startup_wait_asks_nothing_once_the_deadline_has_passed(monkeypatch):
+    import fleet.launch as lc
+    asked = []
+    clock = iter([0.0, 5.0, 5.0, 5.0])  # deadline is 1.0; the first check is already late
+    monkeypatch.setattr(lc.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(lc, "START_TIMEOUT", 1.0)
+    monkeypatch.setattr(lc, "agent_state", lambda n, timeout=120: asked.append(timeout) or "idle")
+    with pytest.raises(lc.LaunchError, match="not working"):
+        lc.wait_until_working("x")
+    assert asked == []
+
+
+def test_poll_sleep_never_passes_the_deadline(monkeypatch):
+    import fleet.launch as lc
+    slept = []
+    clock = iter([0.0, 0.0, 0.7, 0.7, 1.0, 1.0])  # deadline 1.0; 0.3s left at the sleep
+    monkeypatch.setattr(lc.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(lc.time, "sleep", slept.append)
+    monkeypatch.setattr(lc, "START_TIMEOUT", 1.0)
+    monkeypatch.setattr(lc, "POLL_INTERVAL", 5.0)
+    monkeypatch.setattr(lc, "agent_state", lambda n, timeout=120: "idle")
+    with pytest.raises(lc.LaunchError, match="not working"):
+        lc.wait_until_working("x")
+    assert slept and max(slept) <= 0.3 + 1e-9
+
+
+def test_unreadable_tab_reply_is_logged_and_warned(projects, herdr_log, monkeypatch, env, capsys):
+    repo = real_repo(projects)
+    t = mk(branch="task/job")
+    wrapper = env / "garbled-tab-herdr"
+    wrapper.write_text(f"#!/bin/sh\n[ \"$1 $2\" = \"tab create\" ] && {{ echo 'not json'; exit 0; }}\n"
+                       f"exec {sys.executable} {Path(__file__).parent / 'fake_herdr.py'} \"$@\"\n")
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("FLEET_HERDR", str(wrapper))
+    assert dispatch_main(["--once"]) == 1
+    err = capsys.readouterr().err
+    assert f"a tab labelled {t['id']} may have been left open" in err
+    assert "TAB_UNKNOWN" in (env / "fleet" / "dispatch.log").read_text()
+    assert tk.load_ticket(t["id"])["status"] == "open"
+
+
 def test_symlinked_worktrees_folder_is_refused(projects, herdr_log, env):
     repo = real_repo(projects)
     outside = env / "outside"
