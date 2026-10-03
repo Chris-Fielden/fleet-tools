@@ -348,6 +348,19 @@ def scan_command(command, places, depth=0, cwd_known=True):
                 here = [_resolve(e, p) for p in here]
         if here_known and chdirs and any(is_under_fleet(p) for p in here):
             return ("fleet", None)
+        # Redirections happen in the calling shell, before the command (or a
+        # nested shell, or cd) runs, so check them here, ahead of any `continue`.
+        if REDIRECT_MARK in words:
+            for w in words[words.index(REDIRECT_MARK) + 1:]:
+                if not w:
+                    continue
+                e = _expand(w)
+                if e is None:
+                    continue
+                if cwd_known and any(is_under_fleet(e, p) for p in places):
+                    return ("fleet", None)
+                if not cwd_known and is_under_fleet(e, "/"):
+                    return ("fleet", None)
         if name == "-c":
             reason = scan_command(args[0] if args else "", here, depth + 1, here_known)
             if reason:
@@ -361,8 +374,16 @@ def scan_command(command, places, depth=0, cwd_known=True):
                 a.startswith("--rai") for a in args[1:]):
             return ("human", "ticket risk --raise")
         if name in ("cd", "pushd"):
-            target = args[0] if args else "~"
-            expanded = _expand(target)
+            rest = list(args)
+            while rest and rest[0].startswith("-") and rest[0] != "-" and not (
+                    name == "pushd" and re.match(r"^-\d+$", rest[0])):
+                if rest.pop(0) == "--":
+                    break
+            target = rest[0] if rest else "~"
+            # `cd -` goes to $OLDPWD, which we can't know.
+            # `pushd +N` / `-N` rotates to a stacked folder: also unknown.
+            unknown = target == "-" or (name == "pushd" and re.match(r"^[+-]\d+$", target))
+            expanded = None if unknown else _expand(target)
             if expanded is None:
                 cwd_known = False
             elif cwd_known:
