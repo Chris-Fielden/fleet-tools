@@ -70,6 +70,17 @@ def test_codex_stale_when_older_than_window(tmp_path):
     assert "STALE" in usage.line(r)
 
 
+def test_stale_codex_percent_shown_as_unknown(tmp_path):
+    rl = json.loads(json.dumps(SAMPLE["rate_limits"]))
+    rl["primary"]["used_percent"] = 0
+    write_codex(tmp_path, NOW - timedelta(hours=6), rl)
+    r = usage.codex_usage(tmp_path, NOW)
+    text = usage.line(r)
+    assert "5h unknown (last seen 0% used)" in text
+    assert "5h 0% used" not in text
+    assert r["five_hour"]["used_percent"] == 0 and r["five_hour"]["stale"]
+
+
 def test_codex_none_found(tmp_path):
     r = usage.codex_usage(tmp_path, NOW)
     assert not r["limit_known"] and "unknown" in usage.line(r)
