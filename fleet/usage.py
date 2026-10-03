@@ -21,7 +21,8 @@ Codex -- <codex home>/sessions/**/rollout-*.jsonl (CODEX_HOME or ~/.codex).
   resets_at (Unix seconds). recorded_at is that log line's own timestamp.
   Codex only logs interactive sessions, so the figure can be old: a window is
   flagged stale if it was recorded longer ago than its window length, or its
-  reset time has already passed. Only rollout-*.jsonl files are opened.
+  reset time has already passed. A stale window is shown as "unknown (last
+  seen N% used)" rather than as a current percentage; JSON keeps the raw data. Only rollout-*.jsonl files are opened.
 """
 
 from __future__ import annotations
@@ -218,7 +219,10 @@ def _n(n: int) -> str:
 
 
 def _text(w: dict, label: str) -> str:
-    if w["used_percent"] is not None:
+    if w["used_percent"] is not None and w["stale"]:
+        # An old percentage (often 0% after a reset) would read as real usage.
+        s = f"{label} unknown (last seen {w['used_percent']:g}% used)"
+    elif w["used_percent"] is not None:
         s = f"{label} {w['used_percent']:g}% used"
         if w["resets_at"]:
             s += f", resets {_local(w['resets_at'])}"
