@@ -74,13 +74,18 @@ def _ask_yes_no(question: str) -> bool:
         return False
 
 
-def _cycle(settings: dict, emit, warn, reserve=None, offer=None) -> int:
+def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=False) -> int:
     """The steps of one --once run; returns the exit code. `reserve()` is called
     before each launch and says whether it may go ahead (False: the daily limit
     is reached; it may raise OSError, which refuses the launch). `offer(ticket)`
-    says whether to relaunch a claimed ticket whose agent is gone."""
+    says whether to relaunch a claimed ticket whose agent is gone. `retry_tabs`
+    (--watch) retries closing the tabs of tickets done on an earlier cycle."""
     code = 0
     _reconcile(settings, emit, warn)
+    if retry_tabs:
+        done = [t["id"] for t in tk.list_tickets() if t["status"] == "done"]
+        for ticket_id, reason in lc.retry_kept_tabs(done, settings):
+            emit(f"{ticket_id}  tab closed: {reason}")
     for t in lc.finish_investigations(tk.list_tickets(), warn):
         emit(f"{t['id']}  investigation {t['status']}")
         kaneo.mirror_quietly(t, warn)
@@ -164,7 +169,8 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None) -> int:
         while True:
             lines: list[str] = []
             try:
-                _cycle(settings, lines.append, lambda m: lines.append(f"warning: {m}"), reserve=reserve)
+                _cycle(settings, lines.append, lambda m: lines.append(f"warning: {m}"), reserve=reserve,
+                       retry_tabs=True)
             except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
                 lines.append(f"error: {exc}")
             for line in lines:

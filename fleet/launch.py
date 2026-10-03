@@ -515,18 +515,49 @@ def close_finished_tab(ticket_id: str, settings: dict) -> tuple[bool, str]:
     return closed, reason
 
 
+def _herdr_tabs(settings: dict) -> tuple[list[dict], list[dict]]:
+    """The tabs of herdr_workspace and all listed agents. Raises LaunchError."""
+    workspace = find_workspace(settings["herdr_workspace"])
+    listed = herdr("tab", "list", "--workspace", workspace).get("result")
+    tabs = listed.get("tabs") if isinstance(listed, dict) else None
+    if not isinstance(tabs, list):
+        raise LaunchError("herdr tab list did not return .result.tabs as a list")
+    return [x for x in tabs if isinstance(x, dict)], list_agents()
+
+
 def _close_finished_tab(ticket_id: str, settings: dict) -> tuple[bool, str]:
     try:
-        workspace = find_workspace(settings["herdr_workspace"])
-        listed = herdr("tab", "list", "--workspace", workspace).get("result")
-        tabs = listed.get("tabs") if isinstance(listed, dict) else None
-        if not isinstance(tabs, list):
-            raise LaunchError("herdr tab list did not return .result.tabs as a list")
-        tabs = [x for x in tabs if isinstance(x, dict)]
-        agents = list_agents()
-        agent = next((a for a in agents if a.get("name") == ticket_id.lower()), None)
+        tabs, agents = _herdr_tabs(settings)
     except LaunchError as exc:
         return False, f"herdr could not be asked ({exc})"
+    return _close_tab_in(ticket_id, tabs, agents)
+
+
+def retry_kept_tabs(ticket_ids: list[str], settings: dict) -> list[tuple[str, str]]:
+    """On a later cycle, try again to close the tabs of done tickets, with the
+    same safety rules as close_finished_tab. Only successes are logged
+    (TAB_CLOSED) and returned as (ticket id, reason); a tab that is still kept,
+    or already gone, stays quiet so the log is not repeated every cycle."""
+    if not ticket_ids:
+        return []
+    try:
+        tabs, agents = _herdr_tabs(settings)
+    except LaunchError:
+        return []
+    closed = []
+    for ticket_id in ticket_ids:
+        ok, reason = _close_tab_in(ticket_id, tabs, agents)
+        if ok:
+            _safe_log("TAB_CLOSED", f"{ticket_id} {reason}")
+            closed.append((ticket_id, reason))
+            closed_id = reason.split()[1]
+            tabs = [x for x in tabs if x.get("tab_id") != closed_id]
+            agents = [a for a in agents if a.get("tab_id") != closed_id]
+    return closed
+
+
+def _close_tab_in(ticket_id: str, tabs: list[dict], agents: list[dict]) -> tuple[bool, str]:
+    agent = next((a for a in agents if a.get("name") == ticket_id.lower()), None)
     tab = None
     if agent is not None:
         tab = next((x for x in tabs if x.get("tab_id") == agent.get("tab_id")), None)

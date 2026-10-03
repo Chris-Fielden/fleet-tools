@@ -211,6 +211,11 @@ tabs, or anything when herdr cannot be asked. The ticket is done either way.
 Each ticket logs one line: `TAB_CLOSED <id> <tab> (agent <state>)` or
 `TAB_KEPT <id> <reason>`.
 
+A tab kept at that moment (typically because it was focused) is not forgotten:
+on every later `--watch` cycle the dispatcher tries again for each `done`
+ticket, with the same rules. Only a success is logged and printed
+(`TAB_CLOSED`); a tab that is still kept, or already gone, is silent.
+
 ### A claimed ticket whose agent is gone
 
 At the start of each `--once` or `--watch` cycle, a `claimed` build or fix

@@ -418,3 +418,62 @@ def test_a_listed_agent_is_not_lost(projects, herdr_log, env, monkeypatch, capsy
 def test_ask_yes_no_without_a_terminal_is_no(monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: False, raising=False)
     assert dispatch_cli._ask_yes_no("ok?") is False
+
+
+# --- retrying kept tabs on later cycles ----------------------------------------
+
+def done_ticket(projects):
+    t = merged_claimed(projects)
+    assert dispatch_main(["--reconcile"]) == 0
+    return tk.load_ticket(t["id"])
+
+
+def test_watch_closes_a_kept_tab_once_it_is_no_longer_focused(projects, herdr_log, env, monkeypatch, capsys):
+    t = merged_claimed(projects)
+    w = world(env, monkeypatch, t["id"], tab_focused=True)
+    assert dispatch_main(["--reconcile"]) == 0
+    assert "TAB_KEPT" in dp.log_path().read_text()
+
+    def unfocus(_clock):
+        data = json.loads(w.read_text())
+        data["tabs"][0]["focused"] = False
+        w.write_text(json.dumps(data))
+    clock = FakeClock(2, at={1: unfocus})
+    watch({}, clock)
+    assert json.loads(w.read_text())["tabs"] == []
+    log = dp.log_path().read_text()
+    assert f"TAB_CLOSED {t['id']} tab w3:t4 (agent idle)" in log
+    assert f"{t['id']}  tab closed" in capsys.readouterr().out
+
+
+def test_watch_retry_keeps_a_focused_or_busy_tab_quietly(projects, herdr_log, env, monkeypatch):
+    t = merged_claimed(projects)
+    world(env, monkeypatch, t["id"], status="working")
+    assert dispatch_main(["--reconcile"]) == 0
+    before = dp.log_path().read_text()
+    watch({}, FakeClock(2))
+    assert ["tab", "close", "w3:t4"] not in calls(herdr_log)
+    assert dp.log_path().read_text().count("TAB_KEPT") == before.count("TAB_KEPT")
+    assert "TAB_CLOSED" not in dp.log_path().read_text()
+
+
+def test_watch_retry_leaves_tabs_of_unfinished_tickets_alone(projects, herdr_log, env, monkeypatch):
+    repo = make_repo(projects)
+    t = claim(mk(branch="task/job"))
+    world(env, monkeypatch, t["id"])
+    watch({}, FakeClock(2))
+    assert ["tab", "close", "w3:t4"] not in calls(herdr_log)
+    assert tk.load_ticket(t["id"])["status"] == "claimed"
+
+
+def test_watch_retry_keeps_an_ambiguous_label(projects, herdr_log, env, monkeypatch):
+    t = merged_claimed(projects)
+    world(env, monkeypatch, t["id"], agent=False, tabs=2, tab_focused=True)
+    assert dispatch_main(["--reconcile"]) == 0
+    w = json.loads(open(env / "world.json").read())
+    for x in w["tabs"]:
+        x["focused"] = False
+    (env / "world.json").write_text(json.dumps(w))
+    watch({}, FakeClock(2))
+    assert ["tab", "close", "w3:t4"] not in calls(herdr_log)
+    assert ["tab", "close", "w3:t5"] not in calls(herdr_log)
