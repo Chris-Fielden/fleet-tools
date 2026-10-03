@@ -13,6 +13,10 @@ Kaneo endpoints used (https://kaneo.app/docs/llms.txt, API reference):
   DELETE /column/{id}             remove a leftover column (409 if it holds tasks)
   GET  /task/tasks/{projectId}    board view; used to check a column is empty
   POST /task/{projectId}          create a task (title, description, priority, status)
+  GET  /labels?workspaceId=...    list workspace labels; POST /labels creates one
+  GET  /tasks/{id}/labels         a card's labels
+  POST /tasks/{id}/labels/{labelId}    attach a label to a card
+  DELETE /tasks/{id}/labels/{labelId}  detach it
   GET  /task/{id}?view=detail     read a task, to compare before updating
   PUT  /task/{id}                 update a task (title, description, priority,
                                   status, projectId, position)
@@ -409,9 +413,9 @@ def _sync_label(t: dict, board: _Board, task_id: str, dry_run: bool) -> bool:
     if dry_run:
         return True
     for label_id in stale:
-        c.request("POST", f"/labels/{label_id}/detach", body={"taskId": task_id})
+        c.request("DELETE", f"/tasks/{task_id}/labels/{label_id}")
     if want not in names.values():
-        c.request("POST", f"/labels/{board.label_id(want)}/attach", body={"taskId": task_id})
+        c.request("POST", f"/tasks/{task_id}/labels/{board.label_id(want)}")
     return True
 
 

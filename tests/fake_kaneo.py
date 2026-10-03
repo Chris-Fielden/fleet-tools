@@ -61,13 +61,15 @@ class FakeKaneo:
                        "color": body.get("color"), "workspaceId": body["workspaceId"]}
                 self.labels.append(lab)
                 return 200, lab
-            if len(parts) == 3 and parts[2] in ("attach", "detach"):
-                ids = self.task_labels.setdefault(body["taskId"], [])
-                if parts[2] == "attach" and parts[1] not in ids:
-                    ids.append(parts[1])
-                if parts[2] == "detach" and parts[1] in ids:
-                    ids.remove(parts[1])
-                return 200, {"ok": True}
+        if parts[0] == "tasks" and len(parts) == 4 and parts[2] == "labels":
+            if self.fail_labels:
+                return 500, {"error": "boom"}
+            ids = self.task_labels.setdefault(parts[1], [])
+            if method == "POST" and parts[3] not in ids:
+                ids.append(parts[3])
+            if method == "DELETE" and parts[3] in ids:
+                ids.remove(parts[3])
+            return 200, {"ok": True}
         if parts[0] == "tasks" and len(parts) == 3 and parts[2] == "labels":
             return 200, [l for l in self.labels if l["id"] in self.task_labels.get(parts[1], [])]
         if parts[0] == "project" and len(parts) == 1:
