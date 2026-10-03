@@ -13,6 +13,8 @@ import json
 import os
 import re
 import subprocess
+import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +30,10 @@ DEFAULTS = {
     "herdr_workspace": "fleet",
     "auto_investigate": True,
     "max_investigations_per_day": 3,
+    "watch_interval_seconds": 120,
+    "max_launches_per_day": 10,
 }
+MIN_WATCH_INTERVAL = 30
 LAUNCH_TYPES = ("build", "fix")
 MAIN_BRANCHES = ("main", "master")
 TASK_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{1,40}")  # what scripts/new-task.sh accepts
@@ -79,6 +84,56 @@ def single_instance():
             yield
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+class Clock:
+    """The time source of the watch loop; tests swap in a fake one."""
+
+    def now(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
+
+def launches_path() -> Path:
+    return tk.fleet_home() / "dispatch-launches.json"
+
+
+def launches_today(day: str) -> int:
+    """Launches the watch loop has attempted on this UTC day (YYYY-MM-DD). Kept
+    in a file so restarting the watcher does not reset the safety cap. A
+    missing file is 0; an unreadable one raises OSError (callers fail closed)."""
+    try:
+        data = json.loads(launches_path().read_text(encoding="utf-8"))
+        count, saved = data["count"], data["day"]
+    except FileNotFoundError:
+        return 0
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise OSError(f"cannot read {launches_path()}: {exc}") from None
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise OSError(f"{launches_path()} has a bad count")
+    try:
+        datetime.strptime(saved, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        raise OSError(f"{launches_path()} has a bad day") from None
+    return count if saved == day else 0
+
+
+def add_launches(day: str, n: int = 1) -> None:
+    path = launches_path()
+    tk.refuse_real_store_in_tests(path)
+    total = launches_today(day) + n
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"day": day, "count": total}, fh)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
 
 
 # --- settings ----------------------------------------------------------------
@@ -170,6 +225,17 @@ def _merge(settings: dict, given, path: Path) -> None:
         if isinstance(n, bool) or not isinstance(n, int) or n < 0:
             raise SettingsError(f"{path}: max_investigations_per_day must be a whole number, 0 or more")
         settings["max_investigations_per_day"] = n
+    if "watch_interval_seconds" in given:
+        n = given["watch_interval_seconds"]
+        if isinstance(n, bool) or not isinstance(n, int) or n < MIN_WATCH_INTERVAL:
+            raise SettingsError(f"{path}: watch_interval_seconds must be a whole number, "
+                                f"{MIN_WATCH_INTERVAL} or more")
+        settings["watch_interval_seconds"] = n
+    if "max_launches_per_day" in given:
+        n = given["max_launches_per_day"]
+        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+            raise SettingsError(f"{path}: max_launches_per_day must be a whole number, 0 or more")
+        settings["max_launches_per_day"] = n
     for key in ("projects_dir", "research_dir", "herdr_workspace"):
         if key in given:
             if not isinstance(given[key], str) or not given[key].strip():

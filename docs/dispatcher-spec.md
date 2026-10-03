@@ -51,6 +51,8 @@ Optional `$FLEET_HOME/dispatch.json`. Defaults when it's missing:
 - `max_running`: how many tickets may be `claimed` at once.
 - `projects_dir`: a ticket's repo lives at `<projects_dir>/<repo>`.
 - Unknown keys or bad values are an error with a plain message.
+- `watch_interval_seconds` and `max_launches_per_day`: see "Watching, tab
+  cleanup and lost agents" below. `herdr_workspace` is created if missing.
 
 ## Part A
 
@@ -163,6 +165,83 @@ summary: what changed, how you verified it, and the review verdict.
 3. No permission-bypass flag ever appears in the herdr arguments.
 4. A `fix` ticket goes to the parent's agent kind.
 5. Capacity: a second `--once` with `max_running` 1 starts nothing.
+
+## Watching, tab cleanup and lost agents
+
+Settings (see Settings above for the rest):
+
+- `watch_interval_seconds` (default 120, minimum 30): the pause between
+  cycles of `--watch`.
+- `max_launches_per_day` (default 10, 0 stops all launching): the safety cap
+  for `--watch`.
+
+### `dispatch --watch`
+
+Repeats the `--once` steps every `watch_interval_seconds` until Ctrl+C, which
+ends it cleanly with exit 0. It holds the single-instance lock for the whole
+time, so `--once` and a second `--watch` print the usual "another dispatch is
+already running" message and exit 0.
+
+- It prints a line only when that line was not printed by the cycle before, so
+  a ticket that stays "at capacity" is reported once. It never asks a
+  question. Warnings go to the same output. An error in one cycle (disk, git,
+  ticket store) is printed and the next cycle runs.
+- **Safety cap.** At most `max_launches_per_day` launches are attempted per UTC
+  day (build, fix and investigation launches together). Each launch is counted
+  and saved before it starts, so an interruption or a later error cannot leave
+  it uncounted, and if the count cannot be saved the launch is refused. A failed
+  attempt counts, so a broken setup cannot loop forever. The count is kept in
+  `$FLEET_HOME/dispatch-launches.json` so restarting the watcher does not
+  reset it. Once the cap is reached it keeps reconciling, closing tabs and
+  checking agents, launches nothing until the next UTC day, and says so once
+  per day (log `LAUNCH_CAP`). If the count file is unreadable it launches
+  nothing and says so. The cap applies to `--watch` only; `--once` is a
+  deliberate human action.
+- Tests inject a fake clock (`dispatch.Clock`: `now()` and `sleep()`).
+
+### Closing the tab after reconcile
+
+When reconcile (`--reconcile`, `--once` or `--watch`) marks a ticket `done`, it
+looks for that ticket's tab in `herdr_workspace`: the tab of the agent named
+after the ticket, else the one tab labelled with the ticket id. It closes it
+only if its agent, and every other agent in that tab, is `idle` or `done`. It
+never closes a tab with an agent that is `working`, `blocked` or `unknown`, a
+focused tab, a label shared by several
+tabs, or anything when herdr cannot be asked. The ticket is done either way.
+Each ticket logs one line: `TAB_CLOSED <id> <tab> (agent <state>)` or
+`TAB_KEPT <id> <reason>`.
+
+### A claimed ticket whose agent is gone
+
+At the start of each `--once` or `--watch` cycle, a `claimed` build or fix
+ticket whose agent is not in `herdr agent list` (the tab died and the ticket
+would block the queue) is reported on one line and logged `AGENT_LOST`. If
+herdr cannot be asked, nothing is reported.
+
+- `--once` on a terminal then asks "start a new agent in the same task
+  folder? [y/N]". On yes it runs the starting prompt again in a new tab with
+  its working folder set to the existing task folder (which must still be a
+  worktree of the repo on the ticket's branch). Logged `RELAUNCHED`, or
+  `RELAUNCH_FAILED`; the ticket stays `claimed` either way, and a failed
+  relaunch closes only its own new tab. Without a terminal, or on no, nothing
+  changes.
+- `--watch` only reports; it never relaunches.
+
+### The herdr workspace
+
+If the workspace named by `herdr_workspace` does not exist (herdr removes it
+when its last tab closes), every launch and relaunch creates it with
+`herdr workspace create --label <name> --no-focus` instead of failing, and logs
+`WORKSPACE_CREATED`. Closing a finished tab never creates it.
+
+### Tests
+
+The fake herdr (`tests/fake_herdr.py`) can read a world file (workspaces, tabs,
+agents). Tests cover: the settings and their limits; the lock against `--once`
+and a second `--watch`; the interval, change-only printing, the cap (said once,
+kept across a restart and reset the next day, still reconciling); every
+tab-closing case above; lost-agent warn, relaunch, decline and a missing
+folder; and workspace creation.
 
 ## Done means (each part)
 

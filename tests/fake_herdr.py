@@ -4,6 +4,9 @@
 FAKE_HERDR_LOG   file that gets one JSON line of arguments per call
 FAKE_HERDR_STATE status `agent list` reports for the agent (default: working)
 FAKE_HERDR_WORKSPACE label of the one workspace it knows (default: fleet)
+FAKE_HERDR_WORLD  optional JSON file {"workspaces": [...], "tabs": [...], "agents": [...]}
+                  that `workspace list/create`, `tab list/close` and `agent list` read
+                  and change, in herdr's real reply shapes
 """
 import json
 import os
@@ -14,7 +17,42 @@ with open(os.environ["FAKE_HERDR_LOG"], "a") as fh:
     fh.write(json.dumps(args) + "\n")
 
 cmd = " ".join(args[:2])
-if cmd == "workspace list":
+world_file = os.environ.get("FAKE_HERDR_WORLD")
+world = json.load(open(world_file)) if world_file else None
+if world is not None and cmd in ("workspace list", "workspace create", "tab list", "tab close", "tab create", "agent list",
+                                                   "agent start"):
+    if cmd == "workspace list":
+        out = {"result": {"workspaces": world["workspaces"]}}
+    elif cmd == "workspace create":
+        ws = {"workspace_id": f"w{len(world['workspaces']) + 20}", "label": args[args.index("--label") + 1]}
+        world["workspaces"].append(ws)
+        out = {"result": {"workspace": ws}}
+    elif cmd == "tab list":
+        wanted = args[args.index("--workspace") + 1] if "--workspace" in args else None
+        out = {"result": {"tabs": [t for t in world["tabs"] if wanted in (None, t["workspace_id"])]}}
+    elif cmd == "agent start":  # the new agent is working at once, in the tab of its pane
+        pane = args[args.index("--pane") + 1]
+        world["agents"].append({"name": args[2], "agent_status": "working",
+                                "tab_id": pane.replace(":p", ":t")})
+        out = {"result": {"agent": {"name": args[2]}}}
+    elif cmd == "tab create":
+        n = len(world["tabs"]) + 50
+        ws = args[args.index("--workspace") + 1]
+        world["tabs"].append({"tab_id": f"{ws}:t{n}", "label": args[args.index("--label") + 1],
+                              "workspace_id": ws, "focused": False, "agent_status": "unknown"})
+        out = {"result": {"tab": {"tab_id": f"{ws}:t{n}"}, "root_pane": {"pane_id": f"{ws}:p{n}"}}}
+    elif cmd == "tab close":
+        world["tabs"] = [t for t in world["tabs"] if t["tab_id"] != args[2]]
+        world["agents"] = [a for a in world["agents"] if a.get("tab_id") != args[2]]
+        out = {"result": {}}
+    else:
+        out = {"result": {"agents": world["agents"]}}
+    json.dump(world, open(world_file, "w"))
+elif cmd == "workspace create":
+    out = {"result": {"workspace": {"workspace_id": "w9", "label": args[args.index("--label") + 1]}}}
+elif cmd == "tab list":
+    out = {"result": {"tabs": []}}
+elif cmd == "workspace list":
     out = {"result": {"workspaces": [
         {"workspace_id": "w1", "label": os.environ.get("FAKE_HERDR_WORKSPACE", "fleet")}]}}
 elif cmd == "tab create":
