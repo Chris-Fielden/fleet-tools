@@ -47,6 +47,10 @@ class AlreadyRunning(Exception):
     pass
 
 
+class WatchRestart(Exception):
+    """--watch saw new code on main and wants to be re-executed."""
+
+
 # --- locations, log, lock ----------------------------------------------------
 
 def settings_path() -> Path:
@@ -55,6 +59,15 @@ def settings_path() -> Path:
 
 def log_path() -> Path:
     return tk.fleet_home() / "dispatch.log"
+
+
+def code_head() -> str | None:
+    """HEAD of the fleet-tools checkout this code runs from, or None."""
+    try:
+        out = _git(Path(__file__).resolve().parent.parent, "rev-parse", "HEAD")
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return out.stdout.strip() or None if out.returncode == 0 else None
 
 
 def log(kind: str, message: str) -> None:

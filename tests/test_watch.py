@@ -502,3 +502,97 @@ def test_watch_retry_keeps_an_ambiguous_label(projects, herdr_log, env, monkeypa
     watch({}, FakeClock(2))
     assert ["tab", "close", "w3:t4"] not in calls(herdr_log)
     assert ["tab", "close", "w3:t5"] not in calls(herdr_log)
+
+
+# --- hardened tab retry ---------------------------------------------------------
+
+def test_watch_retry_does_not_fall_back_to_the_label(projects, herdr_log, env, monkeypatch):
+    """Reconcile kept the agent's tab; later the agent is gone and a tab with the
+    same label (the human's) must not be closed."""
+    t = merged_claimed(projects)
+    w = world(env, monkeypatch, t["id"], tab_focused=True)
+    assert dispatch_main(["--reconcile"]) == 0
+    data = json.loads(w.read_text())
+    data["agents"], data["tabs"][0]["focused"] = [], False
+    w.write_text(json.dumps(data))
+    watch({}, FakeClock(3))
+    assert not any(x[:2] == ["tab", "close"] for x in calls(herdr_log))
+    assert "TAB_GONE" in dp.log_path().read_text()
+
+
+def test_watch_gives_up_on_a_tab_kept_for_too_long(projects, herdr_log, env, monkeypatch):
+    t = merged_claimed(projects)
+    w = world(env, monkeypatch, t["id"], tab_focused=True)
+    assert dispatch_main(["--reconcile"]) == 0
+    # make the TAB_KEPT line two days older than the fake clock
+    log = dp.log_path()
+    log.write_text(log.read_text().replace(
+        next(l.split(" ")[0] for l in log.read_text().splitlines() if "TAB_KEPT" in l), "2026-09-30T00:00:00Z"))
+    data = json.loads(w.read_text())
+    data["tabs"][0]["focused"] = False
+    w.write_text(json.dumps(data))
+    watch({}, FakeClock(3))
+    assert not any(x[:2] == ["tab", "close"] for x in calls(herdr_log))
+    assert dp.log_path().read_text().count("TAB_GIVEUP") == 1
+
+
+def test_watch_retry_warns_when_herdr_is_down_and_prints_it_once(projects, env, capsys):
+    t = merged_claimed(projects)
+    assert dispatch_main(["--reconcile"]) == 0   # herdr unreachable: TAB_KEPT "could not be asked"
+    assert "TAB_KEPT" in dp.log_path().read_text()
+    capsys.readouterr()
+    watch({}, FakeClock(3))
+    out = capsys.readouterr().out
+    assert out.count("warning: cannot retry closing kept tabs") == 1
+    assert t["id"] in dp.log_path().read_text()
+
+
+def test_kept_tabs_reads_the_log_incrementally(projects, monkeypatch):
+    stamp = "2026-10-02T21:00:00Z"
+    dp.log_path().write_text(f"{stamp} TAB_KEPT AA-1 tab w3:t4 is focused\n")
+    kept = dispatch_cli.lc.KeptTabs(lambda: datetime(2026, 10, 2, 22, tzinfo=timezone.utc))
+    assert kept.poll() == ["AA-1"]
+    opened = []
+    real_open = open
+
+    def spy(path, mode="r", *a, **k):
+        fh = real_open(path, mode, *a, **k)
+        if str(path) == str(dp.log_path()):
+            orig = fh.seek
+            fh.seek = lambda off, *x: (opened.append(off), orig(off, *x))[1]
+        return fh
+    monkeypatch.setattr("builtins.open", spy)
+    with real_open(dp.log_path(), "a") as fh:
+        fh.write(f"{stamp} TAB_KEPT AA-2 tab w3:t5 is focused\n{stamp} TAB_CLOSED AA-1 tab w3:t4 (agent idle)\n"
+                 f"{stamp} TAB_KEPT AA-3 half")   # no newline yet: not consumed
+    assert kept.poll() == ["AA-2"]
+    assert opened and opened[-1] > 0               # read from the saved offset, not from 0
+
+
+# --- restart on new code -----------------------------------------------------
+
+def test_watch_restarts_when_the_checkout_gets_a_new_commit(projects, herdr_log, monkeypatch, capsys):
+    heads = iter(["aaaaaaaa1", "aaaaaaaa1", "bbbbbbbb2"])
+    execs, lock_free = [], []
+    monkeypatch.setattr(dp, "code_head", lambda: next(heads))
+    monkeypatch.setattr(dp, "Clock", lambda: FakeClock(10))
+
+    def fake_exec(argv):
+        try:
+            with dp.single_instance():   # the lock must be free at exec time
+                lock_free.append(True)
+        except dp.AlreadyRunning:
+            lock_free.append(False)
+        execs.append(argv)
+    monkeypatch.setattr(dispatch_cli, "_exec_self", fake_exec)
+    assert dispatch_main(["--watch"]) == 0
+    assert execs == [["--watch"]] and lock_free == [True]
+    assert "WATCH_RESTART" in dp.log_path().read_text()
+    assert "restarting" in capsys.readouterr().out
+
+
+def test_watch_does_not_restart_when_head_is_unchanged_or_unreadable(projects, herdr_log, monkeypatch):
+    monkeypatch.setattr(dispatch_cli, "_exec_self", lambda argv: pytest.fail("must not restart"))
+    for heads in (["a"] * 5, [None] * 5, ["a", None, "a", None, "a"]):
+        it = iter(heads)
+        assert dispatch_cli._cmd_watch(dp.load_settings(), FakeClock(3), head=lambda: next(it)) == 0
