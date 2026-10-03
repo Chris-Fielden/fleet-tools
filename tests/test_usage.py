@@ -230,3 +230,15 @@ def test_huge_json_integers_do_not_overflow(tmp_path):
     assert r["five_hour"]["used_percent"] is None
     assert r["weekly"]["used_percent"] == 5.0
     assert usage.line(r)
+
+
+def test_fresh_percent_shown_and_reset_passed_is_unknown(tmp_path):
+    rl = json.loads(json.dumps(SAMPLE["rate_limits"]))
+    rl["primary"]["used_percent"] = 42.5
+    rl["primary"]["resets_at"] = int((NOW + timedelta(hours=2)).timestamp())
+    rl["secondary"]["used_percent"] = 7
+    rl["secondary"]["resets_at"] = int((NOW - timedelta(minutes=1)).timestamp())
+    write_codex(tmp_path, NOW - timedelta(minutes=10), rl)
+    text = usage.line(usage.codex_usage(tmp_path, NOW))
+    assert "5h 42.5% used" in text
+    assert "week unknown (last seen 7% used)" in text
