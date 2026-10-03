@@ -655,6 +655,7 @@ def test_raising_swaps_the_label_and_sync_is_then_quiet(kaneo):
     r = run("risk", tid, "--raise", "high")
     assert r.returncode == 0, r.stderr
     assert kaneo.label_names(task_id) == ["risk: high"]
+    assert all(r["path"].startswith(("/label", "/project", "/column", "/task")) for r in kaneo.requests)
     kaneo.requests.clear()
     assert f"{tid}  unchanged" in run("sync").stdout
     assert kaneo.writes == []
@@ -663,13 +664,13 @@ def test_raising_swaps_the_label_and_sync_is_then_quiet(kaneo):
 def test_sync_adds_the_label_to_an_old_card_and_dry_run_writes_nothing(kaneo):
     tid = run("new", *new_args()).stdout.split()[0]
     (task_id,) = kaneo.tasks
-    kaneo.task_labels.clear()
+    kaneo.labels.clear()
     kaneo.requests.clear()
     assert f"{tid}  would update" in run("sync", "--dry-run").stdout
     assert kaneo.writes == [] and kaneo.label_names(task_id) == []
     assert f"{tid}  updated" in run("sync").stdout
     assert kaneo.label_names(task_id) == ["risk: medium"]
-    assert len(kaneo.labels) == 1  # the label is reused, not duplicated
+    assert len(kaneo.labels) == 1
 
 
 def test_label_failure_after_card_creation_does_not_duplicate_the_card(kaneo):
@@ -720,3 +721,22 @@ def test_reconcile_still_needs_the_exact_branch_in_an_override_message(repo):
     branch_with(repo, "task/demo", ["docs/a.md"])
     git(repo, "merge", "--no-ff", "task/demo", "-m", "Merge task/demo-2\n\nEMERGENCY OVERRIDE (risk high): x")
     assert not dispatch.is_merged(repo, "task/demo", base)
+
+
+def test_label_failure_does_not_stop_the_card_update(kaneo):
+    tid = run("new", *new_args()).stdout.split()[0]
+    (task_id,) = kaneo.tasks
+    kaneo.tasks[task_id]["title"] = "stale"
+    kaneo.fail_labels = True
+    r = run("sync")
+    assert "risk label was not" in r.stdout
+    assert kaneo.tasks[task_id]["title"] != "stale"
+
+
+def test_fake_kaneo_rejects_the_old_label_paths(kaneo):
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+    req = Request(kaneo.url + "/tasks/t1/labels", headers={"Authorization": f"Bearer {KEY}"})
+    with pytest.raises(HTTPError) as err:
+        urlopen(req)
+    assert err.value.code == 404
