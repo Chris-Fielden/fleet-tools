@@ -17,8 +17,10 @@ Only on a real transition, never on a re-run or a note:
 
 Each message holds the ticket id, type, status and a title cut to 60
 characters. The body and notes are never sent. A failed send (server down,
-timeout of 4 seconds, HTTP error) prints one warning and never fails the
-command. Redirects are not followed, so the token cannot be forwarded.
+4-second timeout per network step, HTTP error) prints one warning and never fails the
+command. Redirects are not followed, so the token cannot be forwarded. The send is
+synchronous, so a dead server can delay a command by a few seconds; use an IP
+address in `url` for a firm limit.
 
 ## notify.json
 

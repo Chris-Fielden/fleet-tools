@@ -12,6 +12,7 @@ for proposed tickets.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -24,7 +25,7 @@ from pathlib import Path
 
 from . import ticket as tk
 
-TIMEOUT = 4  # seconds for the whole request
+TIMEOUT = 4  # seconds per socket operation (not DNS); use an IP url for a firm limit
 TITLE_MAX = 60
 EVENTS = ("ready", "urgent", "failed", "proposed")
 _HEADLINE = {"ready": "Review ready", "urgent": "Urgent ticket", "failed": "Ticket failed",
@@ -133,7 +134,7 @@ def send(ticket: dict, event: str) -> bool:
             resp.read(1024)
     except urllib.error.HTTPError as exc:
         raise NotifyError(f"ntfy answered HTTP {exc.code}") from None
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as exc:
         reason = getattr(exc, "reason", exc)
         raise NotifyError(f"ntfy unreachable ({type(reason).__name__})") from None
     return True
@@ -151,6 +152,9 @@ def notify_quietly(ticket: dict, event: str | None, warn=None) -> None:
         send(ticket, event)
     except NotConfigured:
         pass
-    except Exception as exc:  # best effort: nothing here may fail a command
+    except NotifyError as exc:
         warn(f"warning: {ticket.get('id', 'ticket')} saved, but the phone notification "
              f"was not sent ({exc})")
+    except Exception as exc:  # best effort: nothing here may fail a command
+        warn(f"warning: {ticket.get('id', 'ticket')} saved, but the phone notification "
+             f"was not sent ({type(exc).__name__})")

@@ -142,8 +142,10 @@ def test_redirect_not_followed():
         "log_message": lambda s, *a: None}))
     threading.Thread(target=redirector.serve_forever, daemon=True).start()
     write_config(f"http://127.0.0.1:{redirector.server_port}")
-    r = make(priority="urgent")
-    redirector.shutdown(); redirector.server_close(); target.stop()
+    try:
+        r = make(priority="urgent")
+    finally:
+        redirector.shutdown(); redirector.server_close(); target.stop()
     assert r.returncode == 0 and target.requests == []
 
 
@@ -151,3 +153,9 @@ def test_title_is_shortened_and_cleaned():
     msg = notify._message({"id": "BD-1", "type": "build", "status": "open",
                            "title": "x" * 200 + "\n"}, "failed", "fleet")
     assert len(msg["message"]) < 100 and "\n" not in msg["message"]
+
+
+def test_urgent_beats_ready_and_proposed():
+    base = {"id": "BD-1", "status": "open", "type": "review", "priority": "urgent"}
+    assert notify.event_for_new(base) == "urgent"
+    assert notify.event_for_new({**base, "priority": "normal"}) == "ready"
