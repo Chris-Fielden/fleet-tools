@@ -9,6 +9,7 @@ import sys
 from . import dispatch as dp
 from . import kaneo
 from . import launch as lc
+from . import notify
 from . import ticket as tk
 
 
@@ -83,6 +84,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None) -> int:
     for t in lc.finish_investigations(tk.list_tickets(), warn):
         emit(f"{t['id']}  investigation {t['status']}")
         kaneo.mirror_quietly(t, warn)
+        notify.notify_quietly(t, "failed" if t["status"] == "failed" else None, warn)
     for t in lc.lost_agents(tk.list_tickets(), warn):
         emit(f"{t['id']}  claimed, but its agent is not running in herdr (the tab died?); "
              f"task folder {t['repo']}/.worktrees/{t['branch'].removeprefix('task/')}")
