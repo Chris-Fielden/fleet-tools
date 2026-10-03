@@ -392,21 +392,34 @@ def risk_label(t: dict) -> str:
 
 
 def ready_to_ship(t: dict) -> bool:
-    """True when the ticket's verdict is PASS for the branch's current last
-    commit (and, for high risk, both reviewers passed it). Information for the
+    """True when the ticket's verdict is PASS for the commit the branch is at
+    now and meets the review rules the merge gate applies at the branch's real
+    risk level (files and every ticket on the branch). Information for the
     card only: the merge script checks the saved review itself."""
     v = t["verdict"]
     if v is None or v["result"] != "PASS":
         return False
-    if rk.stored_level(t) == "high" and set(v["reviews"]) != set(tk.REVIEW_KINDS):
-        return False
     try:
         repo = dp.load_settings()["projects_dir"] / t["repo"]
-        tip = rk._git(repo, "rev-parse", "--verify", "--quiet",
-                      f"refs/heads/{t['branch']}^{{commit}}").strip()
-    except (dp.SettingsError, rk.RiskError, OSError):
+        branch = t["branch"]
+        tip = rk._git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}").strip()
+        if tip != v["commit"]:
+            return False
+        base = "main"
+        try:
+            rk._git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/main")
+        except rk.RiskError:
+            base = "master"
+        rev_range = f"{base}...{branch}"
+        rules = rk.rules_for_range(repo, rev_range)
+        _, diff_level = rk.classify_all(rk.changed_files(repo, rev_range), rules)
+        stored, _ = rk.level_for_branch(tk.list_tickets(), branch, rules, t["repo"])
+        level = rk.higher(rk.higher(stored, rk.stored_level(t, rules)), diff_level)
+    except (dp.SettingsError, rk.RiskError, tk.TicketError, tk.TicketInvalid, OSError):
         return False
-    return tip == v["commit"]
+    reviews = {kind: {"verdict": r["result"], "reviewer": r["reviewer"], "file": "ticket"}
+               for kind, r in v["reviews"].items()}
+    return rk.check_reviews(reviews, level) == []
 
 
 def _wanted_labels(t: dict) -> dict:

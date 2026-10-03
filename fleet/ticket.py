@@ -245,11 +245,15 @@ def _check_verdict(v) -> list[str]:
           and re.fullmatch(r"[0-9a-f]{40}", v["commit"]) and _is_str(v["reviewer"])
           and 1 <= len(v["reviewer"]) <= REVIEWER_MAX and _is_time(v["at"])
           and isinstance(v["reviews"], dict) and v["reviews"]
-          and all(k in REVIEW_KINDS and r in VERDICT_RESULTS for k, r in v["reviews"].items())
-          and v["result"] == ("FAIL" if "FAIL" in v["reviews"].values() else "PASS"))
+          and all(k in REVIEW_KINDS and isinstance(r, dict) and set(r) == {"result", "reviewer"}
+                  and r["result"] in VERDICT_RESULTS and _is_str(r["reviewer"])
+                  and 1 <= len(r["reviewer"]) <= REVIEWER_MAX
+                  for k, r in v["reviews"].items())
+          and v["result"] == ("FAIL" if any(r["result"] == "FAIL" for r in v["reviews"].values())
+                              else "PASS"))
     if not ok:
         return ["verdict must be null or {result: PASS or FAIL, commit: a full commit id, "
-                "reviewer, at: a UTC time, reviews: {codex or claude: PASS or FAIL}}"]
+                "reviewer, at: a UTC time, reviews: {codex or claude: {result, reviewer}}}"]
     return []
 
 
@@ -607,7 +611,8 @@ def verdict_line(v: dict | None) -> str:
     """One line for a stored verdict, for `ticket show` and the card."""
     if v is None:
         return "-"
-    return f"{v['result']} by {v['reviewer']} on commit {v['commit']} at {v['at']}"
+    who = ", ".join(f"{r['reviewer']}: {r['result']}" for r in v["reviews"].values())
+    return f"{v['result']} ({who}) on commit {v['commit']} at {v['at']}"
 
 
 def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: str) -> list[dict]:
@@ -636,9 +641,10 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
                 continue
             old = t["verdict"]
             reviews = dict(old["reviews"]) if old and old["commit"] == commit else {}
-            reviews[kind] = result
+            reviews[kind] = {"result": result, "reviewer": reviewer}
             now = _now()
-            t["verdict"] = {"result": "FAIL" if "FAIL" in reviews.values() else "PASS",
+            failed = any(r["result"] == "FAIL" for r in reviews.values())
+            t["verdict"] = {"result": "FAIL" if failed else "PASS",
                             "commit": commit, "reviewer": reviewer, "at": now, "reviews": reviews}
             t["updated_at"] = now
             _write_atomic(_ticket_path(t["id"]), t)

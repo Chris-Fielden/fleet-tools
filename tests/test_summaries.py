@@ -64,7 +64,9 @@ def test_two_reviewers_of_one_commit_combine_and_fail_wins(env):
     record(file=review_file(env, "a.md", SHA, "Codex", "PASS"))
     record(file=review_file(env, "b.md", SHA, "Claude (opus)", "FAIL"))
     v = stored(tid)["verdict"]
-    assert v["result"] == "FAIL" and v["reviews"] == {"codex": "PASS", "claude": "FAIL"}
+    assert v["result"] == "FAIL"
+    assert {k: r["result"] for k, r in v["reviews"].items()} == {"codex": "PASS", "claude": "FAIL"}
+    assert "Codex: PASS, Claude (opus): FAIL" in tk.verdict_line(v)
     record(file=review_file(env, "c.md", SHA, "Claude (opus)", "PASS"))  # fixed and re-reviewed
     assert stored(tid)["verdict"]["result"] == "PASS"
 
@@ -74,7 +76,7 @@ def test_a_review_of_a_new_commit_replaces_the_verdict(env):
     record(file=review_file(env, "a.md", SHA, "Codex", "FAIL"))
     record(file=review_file(env, "b.md", SHA2, "Codex", "PASS"))
     v = stored(tid)["verdict"]
-    assert (v["result"], v["commit"], v["reviews"]) == ("PASS", SHA2, {"codex": "PASS"})
+    assert (v["result"], v["commit"], list(v["reviews"])) == ("PASS", SHA2, ["codex"])
 
 
 def test_only_open_or_claimed_tickets_on_that_branch_and_repo_get_it(env):
@@ -106,11 +108,11 @@ def test_missing_review_file_is_refused(env):
 
 def test_stored_verdict_validation():
     base = {"result": "PASS", "commit": SHA, "reviewer": "Codex", "at": "2026-01-01T00:00:00Z",
-            "reviews": {"codex": "PASS"}}
+            "reviews": {"codex": {"result": "PASS", "reviewer": "Codex"}}}
     assert tk._check_verdict(base) == []
-    for bad in ({**base, "result": "MAYBE"}, {**base, "commit": "abc"}, {**base, "reviews": {}},
-                {**base, "reviews": {"grok": "PASS"}}, {**base, "at": "yesterday"}, "PASS",
-                {**base, "reviews": {"codex": "FAIL"}},  # aggregate PASS hides a FAIL
+    for bad in ({**base, "result": "MAYBE"}, {**base, "commit": "abc"}, {**base, "reviews": {}}, {**base, "reviews": {"codex": "PASS"}},
+                {**base, "reviews": {"grok": {"result": "PASS", "reviewer": "Grok"}}}, {**base, "at": "yesterday"}, "PASS",
+                {**base, "reviews": {"codex": {"result": "FAIL", "reviewer": "Codex"}}},  # aggregate PASS hides a FAIL
                 {k: v for k, v in base.items() if k != "at"}):
         assert tk._check_verdict(bad)
 
@@ -181,7 +183,7 @@ def test_card_shows_verdict_and_latest_note_at_the_top(board, env):
     assert run("note", tid, "the final summary").returncode == 0
     record(file=review_file(env, "a.md", tip))
     desc = only_task(fake)["description"]
-    assert desc.startswith(f"**Review verdict:** PASS by Codex on commit {tip}")
+    assert desc.startswith(f"**Review verdict:** PASS (Codex: PASS) on commit {tip}")
     top = desc.split("---")[0]
     assert "the final summary" in top and "first remark" not in top
     assert "first remark" in desc  # earlier notes stay lower down
@@ -235,6 +237,22 @@ def test_high_risk_needs_both_reviewers_for_the_label(board, env):
     assert "Ready to ship" in labels(fake)
 
 
+def test_files_that_make_the_branch_high_risk_need_both_reviewers_and_a_strong_claude(board, env):
+    """The ticket says medium, but the branch changes a high-risk file (the
+    review script), so the gate would want Codex and Claude opus or fable."""
+    fake, repo_dir, _ = board
+    git(repo_dir, "checkout", "-q", "task/demo")
+    tip = commit_in(repo_dir, "scripts/review.sh")
+    git(repo_dir, "checkout", "-q", "main")
+    new_ticket()
+    record(file=review_file(env, "a.md", tip, "Codex", "PASS"))
+    assert "Ready to ship" not in labels(fake)
+    record(file=review_file(env, "b.md", tip, "Claude (sonnet)", "PASS"))
+    assert "Ready to ship" not in labels(fake)  # sonnet is not strong enough
+    record(file=review_file(env, "c.md", tip, "Claude (opus)", "PASS"))
+    assert "Ready to ship" in labels(fake)
+
+
 def test_no_label_when_the_branch_cannot_be_found(board, env):
     fake, _, tip = board
     new_ticket(branch="task/missing")
@@ -258,7 +276,7 @@ def test_ticket_show_prints_notes_and_verdict(env):
     run("note", tid, "all done, checks pass")
     record(file=review_file(env, "a.md", SHA))
     out = run("show", tid).stdout
-    assert f"verdict:     PASS by Codex on commit {SHA} at " in out
+    assert f"verdict:     PASS (Codex: PASS) on commit {SHA} at " in out
     assert "all done, checks pass" in out and "--- note by" in out
     assert json.loads(run("show", tid, "--json").stdout)["verdict"]["result"] == "PASS"
 
