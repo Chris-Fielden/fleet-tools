@@ -11,15 +11,44 @@ rulebook for every agent here, you included. The short version:
 2. The work isn't done until `scripts/check.sh` passes and your changes are
    committed. Don't weaken or skip checks.
 3. A different model reviews every change. **You are the author, so Claude
-   reviews your work:** run `REVIEWER=claude scripts/review.sh`, then fix
-   every MUST FIX item, commit, and run the checks again.
-4. Only the human merges, with `scripts/finish-task.sh`. Never push to main.
+   reviews your work:** run `scripts/review.sh` (it picks Claude for you, and
+   runs both reviewers on high-risk branches; if it ever picks Codex, rerun
+   with `REVIEWER=claude`), then fix every MUST FIX item, commit, and run the
+   checks again.
+4. Only the human merges, with `ship` (or `scripts/finish-task.sh`). Never run
+   either, and never push to main.
 5. GitOps: change the cluster by committing YAML under `k8s/`. Never run
    `kubectl apply`, `helm upgrade` or similar. Read-only `kubectl` is fine.
 6. Secrets never go in files or git. Don't create `.env` files.
+7. When you finish, record a final SUMMARY with
+   `ticket note <ID> "SUMMARY"` (what changed, how you verified it, the review
+   verdict; at most 4000 characters, no secrets), then repeat it in your reply.
+   Don't stop until the note is saved. Use `ticket` only for your own ticket
+   (`ticket show`, `ticket note`) unless the human says otherwise.
 
 If a hook blocks you, read its message, fix the cause, and try again.
 Never try to get around a hook.
+
+## Risk levels and reviewers
+
+Every change has a risk level: **low**, **medium** or **high**. It comes from
+`risk-rules.json`: each file gets the highest level of any rule it matches, a
+change gets the highest level of its files, and unmatched files get the
+default (`medium`). The rules are read from the base branch, so a branch can't
+weaken its own rules.
+
+- **low** (for example `docs/**`, `tests/**`) and **medium**: one review by
+  the other model. As the author, you get Claude: just run
+  `scripts/review.sh`.
+- **high** (for example `k8s/**`, `.claude/**`, `.codex/**`, `CLAUDE.md`,
+  `AGENTS.md`, the core scripts, anything touching secrets or auth,
+  dependency files, and the ticket/risk code): **both reviewers**, Codex and
+  Claude, must PASS before the human can merge. `scripts/review.sh` with the
+  default `REVIEWER=auto` runs both on a high-risk branch; `REVIEWER=both`
+  forces it.
+
+Fix every MUST FIX item, commit, and run the checks again. You never approve
+or merge your own work.
 
 ## Asking Claude for a second opinion
 
