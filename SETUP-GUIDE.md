@@ -504,6 +504,19 @@ with the escape hatch below) or me to help resolve it.
 
 ---
 
+## Optional: phone notifications
+
+The ticket tools can push a short message to your phone when a review is ready,
+an urgent ticket appears, or a ticket fails. It uses an ntfy server you run
+yourself, reachable only over Tailscale. It is off until you create
+`notify.json` next to `kaneo.json` in the fleet home (`chmod 600`). Installing
+the server is a manual step for you; the full steps (ntfy bound to the
+tailscale IP or `tailscale serve`, never `funnel`; `auth-default-access:
+deny-all`; no upstream relay; Android battery exemption) and the file format
+are in `docs/notify-spec.md`.
+
+---
+
 ## What's in the kit, file by file
 
 | File | What it does |

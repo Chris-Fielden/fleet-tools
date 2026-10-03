@@ -6,6 +6,7 @@ import sys
 from datetime import datetime, timezone
 
 from . import kaneo
+from . import notify
 from . import ticket as tk
 
 IDEAS_REPO = "ideas"
@@ -27,6 +28,7 @@ def _file(prog: str, fields: dict) -> int:
         return 1
     print(ticket["id"])
     kaneo.mirror_quietly(ticket, _warn)
+    notify.notify_quietly(ticket, notify.event_for_new(ticket), _warn)
     return 0
 
 

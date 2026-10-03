@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from . import kaneo
+from . import notify
 from . import risk as rk
 from . import ticket as tk
 
@@ -115,6 +116,7 @@ def _cmd_new(args) -> int:
     ticket = tk.create_ticket(fields)
     print(ticket["id"])
     kaneo.mirror_quietly(ticket, _warn)
+    notify.notify_quietly(ticket, notify.event_for_new(ticket), _warn)
     return 0
 
 
@@ -161,6 +163,7 @@ def _cmd_close(args) -> int:
     t = tk.close_ticket(args.id, args.outcome, args.note)
     print(f"{t['id']} closed (now {t['status']})")
     kaneo.mirror_quietly(t, _warn)
+    notify.notify_quietly(t, "failed" if t["status"] == "failed" else None, _warn)
     return 0
 
 
