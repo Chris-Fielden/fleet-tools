@@ -83,8 +83,9 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=Fals
     code = 0
     _reconcile(settings, emit, warn)
     if retry_tabs:
-        done = [t["id"] for t in tk.list_tickets() if t["status"] == "done"]
-        for ticket_id, reason in lc.retry_kept_tabs(done, settings):
+        done = {t["id"] for t in tk.list_tickets() if t["status"] == "done"}
+        kept = [i for i in lc.kept_tab_ids() if i in done]
+        for ticket_id, reason in lc.retry_kept_tabs(kept, settings, warn):
             emit(f"{ticket_id}  tab closed: {reason}")
     for t in lc.finish_investigations(tk.list_tickets(), warn):
         emit(f"{t['id']}  investigation {t['status']}")

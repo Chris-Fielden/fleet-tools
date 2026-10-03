@@ -422,12 +422,6 @@ def test_ask_yes_no_without_a_terminal_is_no(monkeypatch):
 
 # --- retrying kept tabs on later cycles ----------------------------------------
 
-def done_ticket(projects):
-    t = merged_claimed(projects)
-    assert dispatch_main(["--reconcile"]) == 0
-    return tk.load_ticket(t["id"])
-
-
 def test_watch_closes_a_kept_tab_once_it_is_no_longer_focused(projects, herdr_log, env, monkeypatch, capsys):
     t = merged_claimed(projects)
     w = world(env, monkeypatch, t["id"], tab_focused=True)
@@ -446,9 +440,10 @@ def test_watch_closes_a_kept_tab_once_it_is_no_longer_focused(projects, herdr_lo
     assert f"{t['id']}  tab closed" in capsys.readouterr().out
 
 
-def test_watch_retry_keeps_a_focused_or_busy_tab_quietly(projects, herdr_log, env, monkeypatch):
+@pytest.mark.parametrize("status, focused", [("working", False), ("idle", True)])
+def test_watch_retry_keeps_a_focused_or_busy_tab_quietly(projects, herdr_log, env, monkeypatch, status, focused):
     t = merged_claimed(projects)
-    world(env, monkeypatch, t["id"], status="working")
+    world(env, monkeypatch, t["id"], status=status, tab_focused=focused)
     assert dispatch_main(["--reconcile"]) == 0
     before = dp.log_path().read_text()
     watch({}, FakeClock(2))
@@ -457,8 +452,38 @@ def test_watch_retry_keeps_a_focused_or_busy_tab_quietly(projects, herdr_log, en
     assert "TAB_CLOSED" not in dp.log_path().read_text()
 
 
+def test_watch_retry_closes_once(projects, herdr_log, env, monkeypatch):
+    t = merged_claimed(projects)
+    w = world(env, monkeypatch, t["id"], tab_focused=True)
+    assert dispatch_main(["--reconcile"]) == 0
+    data = json.loads(w.read_text())
+    data["tabs"][0]["focused"] = False
+    w.write_text(json.dumps(data))
+    watch({}, FakeClock(3))
+    assert calls(herdr_log).count(["tab", "close", "w3:t4"]) == 1
+    assert dp.log_path().read_text().count("TAB_CLOSED") == 1
+
+
+def test_watch_retry_leaves_a_tab_that_reconcile_never_kept_alone(projects, herdr_log, env, monkeypatch):
+    t = merged_claimed(projects)
+    assert dispatch_main(["--reconcile"]) == 0   # no tab at all: "no tab found"
+    world(env, monkeypatch, t["id"])             # a tab appears later (reused by the human)
+    watch({}, FakeClock(2))
+    assert ["tab", "close", "w3:t4"] not in calls(herdr_log)
+
+
+def test_watch_retry_logs_a_vanished_tab_once(projects, herdr_log, env, monkeypatch):
+    t = merged_claimed(projects)
+    w = world(env, monkeypatch, t["id"], tab_focused=True)
+    assert dispatch_main(["--reconcile"]) == 0
+    w.write_text(json.dumps({"workspaces": [{"workspace_id": "w3", "label": "fleet"}],
+                             "tabs": [], "agents": []}))
+    watch({}, FakeClock(3))
+    assert dp.log_path().read_text().count("TAB_GONE") == 1
+
+
 def test_watch_retry_leaves_tabs_of_unfinished_tickets_alone(projects, herdr_log, env, monkeypatch):
-    repo = make_repo(projects)
+    make_repo(projects)
     t = claim(mk(branch="task/job"))
     world(env, monkeypatch, t["id"])
     watch({}, FakeClock(2))

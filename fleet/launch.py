@@ -530,33 +530,60 @@ def _close_finished_tab(ticket_id: str, settings: dict) -> tuple[bool, str]:
         tabs, agents = _herdr_tabs(settings)
     except LaunchError as exc:
         return False, f"herdr could not be asked ({exc})"
-    return _close_tab_in(ticket_id, tabs, agents)
+    closed, reason, _ = _close_tab_in(ticket_id, tabs, agents)
+    return closed, reason
 
 
-def retry_kept_tabs(ticket_ids: list[str], settings: dict) -> list[tuple[str, str]]:
-    """On a later cycle, try again to close the tabs of done tickets, with the
-    same safety rules as close_finished_tab. Only successes are logged
-    (TAB_CLOSED) and returned as (ticket id, reason); a tab that is still kept,
-    or already gone, stays quiet so the log is not repeated every cycle."""
+def kept_tab_ids() -> list[str]:
+    """Tickets whose tab reconcile kept (TAB_KEPT) and that were not closed
+    (TAB_CLOSED) or found gone (TAB_GONE) since, oldest first. A kept tab
+    "with no tab found" has nothing to retry."""
+    kept: dict[str, None] = {}
+    try:
+        lines = dp.log_path().read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        parts = line.split(" ", 3)
+        if len(parts) < 3:
+            continue
+        kind, ticket_id = parts[1], parts[2]
+        rest = parts[3] if len(parts) > 3 else ""
+        if kind == "TAB_KEPT" and not rest.startswith("no tab found"):
+            kept[ticket_id] = None
+        elif kind in ("TAB_CLOSED", "TAB_GONE"):
+            kept.pop(ticket_id, None)
+    return list(kept)
+
+
+def retry_kept_tabs(ticket_ids: list[str], settings: dict, warn=lambda m: None) -> list[tuple[str, str]]:
+    """On a later cycle, try again to close the tabs that reconcile kept, with
+    the same safety rules as close_finished_tab. Only a success is logged
+    (TAB_CLOSED) and returned as (ticket id, reason); a tab that is still kept
+    stays quiet so the log is not repeated every cycle. A tab that is gone is
+    logged once (TAB_GONE) and not retried again."""
     if not ticket_ids:
         return []
     try:
         tabs, agents = _herdr_tabs(settings)
-    except LaunchError:
+    except LaunchError as exc:
+        warn(f"cannot retry closing kept tabs: {exc}")
         return []
     closed = []
     for ticket_id in ticket_ids:
-        ok, reason = _close_tab_in(ticket_id, tabs, agents)
+        ok, reason, closed_id = _close_tab_in(ticket_id, tabs, agents)
         if ok:
             _safe_log("TAB_CLOSED", f"{ticket_id} {reason}")
             closed.append((ticket_id, reason))
-            closed_id = reason.split()[1]
             tabs = [x for x in tabs if x.get("tab_id") != closed_id]
             agents = [a for a in agents if a.get("tab_id") != closed_id]
+        elif reason.startswith("no tab found"):
+            _safe_log("TAB_GONE", f"{ticket_id} {reason}")
     return closed
 
 
-def _close_tab_in(ticket_id: str, tabs: list[dict], agents: list[dict]) -> tuple[bool, str]:
+def _close_tab_in(ticket_id: str, tabs: list[dict], agents: list[dict]) -> tuple[bool, str, str | None]:
+    """Close the ticket's tab if the safety rules allow: (closed, reason, tab id)."""
     agent = next((a for a in agents if a.get("name") == ticket_id.lower()), None)
     tab = None
     if agent is not None:
@@ -566,24 +593,24 @@ def _close_tab_in(ticket_id: str, tabs: list[dict], agents: list[dict]) -> tuple
     if tab is None:
         matches = [x for x in tabs if x.get("label") == ticket_id]
         if len(matches) > 1:
-            return False, f"{len(matches)} tabs are labelled {ticket_id}"
+            return False, f"{len(matches)} tabs are labelled {ticket_id}", None
         tab = matches[0] if matches else None
     if tab is None or not isinstance(tab.get("tab_id"), str):
-        return False, "no tab found; nothing to close"
+        return False, "no tab found; nothing to close", None
     state = agent.get("agent_status") if agent is not None else tab.get("agent_status")
     # Closing a tab ends every pane in it, so every agent in it must be finished.
     in_tab = [a for a in agents if a.get("tab_id") == tab["tab_id"]]
     if tab.get("focused") or any(a.get("focused") for a in in_tab):
-        return False, f"tab {tab['tab_id']} is focused"
+        return False, f"tab {tab['tab_id']} is focused", None
     for a in [{"agent_status": state}] + in_tab:
         if a.get("agent_status") not in RESEARCH_DONE_STATES:
             return False, (f"tab {tab['tab_id']} has an agent that is "
-                           f"{a.get('agent_status') or 'unknown'}, not idle or done")
+                           f"{a.get('agent_status') or 'unknown'}, not idle or done"), None
     try:
         herdr("tab", "close", tab["tab_id"])
     except LaunchError as exc:
-        return False, f"tab {tab['tab_id']} could not be closed ({exc})"
-    return True, f"tab {tab['tab_id']} (agent {state})"
+        return False, f"tab {tab['tab_id']} could not be closed ({exc})", None
+    return True, f"tab {tab['tab_id']} (agent {state})", tab["tab_id"]
 
 
 def lost_agents(tickets: list[dict], warn) -> list[dict]:

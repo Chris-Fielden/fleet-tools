@@ -213,8 +213,11 @@ Each ticket logs one line: `TAB_CLOSED <id> <tab> (agent <state>)` or
 
 A tab kept at that moment (typically because it was focused) is not forgotten:
 on every later `--watch` cycle the dispatcher tries again for each `done`
-ticket, with the same rules. Only a success is logged and printed
-(`TAB_CLOSED`); a tab that is still kept, or already gone, is silent.
+ticket whose last tab log line is `TAB_KEPT` (other than "no tab found"), with
+the same rules. Only a success is logged and printed (`TAB_CLOSED`); a tab that
+is still kept is silent; one that has vanished is logged once as `TAB_GONE`
+and not retried. Finished investigations are never touched. If herdr cannot be
+asked, the cycle warns.
 
 ### A claimed ticket whose agent is gone
 
