@@ -32,7 +32,10 @@ def run_hook(name, tool_input, cwd, env_extra=None, tool_name=None):
     assert out.returncode == 0, out.stderr
     if not out.stdout.strip():
         return None
-    return json.loads(out.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+    hook_output = json.loads(out.stdout)["hookSpecificOutput"]
+    assert hook_output["permissionDecision"] == "deny"
+    assert hook_output["hookEventName"] == "PreToolUse"
+    return hook_output["permissionDecisionReason"]
 
 
 def bash(command, cwd, **kw):
@@ -414,3 +417,21 @@ def test_too_deep_nesting_fails_closed(tmp_path):
         cmd = "bash -c " + shlex.quote(cmd)
     reason = bash(cmd, tmp_path)
     assert reason and "too unusual" in reason
+
+
+@pytest.mark.parametrize("command", [
+    "cd -- ~ && rg --hidden key .",
+    "cd -P ~ && rg --hidden key .",
+    "cd -L -- ~ && grep -r key .",
+])
+def test_cd_options_do_not_hide_destination(tmp_path, command):
+    reason = bash(command, tmp_path)
+    assert reason and "private folder" in reason
+
+
+def test_redirect_checked_before_nested_shell_and_cd(tmp_path):
+    (tmp_path / "sneaky").symlink_to(REAL_FLEET)
+    for command in ("bash -c 'true' > sneaky", "cd . > sneaky", "sh -c true 2> sneaky"):
+        reason = bash(command, tmp_path)
+        assert reason and "private folder" in reason, command
+    assert bash("bash -c 'true' > out.txt", tmp_path) is None
