@@ -32,6 +32,9 @@ FIELDS = (
 OPTIONAL_FIELDS = ("close_note", "base_commit", "seq", "priority", "risk", "notes", "started_at")
 CLOSE_NOTE_MAX = 500
 NOTE_MAX = 4000
+REVIEW_KINDS = ("codex", "claude")
+VERDICT_RESULTS = ("PASS", "FAIL")
+REVIEWER_MAX = 80
 NOTES_LIMIT = 50  # notes per ticket
 BODY_MAX = 4000
 AGENTS = ("claude", "codex")
@@ -235,6 +238,20 @@ def validate_new(fields: dict) -> list[str]:
     return errors
 
 
+def _check_verdict(v) -> list[str]:
+    """A stored verdict: the result of the review of one exact commit."""
+    ok = (isinstance(v, dict) and set(v) == {"result", "commit", "reviewer", "at", "reviews"}
+          and v["result"] in VERDICT_RESULTS and _is_str(v["commit"])
+          and re.fullmatch(r"[0-9a-f]{40}", v["commit"]) and _is_str(v["reviewer"])
+          and 1 <= len(v["reviewer"]) <= REVIEWER_MAX and _is_time(v["at"])
+          and isinstance(v["reviews"], dict) and v["reviews"]
+          and all(k in REVIEW_KINDS and r in VERDICT_RESULTS for k, r in v["reviews"].items()))
+    if not ok:
+        return ["verdict must be null or {result: PASS or FAIL, commit: a full commit id, "
+                "reviewer, at: a UTC time, reviews: {codex or claude: PASS or FAIL}}"]
+    return []
+
+
 def validate_stored(data) -> list[str]:
     """Return every problem with a ticket as read from disk."""
     if not isinstance(data, dict):
@@ -257,7 +274,7 @@ def validate_stored(data) -> list[str]:
     if data["assignee"] is not None and data["assignee"] not in AGENTS:
         errors.append(f"assignee must be null or one of: {', '.join(AGENTS)}")
     if data["verdict"] is not None:
-        errors.append("verdict must be null in phase 1")
+        errors += _check_verdict(data["verdict"])
     note = data.get("close_note")
     if "close_note" in data and (not _is_str(note) or not 1 <= len(note) <= CLOSE_NOTE_MAX):
         errors.append(f"close_note must be 1 to {CLOSE_NOTE_MAX} characters")
@@ -583,6 +600,49 @@ def add_note(ticket_id: str, text: str) -> dict:
         ticket["updated_at"] = now
         _write_atomic(_ticket_path(ticket_id), ticket)
     return ticket
+
+
+def verdict_line(v: dict | None) -> str:
+    """One line for a stored verdict, for `ticket show` and the card."""
+    if v is None:
+        return "-"
+    return f"{v['result']} by {v['reviewer']} on commit {v['commit']} at {v['at']}"
+
+
+def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: str) -> list[dict]:
+    """Record a review's result on the open or claimed tickets of a branch.
+    Information only: the merge gate reads the saved review itself. Reviews of
+    the same commit by the two reviewers are combined (FAIL wins); a review of
+    a different commit replaces the old verdict. Returns the tickets changed."""
+    errors = []
+    if not BRANCH_RE.fullmatch(branch or ""):
+        errors.append("branch must look like task/some-name")
+    if not REPO_RE.fullmatch(repo or ""):
+        errors.append("repo is not a valid repo name")
+    if result not in VERDICT_RESULTS:
+        errors.append(f"result must be one of: {', '.join(VERDICT_RESULTS)}")
+    if not re.fullmatch(r"[0-9a-f]{40}", commit or ""):
+        errors.append("commit must be a full 40-character commit id")
+    kind = (reviewer or "").split(" ")[0].lower()
+    if not _is_str(reviewer) or not 1 <= len(reviewer) <= REVIEWER_MAX or kind not in REVIEW_KINDS:
+        errors.append(f"reviewer must start with codex or claude and be 1 to {REVIEWER_MAX} characters")
+    if errors:
+        raise TicketInvalid(errors)
+    changed = []
+    with _locked():
+        for t in list_tickets():
+            if t["branch"] != branch or t["repo"] != repo or t["status"] not in ("open", "claimed"):
+                continue
+            old = t["verdict"]
+            reviews = dict(old["reviews"]) if old and old["commit"] == commit else {}
+            reviews[kind] = result
+            now = _now()
+            t["verdict"] = {"result": "FAIL" if "FAIL" in reviews.values() else "PASS",
+                            "commit": commit, "reviewer": reviewer, "at": now, "reviews": reviews}
+            t["updated_at"] = now
+            _write_atomic(_ticket_path(t["id"]), t)
+            changed.append(t)
+    return changed
 
 
 def close_ticket(ticket_id: str, outcome: str, note: str | None = None) -> dict:
