@@ -161,7 +161,7 @@ def wait_until_working(name: str) -> None:
             raise LaunchError(f"agent {name} was not working after {START_TIMEOUT:.0f}s")
         if agent_state(name, remaining) == "working":
             return
-        time.sleep(POLL_INTERVAL)
+        time.sleep(max(0.0, min(POLL_INTERVAL, deadline - time.monotonic())))
 
 
 # --- steps -------------------------------------------------------------------
