@@ -13,10 +13,9 @@ Kaneo endpoints used (https://kaneo.app/docs/llms.txt, API reference):
   DELETE /column/{id}             remove a leftover column (409 if it holds tasks)
   GET  /task/tasks/{projectId}    board view; used to check a column is empty
   POST /task/{projectId}          create a task (title, description, priority, status)
-  GET  /labels?workspaceId=...    list workspace labels; POST /labels creates one
-  GET  /tasks/{id}/labels         a card's labels
-  POST /tasks/{id}/labels/{labelId}    attach a label to a card
-  DELETE /tasks/{id}/labels/{labelId}  detach it
+  GET  /label/task/{taskId}       a card's labels
+  POST /label                     create a label on a card (name, color, workspaceId, taskId)
+  DELETE /label/{id}/task         detach a label from its card
   GET  /task/{id}?view=detail     read a task, to compare before updating
   PUT  /task/{id}                 update a task (title, description, priority,
                                   status, projectId, position)
@@ -248,7 +247,6 @@ class _Board:
         self.create = create
         self._projects: dict[str, str | None] = {}
         self._columns: dict[str, dict[str, dict]] = {}
-        self._labels: dict[str, str] | None = None
 
     def project_id(self, repo: str):
         if repo in self._projects:
@@ -304,19 +302,6 @@ class _Board:
                 "columns": [{"id": cols[k]["id"], "position": i} for i, k in enumerate(order)]})
             for i, k in enumerate(order):
                 cols[k]["position"] = i
-
-    def label_id(self, name: str) -> str:
-        """Workspace label by exact name; created if missing."""
-        if self._labels is None:
-            listing = self.c.request("GET", "/labels", query={"workspaceId": self.c.workspace_id})
-            self._labels = {l["name"]: l["id"] for l in listing or []
-                            if isinstance(l, dict) and "name" in l and "id" in l}
-        if name not in self._labels:
-            made = self.c.request("POST", "/labels", body={
-                "name": name, "workspaceId": self.c.workspace_id,
-                "color": RISK_LABEL_COLORS[name.removeprefix(RISK_LABEL_PREFIX)]})
-            self._labels[name] = made["id"]
-        return self._labels[name]
 
     def column_slug(self, project_id: str, t: dict):
         name = "Urgent" if t["status"] == "open" and is_urgent(t) else STATUS_COLUMN[t["status"]]
@@ -404,7 +389,7 @@ def _sync_label(t: dict, board: _Board, task_id: str, dry_run: bool) -> bool:
     if it had to change (or, on a dry run, would have to)."""
     c = board.c
     want = risk_label(t)
-    have = c.request("GET", f"/tasks/{task_id}/labels") or []
+    have = c.request("GET", f"/label/task/{task_id}") or []
     names = {l["id"]: l.get("name") for l in have if isinstance(l, dict)}
     stale = [i for i, n in names.items()
              if isinstance(n, str) and n.startswith(RISK_LABEL_PREFIX) and n != want]
@@ -413,9 +398,11 @@ def _sync_label(t: dict, board: _Board, task_id: str, dry_run: bool) -> bool:
     if dry_run:
         return True
     for label_id in stale:
-        c.request("DELETE", f"/tasks/{task_id}/labels/{label_id}")
+        c.request("DELETE", f"/label/{label_id}/task")
     if want not in names.values():
-        c.request("POST", f"/tasks/{task_id}/labels/{board.label_id(want)}")
+        c.request("POST", "/label", body={
+            "name": want, "color": RISK_LABEL_COLORS[rk.stored_level(t)],
+            "workspaceId": c.workspace_id, "taskId": task_id})
     return True
 
 
@@ -425,7 +412,12 @@ def _mirror(t: dict, board: _Board, tasks: dict, dry_run: bool) -> str:
     task_id = tasks.get(t["id"])
     if task_id is None or outcome.startswith("would create"):
         return outcome
-    if _sync_label(t, board, task_id, dry_run) and outcome == "unchanged":
+    try:
+        label_changed = _sync_label(t, board, task_id, dry_run)
+    except KaneoError as exc:
+        # The card itself is already mirrored; only the label is behind.
+        raise KaneoError(f"card mirrored, but its risk label was not ({exc})") from None
+    if label_changed and outcome == "unchanged":
         return "would update" if dry_run else "updated"
     return outcome
 

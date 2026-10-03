@@ -16,8 +16,7 @@ class FakeKaneo:
         self.columns: dict[str, list[dict]] = {}
         self.tasks: dict[str, dict] = {}
         self.labels: list[dict] = []
-        self.fail_labels = False             # every /labels request -> 500
-        self.task_labels: dict[str, list[str]] = {}  # task id -> label ids
+        self.fail_labels = False             # every /label request -> 500
         self.requests: list[dict] = []
         self.fail_title: str | None = None   # POST /task with this in the title -> 500
         self.fail_column: str | None = None  # POST /column with this name -> 500 (once)
@@ -51,27 +50,22 @@ class FakeKaneo:
     # routing: returns (status, json)
     def route(self, method: str, path: str, query: dict, body):
         parts = path.strip("/").split("/")
-        if parts[0] == "labels":
+        if parts[0] == "label":
             if self.fail_labels:
                 return 500, {"error": "boom"}
-            if len(parts) == 1 and method == "GET":
-                return 200, [l for l in self.labels if l["workspaceId"] == query["workspaceId"][0]]
-            if len(parts) == 1:
-                lab = {"id": self.next_id("l"), "name": body["name"],
-                       "color": body.get("color"), "workspaceId": body["workspaceId"]}
+            if parts[1:2] == ["task"] and len(parts) == 3 and method == "GET":
+                return 200, [l for l in self.labels if l["taskId"] == parts[2]]
+            if len(parts) == 1 and method == "POST":
+                lab = {"id": self.next_id("l"), "name": body["name"], "color": body.get("color"),
+                       "workspaceId": body["workspaceId"], "taskId": body["taskId"]}
                 self.labels.append(lab)
                 return 200, lab
-        if parts[0] == "tasks" and len(parts) == 4 and parts[2] == "labels":
-            if self.fail_labels:
-                return 500, {"error": "boom"}
-            ids = self.task_labels.setdefault(parts[1], [])
-            if method == "POST" and parts[3] not in ids:
-                ids.append(parts[3])
-            if method == "DELETE" and parts[3] in ids:
-                ids.remove(parts[3])
-            return 200, {"ok": True}
-        if parts[0] == "tasks" and len(parts) == 3 and parts[2] == "labels":
-            return 200, [l for l in self.labels if l["id"] in self.task_labels.get(parts[1], [])]
+            if len(parts) == 3 and parts[2] == "task" and method == "DELETE":
+                for lab in self.labels:
+                    if lab["id"] == parts[1] and lab["taskId"]:
+                        lab["taskId"] = None
+                        return 200, lab
+                return 404, {"error": "not found"}
         if parts[0] == "project" and len(parts) == 1:
             if method == "GET":
                 return 200, [p for p in self.projects if p["workspaceId"] == query["workspaceId"][0]]
@@ -175,4 +169,4 @@ class FakeKaneo:
         return H
 
     def label_names(self, task_id: str) -> list[str]:
-        return [l["name"] for l in self.labels if l["id"] in self.task_labels.get(task_id, [])]
+        return [l["name"] for l in self.labels if l["taskId"] == task_id]
