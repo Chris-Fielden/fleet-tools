@@ -245,7 +245,8 @@ def _check_verdict(v) -> list[str]:
           and re.fullmatch(r"[0-9a-f]{40}", v["commit"]) and _is_str(v["reviewer"])
           and 1 <= len(v["reviewer"]) <= REVIEWER_MAX and _is_time(v["at"])
           and isinstance(v["reviews"], dict) and v["reviews"]
-          and all(k in REVIEW_KINDS and r in VERDICT_RESULTS for k, r in v["reviews"].items()))
+          and all(k in REVIEW_KINDS and r in VERDICT_RESULTS for k, r in v["reviews"].items())
+          and v["result"] == ("FAIL" if "FAIL" in v["reviews"].values() else "PASS"))
     if not ok:
         return ["verdict must be null or {result: PASS or FAIL, commit: a full commit id, "
                 "reviewer, at: a UTC time, reviews: {codex or claude: PASS or FAIL}}"]

@@ -110,6 +110,7 @@ def test_stored_verdict_validation():
     assert tk._check_verdict(base) == []
     for bad in ({**base, "result": "MAYBE"}, {**base, "commit": "abc"}, {**base, "reviews": {}},
                 {**base, "reviews": {"grok": "PASS"}}, {**base, "at": "yesterday"}, "PASS",
+                {**base, "reviews": {"codex": "FAIL"}},  # aggregate PASS hides a FAIL
                 {k: v for k, v in base.items() if k != "at"}):
         assert tk._check_verdict(bad)
 
