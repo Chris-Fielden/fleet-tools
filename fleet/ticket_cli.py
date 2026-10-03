@@ -60,6 +60,12 @@ def _build_parser() -> argparse.ArgumentParser:
     note.add_argument("id")
     note.add_argument("text")
 
+    rr = sub.add_parser("review-result",
+                        help="record a saved review's result on a branch's tickets (run by scripts/review.sh)")
+    rr.add_argument("--branch", required=True)
+    rr.add_argument("--repo", required=True)
+    rr.add_argument("--file", required=True, help="a review saved in .reviews/")
+
     risk = sub.add_parser("risk", help="show a ticket's risk level, judge a diff, or raise a level")
     risk.add_argument("id", nargs="?")
     risk.add_argument("--diff", metavar="BASE...BRANCH",
@@ -134,7 +140,7 @@ def _cmd_show(args) -> int:
     print(f"{t['id']}  {t['title']}")
     for name in ("status", "priority", "risk", "type", "repo", "branch", "commit", "parent",
                  "created_by", "assignee", "verdict", "close_note", "base_commit", "created_at", "updated_at"):
-        value = t.get(name)
+        value = tk.verdict_line(t.get(name)) if name == "verdict" else t.get(name)
         print(f"  {name + ':':<12} {'-' if value is None else value}")
     print()
     print(t["body"])
@@ -162,6 +168,22 @@ def _cmd_note(args) -> int:
     t = tk.add_note(args.id, args.text)
     print(f"{t['id']} note added ({len(t['notes'])} so far)")
     kaneo.mirror_quietly(t, _warn)
+    return 0
+
+
+def _cmd_review_result(args) -> int:
+    try:
+        info = rk.parse_review(Path(args.file).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise tk.TicketInvalid([f"cannot read review file {args.file}: {exc}"]) from None
+    if info["verdict"] is None or not info["commit"]:
+        raise tk.TicketInvalid([f"{args.file} has no VERDICT line or no Commit header"])
+    changed = tk.record_verdict(args.branch, args.repo, info["verdict"], info["commit"], info["reviewer"])
+    if not changed:
+        print(f"no open or claimed ticket on {args.branch} in {args.repo}; nothing recorded")
+    for t in changed:
+        print(f"{t['id']} verdict {t['verdict']['result']} recorded")
+        kaneo.mirror_quietly(t, _warn)
     return 0
 
 
@@ -254,7 +276,7 @@ def _cmd_sync(args) -> int:
 def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
     handler = {"new": _cmd_new, "list": _cmd_list, "show": _cmd_show, "approve": _cmd_approve,
-               "close": _cmd_close, "note": _cmd_note, "risk": _cmd_risk, "gate": _cmd_gate,
+               "close": _cmd_close, "note": _cmd_note, "review-result": _cmd_review_result, "risk": _cmd_risk, "gate": _cmd_gate,
                "sync": _cmd_sync}
     try:
         return handler[args.command](args)

@@ -20,7 +20,8 @@
 #
 # Each review is printed and also saved in .reviews/ (ignored by git), with a
 # "Commit:" header holding the full id of the commit reviewed. The merge script
-# only accepts a review of the exact commit it is merging.
+# only accepts a review of the exact commit it is merging. The verdict is also
+# recorded on the branch's ticket (`ticket review-result`) for the Kaneo card.
 set -euo pipefail
 
 root="$(git rev-parse --show-toplevel)"
@@ -83,6 +84,21 @@ MUST FIX: numbered list (empty if none). Each item: file, line, problem, fix.
 SHOULD FIX: numbered list of smaller suggestions.
 SUMMARY: two or three sentences."
 
+# Put the saved review's verdict on the branch's ticket, so the card shows it.
+# Information only (the merge gate reads the saved review itself), so a failure
+# here is a warning, never a failed review. FLEET_TICKET names the ticket
+# command (default: the one on PATH).
+record_on_ticket() {
+  local ticket_cmd="${FLEET_TICKET:-ticket}" repo
+  repo="$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")"
+  if ! command -v "$ticket_cmd" >/dev/null 2>&1; then
+    echo "note: no ticket command found, so the verdict was not recorded on the ticket."
+    return 0
+  fi
+  "$ticket_cmd" review-result --branch "$branch" --repo "$repo" --file "$1" \
+    || echo "note: the verdict could not be recorded on the ticket (the saved review is unaffected)."
+}
+
 # run_review <codex|claude> <model or empty>
 run_review() {
   local kind="$1" model="$2"
@@ -138,6 +154,7 @@ run_review() {
   fi
   mv -f "$part" "$out"   # only now can the merge gate see it
   echo "Saved to $out"
+  record_on_ticket "$out"
 }
 
 case "$reviewer" in

@@ -37,6 +37,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from . import dispatch as dp
 from . import risk as rk
 from . import ticket as tk
 
@@ -56,6 +57,8 @@ LEGACY_COLUMNS = ("open", "claimed", "cancelled")
 PRIORITY = "no-priority"
 URGENT_PRIORITY = "urgent"
 RISK_LABEL_PREFIX = "risk: "
+READY_LABEL = "Ready to ship"
+READY_LABEL_COLOR = "#2da44e"
 RISK_LABEL_COLORS = {"low": "#2da44e", "medium": "#d4a72c", "high": "#cf222e"}
 
 
@@ -225,11 +228,15 @@ def card_description(t: dict) -> str:
 
     lines = [f"{name}: {val(name)}" for name in
              ("type", "branch", "commit", "parent", "created_by", "assignee")]
+    notes = t.get("notes", [])
+    top = ""
     if t["verdict"] is not None:
-        lines.append(f"verdict: {t['verdict']}")
-    notes = "".join(f"\n\n**Note by {n['by']}, {n['at']}**\n\n{n['text']}"
-                    for n in t.get("notes", []))
-    return f"{t['body']}\n\n```\n" + "\n".join(lines) + "\n```" + notes
+        top += f"**Review verdict:** {tk.verdict_line(t['verdict'])}\n\n"
+    if notes:
+        n = notes[-1]
+        top += f"**Latest note by {n['by']}, {n['at']}**\n\n{n['text']}\n\n---\n\n"
+    earlier = "".join(f"\n\n**Note by {n['by']}, {n['at']}**\n\n{n['text']}" for n in notes[:-1])
+    return f"{top}{t['body']}\n\n```\n" + "\n".join(lines) + "\n```" + earlier
 
 
 def _slug_for(repo: str) -> str:
@@ -384,24 +391,65 @@ def risk_label(t: dict) -> str:
     return f"{RISK_LABEL_PREFIX}{rk.stored_level(t)}"
 
 
+def ready_to_ship(t: dict) -> bool:
+    """True when the ticket's verdict is PASS for the commit the branch is at
+    now and meets the review rules the merge gate applies at the branch's real
+    risk level (files and every ticket on the branch). Information for the
+    card only: the merge script checks the saved review itself."""
+    v = t["verdict"]
+    if v is None or v["result"] != "PASS":
+        return False
+    try:
+        repo = dp.load_settings()["projects_dir"] / t["repo"]
+        branch = t["branch"]
+        tip = rk._git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}").strip()
+        if tip != v["commit"]:
+            return False
+        base = "main"
+        try:
+            rk._git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/main")
+        except rk.RiskError:
+            base = "master"
+        rev_range = f"{base}...{branch}"
+        rules = rk.rules_for_range(repo, rev_range)
+        _, diff_level = rk.classify_all(rk.changed_files(repo, rev_range), rules)
+        stored, _ = rk.level_for_branch(tk.list_tickets(), branch, rules, t["repo"])
+        level = rk.higher(rk.higher(stored, rk.stored_level(t, rules)), diff_level)
+    except (dp.SettingsError, rk.RiskError, tk.TicketError, tk.TicketInvalid, OSError):
+        return False
+    reviews = {kind: {"verdict": r["result"], "reviewer": r["reviewer"], "file": "ticket"}
+               for kind, r in v["reviews"].items()}
+    return rk.check_reviews(reviews, level) == []
+
+
+def _wanted_labels(t: dict) -> dict:
+    wanted = {risk_label(t): RISK_LABEL_COLORS[rk.stored_level(t)]}
+    if ready_to_ship(t):
+        wanted[READY_LABEL] = READY_LABEL_COLOR
+    return wanted
+
+
 def _sync_label(t: dict, board: _Board, task_id: str, dry_run: bool) -> bool:
-    """Make the card carry exactly one risk label, the right one. Returns True
-    if it had to change (or, on a dry run, would have to)."""
+    """Make the card carry exactly one risk label, the right one, and the
+    Ready to ship label only when it is earned. Returns True if it had to
+    change (or, on a dry run, would have to)."""
     c = board.c
-    want = risk_label(t)
+    wanted = _wanted_labels(t)
     have = c.request("GET", f"/label/task/{task_id}") or []
     names = {l["id"]: l.get("name") for l in have if isinstance(l, dict)}
     stale = [i for i, n in names.items()
-             if isinstance(n, str) and n.startswith(RISK_LABEL_PREFIX) and n != want]
-    if want in names.values() and not stale:
+             if isinstance(n, str) and n not in wanted
+             and (n.startswith(RISK_LABEL_PREFIX) or n == READY_LABEL)]
+    missing = [n for n in wanted if n not in names.values()]
+    if not missing and not stale:
         return False
     if dry_run:
         return True
     for label_id in stale:
         c.request("DELETE", f"/label/{label_id}/task")
-    if want not in names.values():
+    for name in missing:
         c.request("POST", "/label", body={
-            "name": want, "color": RISK_LABEL_COLORS[rk.stored_level(t)],
+            "name": name, "color": wanted[name],
             "workspaceId": c.workspace_id, "taskId": task_id})
     return True
 
