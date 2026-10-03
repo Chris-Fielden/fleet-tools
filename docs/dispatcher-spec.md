@@ -171,3 +171,41 @@ summary: what changed, how you verified it, and the review verdict.
 - `scripts/review.sh` has run and its verdict is PASS (fix any MUST FIX).
 - A short summary: what was built, how it was tested, the review verdict,
   and anything unverified.
+
+## Investigations (read-only research)
+
+`dispatch --once` may also start a research agent on an `investigate` ticket
+that is `proposed` (no approval needed: investigating changes nothing) or
+`open` (a human approved it). Settings:
+
+- `auto_investigate` (default true): when false, `proposed` investigate tickets
+  wait for a human to approve them.
+- `max_investigations_per_day` (default 3, 0 turns it off): investigations
+  started per UTC day, counted from the ticket's `started_at`. A launch that
+  fails does not count.
+
+Rules: human-filed tickets first, then oldest first; one investigation starts
+per run, in addition to the one build or fix ticket. Investigations do not
+count toward `max_running` and have no branch or task folder.
+
+The agent (the `builder` kind and its model) opens in a tab in
+`<research_dir>/<ID>` (setting `research_dir`, default `~/fleet-research`),
+which is not a repo. `research_dir` must not be inside `$FLEET_HOME` or
+`~/.fleet`, nor contain them (they hold the tickets and the Kaneo key); the
+dispatcher refuses to launch, and skips the ticket, if it does. Because this
+repo's `.claude/settings.json` is not loaded outside the repo, the dispatcher
+writes `<research_dir>/<ID>/.claude/settings.json` wiring the same `PreToolUse`
+guard hooks, by absolute path to this repo's `.claude/hooks` scripts, and
+refuses to launch if they are missing, or if `.claude` or the settings file is a
+symlink. `research_dir` must not be inside a git repo. Only Claude's hooks are
+wired, so investigations are refused when `builder` is `codex`. The prompt names `projects_dir`. Its
+prompt says it is read-only and may use the web and the repos, record findings with
+`ticket note ID TEXT`, and file follow-up `build` tickets with
+`--parent ID` (these start `proposed`). No permission-bypass flag is passed,
+so "read-only" is an instruction to the agent, not a sandbox.
+
+At the start of each `--once`, a claimed investigation whose agent is gone or
+`idle`/`done` (herdr's states are idle, working, blocked, done, unknown; `blocked`
+means waiting for a person, so it is not finished) is marked `done`; if it recorded no notes, it is marked `failed`
+with a `close_note`. If herdr cannot be asked, nothing changes. A failed
+launch puts the ticket back to the status it had.

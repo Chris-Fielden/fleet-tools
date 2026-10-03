@@ -36,13 +36,13 @@ def _warn(message: str) -> None:
 
 
 def _cmd_dry_run(settings: dict) -> int:
-    for d in dp.decide(tk.list_tickets(), settings):
+    tickets = tk.list_tickets()
+    for d in dp.decide(tickets, settings) + dp.decide_investigations(tickets, settings):
         print(d.line())
         if d.skip:
             dp.log("DECISION", f"{d.ticket['id']} skip: {d.skip}")
         else:
-            dp.log("DECISION", f"{d.ticket['id']} would launch {d.agent} "
-                               f"({d.model or 'default'}) in {d.worktree}")
+            dp.log("DECISION", d.line())
     return 0
 
 
@@ -55,16 +55,33 @@ def _cmd_reconcile(settings: dict) -> int:
 
 def _cmd_once(settings: dict) -> int:
     _cmd_reconcile(settings)
-    decisions = dp.decide(tk.list_tickets(), settings)
+    for t in lc.finish_investigations(tk.list_tickets(), _warn):
+        print(f"{t['id']}  investigation {t['status']}")
+        kaneo.mirror_quietly(t, _warn)
+    tickets = tk.list_tickets()
+    # Investigations are read-only and don't compete with build work: one of
+    # each kind may start per run.
+    code = 0
+    started = False
+    investigations = dp.decide_investigations(tickets, settings)
+    for d in investigations:
+        if d.eligible:
+            code, message = lc.launch_research(d, settings, _warn)
+            print(message)
+            started = True
+            break
+    decisions = dp.decide(tickets, settings)
     for d in decisions:
         if d.eligible:
-            code, message = lc.launch(d, settings, _warn)
+            build_code, message = lc.launch(d, settings, _warn)
             print(message)
-            return code
-    if not decisions:
+            return code or build_code
+    if started:
+        return code
+    if not decisions and not investigations:
         print("nothing to launch: no open tickets")
         dp.log("DECISION", "nothing to launch: no open tickets")
-    for d in decisions:
+    for d in decisions + investigations:
         print(f"nothing launched; {d.line()}")
         dp.log("DECISION", f"{d.ticket['id']} skip: {d.skip}")
     return 0

@@ -224,7 +224,9 @@ def card_description(t: dict) -> str:
              ("type", "branch", "commit", "parent", "created_by", "assignee")]
     if t["verdict"] is not None:
         lines.append(f"verdict: {t['verdict']}")
-    return f"{t['body']}\n\n```\n" + "\n".join(lines) + "\n```"
+    notes = "".join(f"\n\n**Note by {n['by']}, {n['at']}**\n\n{n['text']}"
+                    for n in t.get("notes", []))
+    return f"{t['body']}\n\n```\n" + "\n".join(lines) + "\n```" + notes
 
 
 def _slug_for(repo: str) -> str:

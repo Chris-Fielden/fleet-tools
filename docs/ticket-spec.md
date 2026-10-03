@@ -36,7 +36,7 @@ launching, no hooks in this phase.
 | repo | string | 1 to 64 characters: letters, digits, `.`, `_`, `-`. |
 | branch | string | Must start with `task/`, then 1 to 64 characters: lowercase letters, digits, `-`. |
 | commit | string or null | Required for review, otherwise null. 7 to 40 lowercase hex characters. |
-| parent | string or null | Required for review and fix; must be the id of an existing ticket. Optional for question; null for build. |
+| parent | string or null | Required for review and fix; must be the id of an existing ticket. Optional for question; for build, null, or the id of an investigate ticket (a follow-up). |
 | title | string | 1 to 100 characters, a single line. |
 | body | string | 1 to 4,000 characters. |
 | created_by | string | human, claude or codex. Set by the tool, never by the caller (see below). |
@@ -45,6 +45,8 @@ launching, no hooks in this phase.
 | priority | string, optional | `normal` (the default when absent) or `urgent`; nothing else is accepted. Supplied by the caller (`ticket new --priority`, or `alert`). |
 | risk | string, optional | `low`, `medium` or `high`. Set by the tool when the ticket is filed (see "Risk levels"); never supplied by the caller. Absent on older tickets, which count as `medium`. Only ever goes up. |
 | verdict | object or null | Always null in phase 1. |
+| notes | list, optional | 1 to 50 notes, each `{at, by, text}`: a UTC time, the creator kind, and 1 to 4000 characters (gitleaks-checked). Appended by `ticket note`; shown by `ticket show` and on the Kaneo card. |
+| started_at | time, optional | When the dispatcher launched an investigation. Counts toward `max_investigations_per_day`. |
 | close_note | string, optional | 1 to 500 characters, gitleaks-checked. Set by `ticket close --note`. Absent otherwise. |
 | base_commit | string, optional | Git commit id (7 to 40 hex characters): main's tip when the dispatcher claimed the ticket. Reconcile only counts a `Merge <branch>` commit made after it. Absent on tickets claimed before this field existed (they count any merge in main's history). |
 | seq | integer, optional | Creation sequence, 1 or more, counting up across all tickets. Set by the tool; the tie-breaker when `created_at` is equal. Absent on tickets made before short ids (they count as 0). |
@@ -89,9 +91,15 @@ with no padding: `BD-1`, `BD-2`, `FX-1`, `EM-1`.
 ### Starting status
 
 - An investigate ticket always starts as `proposed`, whoever files it, and
-  waits for the human to approve it.
+  is not worked on until it is approved, with one exception: unless
+  `auto_investigate` is off, the dispatcher may start a read-only research
+  agent on a `proposed` investigate ticket without approval (see the
+  dispatcher spec).
 - Every other ticket (build, review, fix, question) starts as `open`, whoever
   files it. Agents start work freely; the human approves at merge.
+- Exception: a build ticket with a `parent` (a follow-up filed from an
+  investigation) starts as `proposed`. Its parent must be an `investigate`
+  ticket; no other build ticket may have a parent.
 
 ### Secret check
 
@@ -111,6 +119,7 @@ ticket new --type TYPE --repo REPO --branch BRANCH --title TITLE
 ticket list [--status STATUS] [--repo REPO] [--json]
 ticket show ID [--json]
 ticket approve ID
+ticket note ID TEXT
 ticket risk [ID] [--diff BASE...BRANCH] [--dir REPO]
 ticket risk ID --raise low|medium|high
 ticket gate --base BASE --branch BRANCH --worktree DIR [--dir REPO] [--field risk|confirm|ok]
@@ -124,6 +133,8 @@ ticket gate --base BASE --branch BRANCH --worktree DIR [--dir REPO] [--field ris
 - `approve` turns a `proposed` ticket into `open`. It refuses when the
   caller is claude or codex (only a human approves), and refuses for any
   ticket that isn't proposed.
+- `note` appends a note (max 4000 characters, gitleaks-checked, at most 50
+  per ticket) recording who wrote it. Anyone may add one.
 - Exit codes: 0 on success, 2 for invalid input (every problem listed, one
   per line, in plain words), 1 for anything else.
 
