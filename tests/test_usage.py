@@ -147,3 +147,75 @@ def test_review_regressions(tmp_path):
 def test_codex_old_record_in_fresh_file_ignored(tmp_path):
     write_codex(tmp_path, NOW - timedelta(days=9))
     assert not usage.codex_usage(tmp_path, NOW)["limit_known"]
+
+
+def test_claude_split_fresh_output_cache(tmp_path):
+    write_claude(tmp_path, [(NOW - timedelta(hours=1), "a", 10)])
+    r = usage.claude_usage(tmp_path, NOW)
+    # input 10 + cache creation 2 = fresh 12; output 1; cache reads 3
+    assert r["five_hour"]["breakdown"] == {"fresh_input": 12, "output": 1, "cache_read": 3}
+    assert r["five_hour"]["tokens"] == 16
+    text = usage.line(r)
+    assert "12 fresh input, 1 output, 3 cache reads" in text
+
+
+def test_times_shown_in_local_zone(tmp_path, monkeypatch):
+    if not hasattr(__import__("time"), "tzset"):
+        pytest.skip("no tzset")
+    import time
+    monkeypatch.setenv("TZ", "Etc/GMT-5")  # fixed UTC+5, label "+05"
+    time.tzset()
+    try:
+        write_claude(tmp_path, [(NOW - timedelta(hours=1), "a", 10)])
+        text = usage.line(usage.claude_usage(tmp_path, NOW))
+        assert "2026-10-02 16:00 +05" in text  # 11:00 UTC
+        assert "11:00Z" not in text
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()
+
+
+def test_unreadable_log_is_reported(tmp_path):
+    write_claude(tmp_path, [(NOW - timedelta(hours=1), "a", 10)])
+    # A directory named like a log cannot be opened as a file.
+    (tmp_path / ".claude/projects/p/bad.jsonl").mkdir()
+    r = usage.claude_usage(tmp_path, NOW)
+    assert len(r["unreadable"]) == 1 and r["unreadable"][0].endswith("bad.jsonl")
+    assert r["five_hour"]["tokens"] == 16
+    assert "could not be read" in usage.line(r)
+
+    clean = tmp_path / "clean"
+    write_claude(clean, [(NOW - timedelta(hours=1), "a", 10)])
+    r = usage.claude_usage(clean, NOW)
+    assert r["unreadable"] == [] and "could not be read" not in usage.line(r)
+
+
+def test_unreadable_codex_log_is_reported(tmp_path):
+    d = tmp_path / ".codex/sessions/2026/10/02"
+    (d / "rollout-bad.jsonl").mkdir(parents=True)
+    r = usage.codex_usage(tmp_path, NOW)
+    assert len(r["unreadable"]) == 1
+    assert "could not be read" in usage.line(r)
+
+
+def test_huge_json_integers_do_not_overflow(tmp_path):
+    huge = 10 ** 400
+    d = tmp_path / ".claude/projects/p"
+    d.mkdir(parents=True)
+    row = {"type": "assistant", "timestamp": z(NOW - timedelta(hours=1)),
+           "message": {"id": "x", "usage": {"input_tokens": huge, "output_tokens": 4}}}
+    (d / "s.jsonl").write_text(json.dumps(row) + "\n")
+    r = usage.claude_usage(tmp_path, NOW)
+    assert r["five_hour"]["tokens"] == huge + 4
+    assert usage.line(r)
+
+    rl = json.loads(json.dumps(SAMPLE["rate_limits"]))
+    rl["primary"]["used_percent"] = huge
+    rl["primary"]["window_minutes"] = huge
+    rl["primary"]["resets_at"] = huge
+    rl["secondary"]["used_percent"] = 5
+    write_codex(tmp_path, NOW - timedelta(minutes=5), rl)
+    r = usage.codex_usage(tmp_path, NOW)
+    assert r["five_hour"]["used_percent"] is None
+    assert r["weekly"]["used_percent"] == 5.0
+    assert usage.line(r)
