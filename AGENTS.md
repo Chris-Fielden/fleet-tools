@@ -12,8 +12,9 @@ rulebook for every agent here, you included. The short version:
    committed. Don't weaken or skip checks.
 3. A different model reviews every change. **You are the author, so Claude
    reviews your work:** run `scripts/review.sh` (it picks Claude for you, and
-   runs both reviewers on high-risk branches), then fix every MUST FIX item,
-   commit, and run the checks again.
+   runs both reviewers on high-risk branches; if it ever picks Codex, rerun
+   with `REVIEWER=claude`), then fix every MUST FIX item, commit, and run the
+   checks again.
 4. Only the human merges, with `ship` (or `scripts/finish-task.sh`). Never run
    either, and never push to main.
 5. GitOps: change the cluster by committing YAML under `k8s/`. Never run
