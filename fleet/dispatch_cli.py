@@ -140,49 +140,50 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None) -> int:
     clock = clock or dp.Clock()
     interval, cap = settings["watch_interval_seconds"], settings["max_launches_per_day"]
     print(f"watching every {interval}s, at most {cap} launches a day (Ctrl+C to stop)", flush=True)
-    dp.log("WATCH_START", f"every {interval}s, max {cap} launches a day")
+    lc._safe_log("WATCH_START", f"every {interval}s, max {cap} launches a day")
     previous: set[str] = set()
     announced = None
+
+    def today() -> str:
+        return clock.now().strftime("%Y-%m-%d")
+
+    def reserve() -> bool:
+        """Count a launch before it starts, so an interruption or a later error
+        can never leave it uncounted. The day is read now, not when the cycle
+        began: a cycle can cross midnight. A count that cannot be read or saved
+        raises, which refuses the launch."""
+        day = today()
+        if dp.launches_today(day) >= cap:
+            return False
+        dp.add_launches(day)
+        return True
+
     try:
         while True:
             lines: list[str] = []
-            day = clock.now().strftime("%Y-%m-%d")
-            used = None   # launches already counted today; None: unknown, so launch nothing
-            reserved = 0
-
-            def reserve() -> bool:
-                """Count a launch before it starts, so an interruption or a later
-                error can never leave it uncounted. A failed write raises."""
-                nonlocal reserved
-                if used is None or used + reserved >= cap:
-                    return False
-                dp.add_launches(day)
-                reserved += 1
-                return True
-
             try:
-                try:
-                    used = dp.launches_today(day)
-                except OSError as exc:
-                    lines.append(f"error: {exc}; not launching")
                 _cycle(settings, lines.append, lambda m: lines.append(f"warning: {m}"), reserve=reserve)
             except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
                 lines.append(f"error: {exc}")
-            reached = used is not None and used + reserved >= cap
             for line in lines:
                 if line not in previous:
                     print(line, flush=True)
             previous = set(lines)
+            day = today()
+            try:
+                reached = dp.launches_today(day) >= cap
+            except OSError:
+                reached = False   # the error shows whenever a launch is refused for it
             if reached and announced != day:
                 announced = day
                 message = (f"daily launch limit reached ({cap} on {day}); still reconciling, "
                            "launching nothing until tomorrow (UTC)")
                 print(message, flush=True)
-                dp.log("LAUNCH_CAP", message)
+                lc._safe_log("LAUNCH_CAP", message)
             clock.sleep(interval)
     except KeyboardInterrupt:
         print("\nwatch stopped", flush=True)
-        dp.log("WATCH_STOP", "interrupted")
+        lc._safe_log("WATCH_STOP", "interrupted")
         return 0
 
 

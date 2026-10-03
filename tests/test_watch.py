@@ -171,7 +171,26 @@ def test_watch_unreadable_count_file_launches_nothing(projects, herdr_log, capsy
     dp.launches_path().write_text("not json")
     assert watch({}, FakeClock(1)) == 0
     assert tk.load_ticket(t["id"])["status"] == "open"
-    assert "not launching" in capsys.readouterr().out
+    assert "error: cannot read" in capsys.readouterr().out
+
+
+def test_watch_counts_a_launch_on_the_day_it_starts_when_the_cycle_crosses_midnight(projects, herdr_log, monkeypatch):
+    real_repo(projects)
+    mk(branch="task/one")
+    clock = FakeClock(1, start=datetime(2026, 10, 2, 23, 59, 50, tzinfo=timezone.utc))
+
+    def slow_step(tickets, warn):
+        clock.t += timedelta(seconds=30)   # reconcile and friends take a while
+        return []
+    monkeypatch.setattr(dispatch_cli.lc, "finish_investigations", slow_step)
+    assert watch({"max_launches_per_day": 1}, clock) == 0
+    assert dp.launches_today("2026-10-03") == 1 and dp.launches_today("2026-10-02") == 0
+
+
+def test_watch_survives_log_failures(projects, herdr_log, monkeypatch, capsys):
+    monkeypatch.setattr(dp, "log", lambda *a, **k: (_ for _ in ()).throw(OSError("log disk full")))
+    assert watch({"max_launches_per_day": 0}, FakeClock(2)) == 0
+    assert "watch stopped" in capsys.readouterr().out
 
 
 def test_watch_counts_a_launch_before_it_starts_even_if_the_cycle_then_fails(projects, herdr_log, monkeypatch):
