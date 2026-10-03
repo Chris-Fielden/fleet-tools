@@ -89,7 +89,7 @@ def herdr(*args: str, timeout: float = 120) -> dict:
     except ValueError:
         raise LaunchError("FLEET_HERDR is not a valid command line") from None
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=max(timeout, 1))
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=max(timeout, 0.001))
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise LaunchError(f"herdr {args[0]} {args[1]} failed: {exc}") from None
     if proc.returncode != 0:
@@ -156,10 +156,11 @@ def agent_state(name: str, timeout: float = 120) -> str | None:
 def wait_until_working(name: str) -> None:
     deadline = time.monotonic() + START_TIMEOUT
     while True:
-        if agent_state(name, deadline - time.monotonic()) == "working":
-            return
-        if time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             raise LaunchError(f"agent {name} was not working after {START_TIMEOUT:.0f}s")
+        if agent_state(name, remaining) == "working":
+            return
         time.sleep(POLL_INTERVAL)
 
 
@@ -287,9 +288,17 @@ def start_agent(d: dp.Decision, folder: Path, workspace: str, warn, projects_dir
     fails after the tab exists, only that tab is closed."""
     ticket_id = d.ticket["id"]
     name = ticket_id.lower()
-    created = herdr("tab", "create", "--workspace", workspace, "--cwd", str(folder),
-                    "--label", ticket_id, "--no-focus")
-    tab = _result(created, "tab", "tab_id")
+    try:
+        created = herdr("tab", "create", "--workspace", workspace, "--cwd", str(folder),
+                        "--label", ticket_id, "--no-focus")
+        tab = _result(created, "tab", "tab_id")
+    except LaunchError as exc:
+        # The tab may exist even though we cannot read its id, so nothing can close it.
+        note = (f"a tab labelled {ticket_id} may have been left open in workspace {workspace}; "
+                f"close it by hand ({exc})")
+        _safe_log("TAB_UNKNOWN", f"{ticket_id} {note}")
+        warn(note)
+        raise
     try:
         pane = _result(created, "root_pane", "pane_id")
         args = ["agent", "start", name, "--kind", d.agent, "--pane", pane]

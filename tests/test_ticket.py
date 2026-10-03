@@ -280,6 +280,34 @@ def test_cli_body_file_too_large_is_refused_unread(tmp_path):
     assert "too large" in r.stderr
 
 
+def test_oversized_body_file_is_never_opened(tmp_path, monkeypatch, capsys):
+    import builtins
+    from fleet.ticket_cli import main
+    f = tmp_path / "big.txt"
+    with open(f, "wb") as fh:
+        fh.truncate(tk.BODY_MAX * 4 + 1)  # sparse: cheap to make
+    real_open, opened = builtins.open, []
+
+    def spy(file, *a, **kw):
+        opened.append(str(file))
+        return real_open(file, *a, **kw)
+
+    monkeypatch.setattr(builtins, "open", spy)
+    assert main(["new", *new_args(body=None), "--body-file", str(f)]) == 2
+    assert str(f) not in opened
+    assert "too large" in capsys.readouterr().err
+
+
+def test_cli_body_file_of_4000_four_byte_characters_is_accepted(tmp_path):
+    body = "\U0001F600" * tk.BODY_MAX  # 4 bytes each: 16000 bytes, the largest allowed file
+    assert len(body.encode("utf-8")) == tk.BODY_MAX * 4
+    f = tmp_path / "emoji.txt"
+    f.write_text(body, encoding="utf-8")
+    r = run("new", *new_args(body=None), "--body-file", str(f))
+    assert r.returncode == 0, r.stderr
+    assert tk.load_ticket(r.stdout.strip())["body"] == body
+
+
 def test_cli_body_file_just_over_char_limit_still_rejected(tmp_path):
     f = tmp_path / "b.txt"
     f.write_text("x" * (tk.BODY_MAX + 1))
@@ -295,11 +323,25 @@ def test_cli_body_file_just_over_char_limit_still_rejected(tmp_path):
     ("2025-01-01T00:60:00Z", False),
     ("0000-01-01T00:00:00Z", False),
 ])
-def test_stored_timestamps_are_parsed(stamp, ok):
+@pytest.mark.parametrize("field", ["created_at", "updated_at"])
+def test_stored_timestamps_are_parsed(field, stamp, ok):
     data = tk.load_ticket(make()["id"])
-    data["created_at"] = stamp
+    data[field] = stamp
     errors = tk.validate_stored(data)
-    assert (not any("created_at" in e for e in errors)) is ok
+    assert (not any(field in e for e in errors)) is ok
+
+
+@pytest.mark.parametrize("seq", [-1, 0, "3", None, 1.5, True, [1]])
+def test_stored_seq_must_be_a_positive_whole_number(seq):
+    data = tk.load_ticket(make()["id"])
+    data["seq"] = seq
+    assert any("seq" in e for e in tk.validate_stored(data))
+
+
+def test_stored_seq_positive_whole_number_is_accepted():
+    data = tk.load_ticket(make()["id"])
+    data["seq"] = 7
+    assert not any("seq" in e for e in tk.validate_stored(data))
 
 
 def test_cli_show_missing_and_bad_id():
