@@ -435,3 +435,13 @@ def test_redirect_checked_before_nested_shell_and_cd(tmp_path):
         reason = bash(command, tmp_path)
         assert reason and "private folder" in reason, command
     assert bash("bash -c 'true' > out.txt", tmp_path) is None
+
+
+@pytest.mark.parametrize("command", [
+    "cd - && rg key .",
+    "pushd +1 && rg key .",
+    "pushd -1 && rg key .",
+])
+def test_unknown_cd_destination_blocks_tree_search(tmp_path, command):
+    reason = bash(command, tmp_path)
+    assert reason  # denied: the search could start anywhere

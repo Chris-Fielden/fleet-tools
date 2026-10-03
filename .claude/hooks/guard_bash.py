@@ -375,12 +375,15 @@ def scan_command(command, places, depth=0, cwd_known=True):
             return ("human", "ticket risk --raise")
         if name in ("cd", "pushd"):
             rest = list(args)
-            while rest and rest[0].startswith("-") and rest[0] != "-":
+            while rest and rest[0].startswith("-") and rest[0] != "-" and not (
+                    name == "pushd" and re.match(r"^-\d+$", rest[0])):
                 if rest.pop(0) == "--":
                     break
             target = rest[0] if rest else "~"
             # `cd -` goes to $OLDPWD, which we can't know.
-            expanded = None if target == "-" else _expand(target)
+            # `pushd +N` / `-N` rotates to a stacked folder: also unknown.
+            unknown = target == "-" or (name == "pushd" and re.match(r"^[+-]\d+$", target))
+            expanded = None if unknown else _expand(target)
             if expanded is None:
                 cwd_known = False
             elif cwd_known:
