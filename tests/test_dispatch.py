@@ -508,13 +508,17 @@ def test_once_launch_failure_closes_tab_and_reopens(projects, herdr_log, monkeyp
     assert "LAUNCH_FAILED" in (env_log := dp.log_path().read_text()) and t["id"] in env_log
 
 
-def test_once_unknown_workspace_fails_without_closing_anything(projects, herdr_log, monkeypatch):
+def test_once_missing_workspace_is_created(projects, herdr_log, monkeypatch):
     real_repo(projects)
     monkeypatch.setenv("FAKE_HERDR_WORKSPACE", "other")
     t = mk(branch="task/job")
-    assert dispatch_main(["--once"]) == 1
-    assert tk.load_ticket(t["id"])["status"] == "open"
-    assert not any(x[:2] == ["tab", "close"] for x in calls(herdr_log))
+    assert dispatch_main(["--once"]) == 0
+    assert tk.load_ticket(t["id"])["status"] == "claimed"
+    c = calls(herdr_log)
+    assert ["workspace", "create", "--label", "fleet", "--no-focus"] in c
+    assert next(x for x in c if x[:2] == ["tab", "create"])[3] == "w9"
+    assert not any(x[:2] == ["tab", "close"] for x in c)
+    assert "WORKSPACE_CREATED" in dp.log_path().read_text()
 
 
 def test_once_never_passes_bypass_flags(projects, herdr_log):
@@ -548,7 +552,7 @@ def test_once_respects_capacity(projects, herdr_log, capsys):
     capsys.readouterr()
     assert dispatch_main(["--once"]) == 0
     assert tk.load_ticket(second["id"])["status"] == "open"
-    assert len(calls(herdr_log)) == n
+    assert [x[:2] for x in calls(herdr_log)[n:]] == [["agent", "list"]]  # only the lost-agent check
     assert "at capacity" in capsys.readouterr().out
 
 

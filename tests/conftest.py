@@ -27,6 +27,8 @@ def _isolated_environment(tmp_path, monkeypatch):
     (tmp_path / "home").mkdir()
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("FLEET_HOME", str(tmp_path / "fleet"))
+    # Never reach a real herdr: tests that need one point this at the fake.
+    monkeypatch.setenv("FLEET_HERDR", str(tmp_path / "no-such-herdr"))
     monkeypatch.setenv("FLEET_GITLEAKS", str(_fake(tmp_path / "gl-clean", 0)))
 
 

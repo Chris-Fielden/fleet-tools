@@ -125,16 +125,33 @@ def _result(data: dict, *path: str) -> str:
     return cur
 
 
+class WorkspaceNotFound(LaunchError):
+    pass
+
+
 def find_workspace(name: str) -> str:
     """Workspace id for a label (or an id given directly)."""
     for w in _dicts(herdr("workspace", "list")):
         if "workspace_id" in w and name in (w.get("label"), w.get("name"), w["workspace_id"]):
             return w["workspace_id"]
-    raise LaunchError(f"herdr has no workspace '{name}'")
+    raise WorkspaceNotFound(f"herdr has no workspace '{name}'")
 
 
-def agent_listed(name: str, timeout: float = 120) -> tuple[bool, str | None]:
-    """(is the agent listed, its state or None if it has no readable state)."""
+def ensure_workspace(name: str) -> str:
+    """Workspace id for a label, creating the workspace if herdr has none (it
+    disappears when its last tab closes)."""
+    try:
+        return find_workspace(name)
+    except WorkspaceNotFound:
+        pass
+    for w in _dicts(herdr("workspace", "create", "--label", name, "--no-focus")):
+        if isinstance(w.get("workspace_id"), str) and w["workspace_id"]:
+            _safe_log("WORKSPACE_CREATED", f"{name} as {w['workspace_id']}")
+            return w["workspace_id"]
+    raise LaunchError("herdr workspace create did not return a workspace id")
+
+
+def list_agents(timeout: float = 120) -> list[dict]:
     # Real shape (tests/data/herdr_agent_list_sample.json): {"result": {"agents":
     # [{"name": ..., "agent_status": "idle", ...}]}}. An agent started without a
     # name has no "name" key.
@@ -142,7 +159,12 @@ def agent_listed(name: str, timeout: float = 120) -> tuple[bool, str | None]:
     agents = result.get("agents") if isinstance(result, dict) else None
     if not isinstance(agents, list) or not all(isinstance(a, dict) for a in agents):
         raise LaunchError("herdr agent list did not return .result.agents as a list of agents")
-    for a in agents:
+    return agents
+
+
+def agent_listed(name: str, timeout: float = 120) -> tuple[bool, str | None]:
+    """(is the agent listed, its state or None if it has no readable state)."""
+    for a in list_agents(timeout):
         if a.get("name") == name:
             state = a.get("agent_status")
             return True, state if isinstance(state, str) else None
@@ -342,7 +364,7 @@ def launch(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
         tk.set_status(t["id"], "claimed", allowed_from=("claimed",), base_commit=base)
         initial = _git_out(folder, "rev-parse", "HEAD")
         record_writer(folder, d.agent, t["id"])
-        tab = start_agent(d, folder, find_workspace(settings["herdr_workspace"]), warn)
+        tab = start_agent(d, folder, ensure_workspace(settings["herdr_workspace"]), warn)
     except AgentMayBeRunning as exc:
         _safe_log("LAUNCH_FAILED", f"{t['id']} {exc}; ticket stays claimed, needs a human")
         return 1, (f"{t['id']}  launch failed: {exc}. The agent may still be running, so the "
@@ -439,7 +461,7 @@ def launch_research(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
     try:
         dp.log("CLAIMED", f"{t['id']} {d.agent} investigation")
         tab = start_agent(d, research_folder(t["id"], settings),
-                          find_workspace(settings["herdr_workspace"]), warn,
+                          ensure_workspace(settings["herdr_workspace"]), warn,
                           projects_dir=settings["projects_dir"])
     except AgentMayBeRunning as exc:
         _safe_log("LAUNCH_FAILED", f"{t['id']} {exc}; ticket stays claimed, needs a human")
@@ -477,3 +499,88 @@ def finish_investigations(tickets: list[dict], warn):
         dp.log("INVESTIGATION_DONE" if new["status"] == "done" else "INVESTIGATION_FAILED",
                f"{t['id']} agent stopped; ticket {new['status']}")
         yield new
+
+
+# --- after reconcile: tabs and lost agents ---------------------------------------
+
+def close_finished_tab(ticket_id: str, settings: dict) -> tuple[bool, str]:
+    """Close the herdr tab of a ticket that is now done, if it still exists and
+    its agent is idle or done. Never closes a working or blocked agent or a
+    focused tab. Returns (closed, reason) and logs TAB_CLOSED or TAB_KEPT."""
+    closed, reason = _close_finished_tab(ticket_id, settings)
+    _safe_log("TAB_CLOSED" if closed else "TAB_KEPT", f"{ticket_id} {reason}")
+    return closed, reason
+
+
+def _close_finished_tab(ticket_id: str, settings: dict) -> tuple[bool, str]:
+    try:
+        workspace = find_workspace(settings["herdr_workspace"])
+        listed = herdr("tab", "list", "--workspace", workspace).get("result")
+        tabs = listed.get("tabs") if isinstance(listed, dict) else None
+        if not isinstance(tabs, list):
+            raise LaunchError("herdr tab list did not return .result.tabs as a list")
+        tabs = [x for x in tabs if isinstance(x, dict)]
+        agent = next((a for a in list_agents() if a.get("name") == ticket_id.lower()), None)
+    except LaunchError as exc:
+        return False, f"herdr could not be asked ({exc})"
+    tab = None
+    if agent is not None:
+        tab = next((x for x in tabs if x.get("tab_id") == agent.get("tab_id")), None)
+    if tab is None:
+        matches = [x for x in tabs if x.get("label") == ticket_id]
+        if len(matches) > 1:
+            return False, f"{len(matches)} tabs are labelled {ticket_id}"
+        tab = matches[0] if matches else None
+    if tab is None or not isinstance(tab.get("tab_id"), str):
+        return False, "no tab found; nothing to close"
+    state = agent.get("agent_status") if agent is not None else tab.get("agent_status")
+    if tab.get("focused") or (agent is not None and agent.get("focused")):
+        return False, f"tab {tab['tab_id']} is focused"
+    if state not in RESEARCH_DONE_STATES:
+        return False, f"tab {tab['tab_id']} agent is {state or 'unknown'}, not idle or done"
+    try:
+        herdr("tab", "close", tab["tab_id"])
+    except LaunchError as exc:
+        return False, f"tab {tab['tab_id']} could not be closed ({exc})"
+    return True, f"tab {tab['tab_id']} (agent {state})"
+
+
+def lost_agents(tickets: list[dict], warn) -> list[dict]:
+    """Claimed build or fix tickets whose herdr agent is no longer listed: the
+    tab died and the ticket stays claimed, blocking the queue. If herdr cannot
+    be asked, nothing is reported."""
+    claimed = [t for t in tickets if t["status"] == "claimed" and t["type"] in dp.LAUNCH_TYPES
+               and t.get("assignee") in tk.AGENTS]
+    if not claimed:
+        return []
+    try:
+        names = {a.get("name") for a in list_agents()}
+    except LaunchError as exc:
+        warn(f"cannot check for lost agents: {exc}")
+        return []
+    return [t for t in sorted(claimed, key=tk.oldest_first_key) if t["id"].lower() not in names]
+
+
+def relaunch(t: dict, settings: dict, warn) -> tuple[int, str]:
+    """Start a new agent for a claimed ticket in its existing task folder. The
+    ticket stays claimed whether or not this works."""
+    repo = settings["projects_dir"] / t["repo"]
+    name = t["branch"].removeprefix("task/")
+    d = dp.Decision(ticket=t, name=name, repo_path=repo, agent=t["assignee"],
+                    model=settings["models"].get(t["assignee"]))
+    folder = repo / ".worktrees" / name
+    try:
+        if repo.resolve().parent != settings["projects_dir"].resolve():
+            raise LaunchError(f"repo path {repo} is not directly inside {settings['projects_dir']}")
+        if not folder.exists():
+            raise LaunchError(f"task folder {d.worktree} is gone")
+        check_reusable(d, folder)
+        tab = start_agent(d, folder, ensure_workspace(settings["herdr_workspace"]), warn)
+    except AgentMayBeRunning as exc:
+        _safe_log("RELAUNCH_FAILED", f"{t['id']} {exc}")
+        return 1, f"{t['id']}  relaunch failed: {exc}. The agent may still be running; close the tab by hand"
+    except (LaunchError, OSError, subprocess.TimeoutExpired) as exc:
+        _safe_log("RELAUNCH_FAILED", f"{t['id']} {exc}")
+        return 1, f"{t['id']}  relaunch failed: {exc}; ticket stays claimed"
+    _safe_log("RELAUNCHED", f"{t['id']} {d.agent} ({d.model or 'default'}) tab {tab} in {d.worktree}")
+    return 0, f"{t['id']}  relaunched {d.agent} ({d.model or 'default'}) in tab {tab}"
