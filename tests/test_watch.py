@@ -122,7 +122,7 @@ def test_watch_cap_stops_launching_says_so_once_and_resets_next_day(projects, he
     over = {"max_launches_per_day": 1, "max_running": 5}
     assert watch(over, FakeClock(5)) == 0
     out = capsys.readouterr().out
-    assert out.count("daily launch limit reached") == 1
+    assert out.count("daily launch limit reached (") == 1
     assert out.count("launched claude") == 1
     assert tk.load_ticket(two["id"])["status"] == "open"
     assert [x[:2] for x in calls(herdr_log)].count(["tab", "create"]) == 1
@@ -130,7 +130,7 @@ def test_watch_cap_stops_launching_says_so_once_and_resets_next_day(projects, he
     assert watch(over, FakeClock(2, start=datetime(2026, 10, 3, 0, 5, tzinfo=timezone.utc))) == 0
     out = capsys.readouterr().out
     assert out.count("launched claude") == 1
-    assert out.count("daily launch limit reached") == 1
+    assert out.count("daily launch limit reached (") == 1
     assert tk.load_ticket(two["id"])["status"] == "claimed"
     assert tk.load_ticket(three["id"])["status"] == "open"
 
@@ -172,6 +172,30 @@ def test_watch_unreadable_count_file_launches_nothing(projects, herdr_log, capsy
     assert watch({}, FakeClock(1)) == 0
     assert tk.load_ticket(t["id"])["status"] == "open"
     assert "not launching" in capsys.readouterr().out
+
+
+def test_watch_counts_a_launch_before_it_starts_even_if_the_cycle_then_fails(projects, herdr_log, monkeypatch):
+    real_repo(projects)
+    mk(branch="task/one")
+
+    def explode(*a, **k):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(dispatch_cli.lc, "launch", explode)   # interrupted mid-launch
+    assert watch({}, FakeClock(5)) == 0
+    assert dp.launches_today("2026-10-02") == 1
+
+
+def test_watch_launches_nothing_if_the_count_cannot_be_saved(projects, herdr_log, monkeypatch, capsys):
+    real_repo(projects)
+    t = mk(branch="task/one")
+
+    def no_write(*a, **k):
+        raise OSError("read-only disk")
+    monkeypatch.setattr(dp, "add_launches", no_write)
+    assert watch({}, FakeClock(1)) == 0
+    assert tk.load_ticket(t["id"])["status"] == "open"
+    assert not herdr_log.exists()   # herdr was never called
+    assert "error: read-only disk" in capsys.readouterr().out
 
 
 def test_watch_never_asks_a_question(projects, herdr_log, monkeypatch):
@@ -251,6 +275,18 @@ def test_reconcile_keeps_when_several_tabs_share_the_label(projects, herdr_log, 
     assert "2 tabs are labelled" in dp.log_path().read_text()
 
 
+def test_reconcile_ignores_the_state_of_an_agent_in_another_workspace(projects, herdr_log, env, monkeypatch):
+    t = merged_claimed(projects)
+    path = world(env, monkeypatch, t["id"], status="working", agent=False)
+    data = json.loads(path.read_text())
+    # The named agent is idle, but in a tab that is not in the fleet workspace.
+    data["agents"] = [{"name": t["id"].lower(), "agent_status": "idle", "tab_id": "w8:t1", "focused": False}]
+    path.write_text(json.dumps(data))
+    assert dispatch_main(["--reconcile"]) == 0
+    assert not any(x[:2] == ["tab", "close"] for x in calls(herdr_log))
+    assert "working" in dp.log_path().read_text()
+
+
 def test_reconcile_with_herdr_unreachable_still_marks_done(projects):
     t = merged_claimed(projects)
     assert dispatch_main(["--reconcile"]) == 0   # conftest points FLEET_HERDR at nothing
@@ -304,6 +340,14 @@ def test_once_relaunches_in_the_same_worktree_when_the_human_agrees(projects, he
     assert "RELAUNCHED" in dp.log_path().read_text()
 
 
+def test_failed_relaunch_makes_once_exit_nonzero(projects, herdr_log, env, monkeypatch):
+    real_repo(projects)
+    t = claim(mk(branch="task/job"))   # no task folder to relaunch in
+    world(env, monkeypatch, t["id"], agent=False, tabs=0)
+    monkeypatch.setattr(dispatch_cli, "_ask_yes_no", lambda q: True)
+    assert dispatch_main(["--once"]) == 1
+
+
 def test_once_declined_relaunch_does_nothing(projects, herdr_log, env, monkeypatch):
     _, t = claimed_with_folder(projects)
     world(env, monkeypatch, t["id"], agent=False, tabs=0)
@@ -317,7 +361,7 @@ def test_relaunch_with_the_folder_gone_keeps_the_claim(projects, herdr_log, env,
     t = claim(mk(branch="task/job"))
     world(env, monkeypatch, t["id"], agent=False, tabs=0)
     monkeypatch.setattr(dispatch_cli, "_ask_yes_no", lambda q: True)
-    assert dispatch_main(["--once"]) == 0
+    assert dispatch_main(["--once"]) == 1
     assert "relaunch failed" in capsys.readouterr().out
     assert tk.load_ticket(t["id"])["status"] == "claimed"
     assert not any(x[:2] == ["tab", "create"] for x in calls(herdr_log))

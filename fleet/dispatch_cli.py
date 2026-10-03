@@ -73,11 +73,12 @@ def _ask_yes_no(question: str) -> bool:
         return False
 
 
-def _cycle(settings: dict, emit, warn, budget: int | None = None, offer=None) -> tuple[int, int]:
-    """The steps of one --once run. `budget` is how many launches are still
-    allowed (None: no limit; 0: reconcile only). `offer(ticket)` says whether
-    to relaunch a claimed ticket whose agent is gone. Returns (exit code,
-    launches attempted)."""
+def _cycle(settings: dict, emit, warn, reserve=None, offer=None) -> int:
+    """The steps of one --once run; returns the exit code. `reserve()` is called
+    before each launch and says whether it may go ahead (False: the daily limit
+    is reached; it may raise OSError, which refuses the launch). `offer(ticket)`
+    says whether to relaunch a claimed ticket whose agent is gone."""
+    code = 0
     _reconcile(settings, emit, warn)
     for t in lc.finish_investigations(tk.list_tickets(), warn):
         emit(f"{t['id']}  investigation {t['status']}")
@@ -87,48 +88,48 @@ def _cycle(settings: dict, emit, warn, budget: int | None = None, offer=None) ->
              f"task folder {t['repo']}/.worktrees/{t['branch'].removeprefix('task/')}")
         dp.log("AGENT_LOST", f"{t['id']} {t['assignee']} not listed in herdr")
         if offer is not None and offer(t):
-            code, message = lc.relaunch(t, settings, warn)
+            relaunch_code, message = lc.relaunch(t, settings, warn)
+            code = code or relaunch_code
             emit(message)
-    if budget == 0:
-        return 0, 0
     tickets = tk.list_tickets()
     # Investigations are read-only and don't compete with build work: one of
     # each kind may start per run.
-    code = 0
-    attempts = 0
     started = False
     investigations = dp.decide_investigations(tickets, settings)
     for d in investigations:
         if d.eligible:
-            code, message = lc.launch_research(d, settings, warn)
+            if reserve is not None and not reserve():
+                emit(f"{d.ticket['id']}  not launched: daily launch limit reached")
+                break
+            research_code, message = lc.launch_research(d, settings, warn)
+            code = code or research_code
             emit(message)
-            attempts += 1
             started = True
             break
     decisions = dp.decide(tickets, settings)
     for d in decisions:
         if d.eligible:
-            if budget is not None and attempts >= budget:
+            if reserve is not None and not reserve():
                 emit(f"{d.ticket['id']}  not launched: daily launch limit reached")
-                return code, attempts
+                return code
             build_code, message = lc.launch(d, settings, warn)
             emit(message)
-            return code or build_code, attempts + 1
+            return code or build_code
     if started:
-        return code, attempts
+        return code
     if not decisions and not investigations:
         emit("nothing to launch: no open tickets")
         dp.log("DECISION", "nothing to launch: no open tickets")
     for d in decisions + investigations:
         emit(f"nothing launched; {d.line()}")
         dp.log("DECISION", f"{d.ticket['id']} skip: {d.skip}")
-    return 0, attempts
+    return code
 
 
 def _cmd_once(settings: dict) -> int:
     def offer(t: dict) -> bool:
         return _ask_yes_no(f"{t['id']}: start a new {t['assignee']} agent in the same task folder?")
-    return _cycle(settings, print, _warn, offer=offer)[0]
+    return _cycle(settings, print, _warn, offer=offer)
 
 
 def _cmd_watch(settings: dict, clock: dp.Clock | None = None) -> int:
@@ -146,20 +147,28 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None) -> int:
         while True:
             lines: list[str] = []
             day = clock.now().strftime("%Y-%m-%d")
-            reached = False
+            used = None   # launches already counted today; None: unknown, so launch nothing
+            reserved = 0
+
+            def reserve() -> bool:
+                """Count a launch before it starts, so an interruption or a later
+                error can never leave it uncounted. A failed write raises."""
+                nonlocal reserved
+                if used is None or used + reserved >= cap:
+                    return False
+                dp.add_launches(day)
+                reserved += 1
+                return True
+
             try:
                 try:
                     used = dp.launches_today(day)
                 except OSError as exc:
-                    used = cap  # cannot tell how many launched: launch nothing
                     lines.append(f"error: {exc}; not launching")
-                _, attempts = _cycle(settings, lines.append, lambda m: lines.append(f"warning: {m}"),
-                                     budget=max(cap - used, 0))
-                if attempts:
-                    dp.add_launches(day, attempts)
-                reached = used + attempts >= cap and not any(ln.startswith("error:") for ln in lines)
+                _cycle(settings, lines.append, lambda m: lines.append(f"warning: {m}"), reserve=reserve)
             except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
                 lines.append(f"error: {exc}")
+            reached = used is not None and used + reserved >= cap
             for line in lines:
                 if line not in previous:
                     print(line, flush=True)

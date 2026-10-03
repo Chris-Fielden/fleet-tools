@@ -187,8 +187,10 @@ already running" message and exit 0.
   question. Warnings go to the same output. An error in one cycle (disk, git,
   ticket store) is printed and the next cycle runs.
 - **Safety cap.** At most `max_launches_per_day` launches are attempted per UTC
-  day (build, fix and investigation launches together; a failed attempt
-  counts, so a broken setup cannot loop forever). The count is kept in
+  day (build, fix and investigation launches together). Each launch is counted
+  and saved before it starts, so an interruption or a later error cannot leave
+  it uncounted, and if the count cannot be saved the launch is refused. A failed
+  attempt counts, so a broken setup cannot loop forever. The count is kept in
   `$FLEET_HOME/dispatch-launches.json` so restarting the watcher does not
   reset it. Once the cap is reached it keeps reconciling, closing tabs and
   checking agents, launches nothing until the next UTC day, and says so once

@@ -526,6 +526,8 @@ def _close_finished_tab(ticket_id: str, settings: dict) -> tuple[bool, str]:
     tab = None
     if agent is not None:
         tab = next((x for x in tabs if x.get("tab_id") == agent.get("tab_id")), None)
+        if tab is None:
+            agent = None  # it lives in another workspace: its state says nothing about a tab here
     if tab is None:
         matches = [x for x in tabs if x.get("label") == ticket_id]
         if len(matches) > 1:
