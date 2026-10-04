@@ -11,12 +11,14 @@ from fleet import service as sv
 from fleet import usage_cli
 
 FAKE = ROOT / "tests" / "fake_herdr.py"
+REAL_START_DIRECTLY = sv._start_directly   # never run for real unless a test says so
 
 
 @pytest.fixture(autouse=True)
 def rig(env, monkeypatch):
     monkeypatch.setattr(sv, "WAIT_SECONDS", 0.5)
     monkeypatch.setattr(sv, "POLL_SECONDS", 0.01)
+    monkeypatch.setattr(sv, "_start_directly", lambda: None)
     (env / "fleet").mkdir()
     world = env / "world.json"
     world.write_text(json.dumps({"workspaces": [], "tabs": [], "agents": []}))
@@ -264,7 +266,7 @@ def test_launcher_installs_in_both_places(env):
 def test_restart_stops_then_starts(monkeypatch):
     order = []
     monkeypatch.setattr(sv, "stop_dispatcher", lambda: order.append("stop") or "stopped")
-    monkeypatch.setattr(sv, "start_dispatcher", lambda: order.append("start") or True)
+    monkeypatch.setattr(sv, "start_dispatcher", lambda *a: order.append("start") or True)
     monkeypatch.setattr(sv, "dispatcher_running", lambda: True)
     assert usage_cli.main(["restart"]) == 0
     assert order == ["stop", "start"]
@@ -321,3 +323,37 @@ def test_the_started_command_really_takes_the_lock_and_stop_ends_it(env, monkeyp
     assert "dispatcher: already running" in capsys.readouterr().out
     assert usage_cli.main(["stop"]) == 0
     assert not sv.dispatcher_running()
+
+
+def test_start_still_recovers_when_herdr_cannot_start_at_all(env, monkeypatch, capsys):
+    """herdr failing before the dispatcher step (server, workspaces) must not skip the fallback."""
+    monkeypatch.setenv("FLEET_HERDR", str(env / "no-such-herdr"))
+    state = {"up": False}
+    monkeypatch.setattr(sv, "dispatcher_running", lambda: state["up"])
+    monkeypatch.setattr(sv, "_start_directly", lambda: state.update(up=True))
+    assert usage_cli.main(["start"]) == 0
+    assert "starting it directly" in capsys.readouterr().err
+
+
+def test_start_pings_when_herdr_is_broken_and_the_dispatcher_stays_down(env, monkeypatch, capsys):
+    monkeypatch.setenv("FLEET_HERDR", str(env / "no-such-herdr"))
+    monkeypatch.setattr(sv, "dispatcher_running", lambda: False)
+    monkeypatch.setattr(sv, "_start_directly", lambda: None)
+    sent = []
+    monkeypatch.setattr(sv.notify, "send_alert", lambda *a: sent.append(a))
+    assert usage_cli.main(["start"]) == 1
+    assert len(sent) == 1
+
+
+def test_a_direct_start_says_so_and_names_its_log(env, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_HERDR_RUN_FAIL", "1")
+    monkeypatch.setattr(sv, "ROOT", env)   # bin/dispatch under it is a stand-in
+    (env / "bin").mkdir()
+    (env / "bin" / "dispatch").write_text("import time\ntime.sleep(1)\n")
+    state = {"up": False}
+    monkeypatch.setattr(sv, "dispatcher_running", lambda: state["up"])
+    real = REAL_START_DIRECTLY
+    monkeypatch.setattr(sv, "_start_directly", lambda: real() or state.update(up=True))
+    assert usage_cli.main(["start"]) == 0
+    assert "started directly, without herdr" in capsys.readouterr().out
+    assert (env / "fleet" / "dispatch-direct.log").exists()

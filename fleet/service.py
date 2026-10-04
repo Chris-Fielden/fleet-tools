@@ -213,10 +213,12 @@ def dispatcher_pid() -> int | None:
 
 
 START_ATTEMPTS = 3
+_direct_log: Path | None = None   # set when the dispatcher was started without herdr
 
 
 def _start_in_herdr() -> None:
     """One try at starting the watching dispatcher in a herdr tab."""
+    start_herdr()
     workspace = lc.ensure_workspace(TOOLS_WORKSPACE)
     _close_tabs(workspace)   # a leftover tab of a dispatcher that is gone
     workspace = lc.ensure_workspace(TOOLS_WORKSPACE)   # closing its last tab removes a workspace
@@ -231,12 +233,15 @@ def _start_in_herdr() -> None:
 
 def _start_directly() -> None:
     """Start the watching dispatcher as a plain background process, without herdr."""
+    global _direct_log
     log = tk.fleet_home() / "dispatch-direct.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
     try:
+        tk.refuse_real_store_in_tests(log)
+        log.parent.mkdir(parents=True, exist_ok=True)
         with open(log, "ab") as out:
             subprocess.Popen([sys.executable, str(ROOT / "bin" / "dispatch"), "--watch"], cwd=ROOT,
                              stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True)
+        _direct_log = log
     except OSError as exc:
         raise ServiceError(f"could not start the dispatcher directly: {exc.strerror or type(exc).__name__}") from None
 
@@ -252,13 +257,15 @@ def _ping_down(reason: str) -> None:
               file=sys.stderr)
 
 
-def start_dispatcher() -> bool:
+def start_dispatcher(_prior_problems: list[str] | None = None) -> bool:
     """Start the watching dispatcher. Success means a dispatcher process is
     alive, whatever herdr said: retry through herdr, then start it directly,
     and send one high ping if it is still down. True if started."""
+    global _direct_log
+    _direct_log = None
     if dispatcher_running():
         return False
-    problems: list[str] = []
+    problems: list[str] = [] if not _prior_problems else list(_prior_problems)
     for _ in range(START_ATTEMPTS):
         try:
             _start_in_herdr()
@@ -304,13 +311,20 @@ def stop_dispatcher() -> str:
 
 def cmd_start(pause: bool = False) -> int:
     settings = st.load_settings()
-    started = start_herdr()
-    print("herdr: " + ("started in the background" if started else "already running"))
-    for name in dict.fromkeys((settings["herdr_workspace"], TOOLS_WORKSPACE)):
-        print(f"workspace {name}: {lc.ensure_workspace(name)}")
+    problems: list[str] = []   # herdr trouble does not stop us: a live dispatcher is what counts
+    try:
+        started = start_herdr()
+        print("herdr: " + ("started in the background" if started else "already running"))
+        for name in dict.fromkeys((settings["herdr_workspace"], TOOLS_WORKSPACE)):
+            print(f"workspace {name}: {lc.ensure_workspace(name)}")
+    except (ServiceError, lc.LaunchError) as exc:
+        problems.append(str(exc))
+        print(f"fleet: warning: {exc}", file=sys.stderr)
     with _serialized():
-        started_dispatcher = start_dispatcher()
-    if started_dispatcher:
+        started_dispatcher = start_dispatcher(problems)
+    if started_dispatcher and _direct_log:
+        print(f"dispatcher: started directly, without herdr (log: {_direct_log})")
+    elif started_dispatcher:
         print(f"dispatcher: started in tab '{DISPATCH_TAB}' of {TOOLS_WORKSPACE}")
     else:
         print("dispatcher: already running")
