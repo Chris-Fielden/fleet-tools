@@ -22,6 +22,7 @@ from . import risk as rk
 TYPES = ("build", "review", "fix", "question", "investigate")
 PRIORITIES = ("normal", "urgent")
 STATUSES = ("proposed", "open", "claimed", "done", "failed", "cancelled")
+ACTIVE_STATUSES = ("proposed", "open", "claimed")  # not yet finished
 CREATORS = ("human", "claude", "codex")
 
 FIELDS = (
@@ -615,12 +616,14 @@ def append_to_body(ticket_id: str, heading: str, items: str) -> dict | None:
         raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
     with _locked():
         ticket = load_ticket(ticket_id)
+        if ticket["status"] not in ACTIVE_STATUSES:
+            raise TicketError(f"{ticket_id} is {ticket['status']}, so nothing new can be added to it")
         fresh = [ln for ln in items.splitlines() if ln.strip() and ln not in ticket["body"]]
         if not fresh:
             return None
         body = f"{ticket['body']}\n\n{heading}\n" + "\n".join(fresh)
         if len(body) > BODY_MAX:
-            body = body[:BODY_MAX - 15].rstrip() + "\n[...truncated]"
+            raise TicketError(f"{ticket_id} is too full to take these items; they are in its notes instead")
         errors = check_secrets(ticket["title"], body)
         if errors:
             raise TicketInvalid(errors)

@@ -6,7 +6,7 @@ import sys
 
 from conftest import BIN, new_args, run
 from fleet import risk as rk
-from test_kaneo import new_ticket
+from test_kaneo import edit_ticket, new_ticket
 from test_risk import commit_in, fake_tool, repo, run_review, task  # noqa: F401
 from test_summaries import SHA, record, stored
 
@@ -160,3 +160,20 @@ def test_review_sh_retries_without_flags_for_an_older_ticket(task, env):
     assert r.returncode == 0, r.stdout + r.stderr
     assert "retrying without the leftovers flags" in r.stdout
     assert stored(tid)["verdict"]["result"] == "PASS"
+
+
+def test_a_finished_leftovers_ticket_is_not_reused(env):
+    new_ticket()
+    leftovers(review(env, ITEMS, name="a.md"), "--leftovers", "--propose-leftovers")
+    first = [l.split()[0] for l in run("list").stdout.splitlines() if "Leftover review items" in l][0]
+    before = stored(first)["body"]
+    edit_ticket(first, status="done")
+    b = env / "b.md"
+    b.write_text(REVIEW.format(sha=SHA, verdict="PASS", must="none", should="\n1. z.py: new thing").replace("Codex", "Claude (opus)"))
+    r = leftovers(b, "--leftovers", "--propose-leftovers")
+    assert r.returncode == 0, r.stderr
+    ids = [l.split()[0] for l in run("list").stdout.splitlines() if "Leftover review items" in l]
+    assert len(ids) == 2
+    assert stored(first)["body"] == before and stored(first)["status"] == "done"
+    new = next(i for i in ids if i != first)
+    assert "z.py: new thing" in stored(new)["body"] and stored(new)["status"] == "open"

@@ -224,7 +224,8 @@ def _save_leftovers(args, info: dict, changed: list, review_text: str) -> None:
     try:
         heading = f"From the {info['reviewer']} review of {info['commit'][:7]}:"
         existing = next((o for o in tk.list_tickets()
-                         if o.get("parent") == parent["id"] and o["branch"] == branch), None)
+                         if o.get("parent") == parent["id"] and o["branch"] == branch
+                         and o["status"] in tk.ACTIVE_STATUSES), None)  # a finished one is not reused
         if existing:  # one grouped ticket per reviewed ticket: add this reviewer's new items
             added = tk.append_to_body(existing["id"], heading, items)
             if added:
