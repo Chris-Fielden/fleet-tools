@@ -133,8 +133,13 @@ def start_prep(settings_over=None, now=NIGHT):
 
 
 def finish_prep(settings, now=NIGHT):
+    """One finish pass, then (when re-checks were started in the background) waits for them
+    and passes again, as the next cycle would."""
     out, warns = [], []
     prep.finish(settings, now, out.append, warns.append)
+    if prep._CHECKS:
+        prep.wait_checks()
+        prep.finish(settings, now, out.append, warns.append)
     return out, warns
 
 

@@ -1,6 +1,7 @@
 """EM-9 review fixes: branch ownership, tips recorded early, keeper validated first, odd reports."""
 
 import json
+import os
 import subprocess
 from datetime import datetime, timezone
 
@@ -12,7 +13,7 @@ from fleet import prep
 from fleet import ticket as tk
 from fleet.ship_cli import main as ship_main
 from test_dispatch import calls, git, herdr_log, projects, mk, claim  # noqa: F401
-from test_prep import (agent_names, commit, conflicting, finish_prep, in_review, log_lines, merge, q,  # noqa: F401
+from test_prep import (NIGHT as NOW, ntfy, agent_names, commit, conflicting, finish_prep, in_review, log_lines, merge, q,  # noqa: F401
                        report, set_agent_status, start_prep)
 
 
@@ -242,3 +243,71 @@ def test_the_recheck_runs_the_branch_scripts_with_an_agent_identity(q, herdr_log
     set_agent_status(env, "prep", "idle")
     finish_prep(settings)
     assert len(seen) == 2 and all(e.get("CLAUDECODE") == "1" and "CODEX_SANDBOX" not in e for e in seen)
+
+
+# --- EM-17: re-checks never block the cycle; a sent-back ticket gets an agent ---------------
+
+def test_a_slow_recheck_does_not_block_the_cycle(q, herdr_log, env, monkeypatch):
+    import threading
+    a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
+    settings, _, _ = start_prep()
+    commit(a_wt, {"more.txt": "changed by the prep agent"})
+    gate, started = threading.Event(), threading.Event()
+    real = prep.validate
+
+    def slow(t, s):
+        started.set()
+        gate.wait(10)
+        return real(t, s)
+
+    monkeypatch.setattr(prep, "validate", slow)
+    set_agent_status(env, "prep", "idle")
+    out, warns = [], []
+    prep.finish(settings, NOW, out.append, warns.append)   # returns at once, with the check running
+    assert started.wait(5)
+    assert [j["name"] for j in prep._load()["jobs"]] == ["prep"] and a["id"] in prep.locked_ids()
+    assert prep.list_path().exists() is False and not any("not finished" in w for w in warns)
+    prep.finish(settings, NOW, out.append, warns.append)   # still running: still pending, nothing doubled
+    assert prep._load()["jobs"][0].get("tries", 0) == 0
+    gate.set()
+    prep.wait_checks()
+    prep.finish(settings, NOW, out.append, warns.append)
+    assert prep._load()["jobs"] == [] and [i for i, _ in prep.read_list()] == [a["id"]]
+
+
+def test_a_branch_sent_back_by_the_prep_pass_gets_an_agent_again(q, herdr_log, env, monkeypatch):
+    a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
+    settings, _, _ = start_prep()
+    commit(a_wt, {"more.txt": "changed by the prep agent"})
+    monkeypatch.setenv("FAKE_REVIEW_FAIL", "task/one")
+    set_agent_status(env, "prep", "idle")
+    out, _ = finish_prep(settings)
+    assert tk.load_ticket(a["id"])["status"] == "claimed"
+    assert a["id"].lower() in agent_names(herdr_log)
+    assert any("relaunched" in line for line in out)
+
+
+def test_a_sent_back_ticket_that_cannot_get_an_agent_says_so_once(q, herdr_log, env, ntfy, monkeypatch):
+    from test_prep import sent
+    a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
+    settings, _, _ = start_prep()
+    commit(a_wt, {"more.txt": "changed by the prep agent"})
+    monkeypatch.setenv("FAKE_REVIEW_FAIL", "task/one")
+    monkeypatch.setattr(lc, "relaunch", lambda t, s, w: (1, f"{t['id']}  relaunch failed: no room"))
+    set_agent_status(env, "prep", "idle")
+    finish_prep(settings)
+    notes = [n["text"] for n in tk.load_ticket(a["id"])["notes"]]
+    assert any("no agent could be started" in n for n in notes)
+    pings = [p for p in sent(ntfy) if "needs a human" in p[0]]
+    assert len(pings) == 1 and pings[0][2] == "low"   # one ping, low priority
+
+
+@pytest.mark.skipif(not os.environ.get("FLEET_TEST_REAL_CLAUDE"),
+                    reason="set FLEET_TEST_REAL_CLAUDE=1 to spend one tiny real `claude -p` call")
+def test_claude_p_starts_with_claudecode_set():
+    """review.sh calls `claude -p` from validate(), which sets CLAUDECODE=1: it must not refuse."""
+    import pwd
+    env = dict(os.environ, CLAUDECODE="1", HOME=pwd.getpwuid(os.getuid()).pw_dir)   # the tests fake HOME
+    done = subprocess.run(["claude", "-p", "reply with the single word ok"], env=env,
+                          capture_output=True, text=True, timeout=120, cwd="/tmp", stdin=subprocess.DEVNULL)
+    assert done.returncode == 0 and "ok" in done.stdout.lower()

@@ -27,6 +27,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -396,8 +397,11 @@ def validate(t: dict, settings: dict) -> str | None:
         return "the task folder has uncommitted changes"
     if not (wt / "scripts" / "check.sh").is_file() or not (wt / "scripts" / "review.sh").is_file():
         return "scripts/check.sh or scripts/review.sh is missing"
-    # The branch was just changed by an agent: its scripts and tests run with an agent's identity,
-    # never the human's, so the ticket store and the hooks refuse human-only actions to them.
+    # The branch was just changed by an agent: its scripts and tests run with an agent's identity
+    # (CLAUDECODE=1), so the ticket store and the hooks refuse human-only actions to them. This is a
+    # soft guard, not containment: the identity is only an environment variable, so a script from
+    # the branch could unset it. Checked for real (2026-10-04): `claude -p` starts fine with
+    # CLAUDECODE=1 (there is no nested-session refusal), so review.sh works at high risk.
     env = dict(os.environ)
     env.pop("CODEX_SANDBOX", None)
     env.pop("CODEX_SANDBOX_NETWORK_DISABLED", None)
@@ -417,7 +421,54 @@ def validate(t: dict, settings: dict) -> str | None:
     return None
 
 
-def _bounce(t: dict, problem: str, emit, warn) -> None:
+class _Pending(Exception):
+    """Re-checks of a job are still running in the background: try again next cycle."""
+
+
+# Re-checks run on a background thread, so a slow check.sh or review.sh (up to two hours) never
+# stops the dispatch cycle. In memory only: a restarted dispatcher starts them again, and the job
+# stays locked in prep.json until they are done.
+_CHECKS: dict[str, dict] = {}
+_CHECKS_LOCK = threading.Lock()
+
+
+def _validate_all(tickets: list[dict], settings: dict, entry: dict) -> None:
+    for t in tickets:
+        tip = tip_of(_repo(t, settings), t["branch"])
+        try:
+            problem = validate(t, settings)
+        except Exception as exc:   # a thread must always leave a result behind
+            problem = f"the re-check could not finish ({_clip(str(exc), 150)})"
+        entry["results"][t["id"]] = (tip, problem)
+
+
+def _checked(job: dict, tickets: list[dict], settings: dict) -> dict[str, tuple]:
+    """{id: (tip, problem)} for the tickets of a job whose tip moved. The first call starts the
+    re-checks in the background and raises _Pending; so does every call until they are done."""
+    with _CHECKS_LOCK:
+        entry = _CHECKS.get(job["name"])
+        if entry is None:
+            entry = {"results": {}}
+            entry["thread"] = threading.Thread(target=_validate_all, args=(tickets, settings, entry),
+                                               name=f"recheck-{job['name']}", daemon=True)
+            _CHECKS[job["name"]] = entry
+            entry["thread"].start()
+            raise _Pending()
+        if entry["thread"].is_alive():
+            raise _Pending()
+        del _CHECKS[job["name"]]
+        return entry["results"]
+
+
+def wait_checks() -> None:
+    """Block until the background re-checks are done (a one-shot run, and tests)."""
+    with _CHECKS_LOCK:
+        threads = [e["thread"] for e in _CHECKS.values()]
+    for th in threads:
+        th.join()
+
+
+def _bounce(t: dict, problem: str, settings: dict, emit, warn) -> None:
     """The branch failed its re-check: back to normal handling (claimed), off the list."""
     try:
         new = tk.set_status(t["id"], "claimed", allowed_from=("review",))
@@ -427,6 +478,21 @@ def _bounce(t: dict, problem: str, emit, warn) -> None:
         warn(f"{t['id']}: could not move back to claimed: {exc}")
     emit(f"{t['id']}  prep pass: {problem}; back to In Progress, left off the ship list")
     dp.log("PREP_FAILED", f"{t['id']} {_clip(problem, 200)}")
+    relaunch_sent_back(dict(t, status="claimed"), settings, emit, warn)
+
+
+def relaunch_sent_back(t: dict, settings: dict, emit, warn) -> None:
+    """A ticket sent back from review to claimed has no agent (its tab was closed in review).
+    Start a new one in its task folder so it does not sit on a build slot unattended. If that
+    fails, say so on the ticket and send one low ping: a human has to step in."""
+    code, message = lc.relaunch(t, settings, warn)
+    emit(message)
+    if not code:
+        return
+    with contextlib.suppress(tk.TicketError, tk.TicketInvalid):
+        tk.add_note(t["id"], _clip(f"{NOTE_PREFIX} sent back from review, but no agent could be started "
+                                   f"({message}). It holds a build slot until you act.", tk.NOTE_MAX))
+    notify.notify_quietly(t, "needs_human", warn)
 
 
 def _read_report(job: dict, settings: dict, warn) -> dict:
@@ -557,12 +623,17 @@ def _finish_prep(job: dict, settings: dict, now: datetime, emit, warn) -> None:
     live = {i: tickets[i] for i in job["ids"] if i in tickets and tickets[i]["status"] == "review"}
     report = _read_report(job, settings, warn)
 
+    moved = [t for i, t in live.items() if (tip_of(_repo(t, settings), t["branch"]) or job["tips"].get(i))
+             != job["tips"].get(i)]
+    checked = _checked(job, moved, settings) if moved else {}   # raises _Pending until they are done
+
     def recheck(t: dict) -> str | None:
         tip = tip_of(_repo(t, settings), t["branch"])
         if tip is None:
             return "its branch is gone"
-        if tip != job["tips"].get(t["id"]):
-            return validate(t, settings)   # only a moved tip needs the full re-check
+        if tip != job["tips"].get(t["id"]):   # only a moved tip needs the full re-check
+            done = checked.get(t["id"])
+            return done[1] if done and done[0] == tip else "the branch moved during its re-check"
         dirty = dp._git(_worktree(t, settings), "status", "--porcelain")
         if dirty.returncode != 0:
             return "the task folder is missing or unreadable"
@@ -577,7 +648,7 @@ def _finish_prep(job: dict, settings: dict, now: datetime, emit, warn) -> None:
         if isinstance(keep, str) and keep in live and keep not in results:
             results[keep] = recheck(live[keep])
             if results[keep]:
-                _bounce(live[keep], results[keep], emit, warn)
+                _bounce(live[keep], results[keep], settings, emit, warn)
                 live[keep] = dict(live[keep], status="claimed")
     folded = _apply_duplicates(report, live, settings, emit, warn)
     gone = {c for cs in folded.values() for c in cs}
@@ -591,7 +662,7 @@ def _finish_prep(job: dict, settings: dict, now: datetime, emit, warn) -> None:
         problem = results[i] if i in results else recheck(t)
         if problem:
             failed.add(i)
-            _bounce(t, problem, emit, warn)
+            _bounce(t, problem, settings, emit, warn)
         else:
             ok.append(t)
     wanted = _id_list(report.get("order"), {t["id"] for t in ok})
@@ -627,9 +698,10 @@ def _finish_reconcile(job: dict, settings: dict, now: datetime, emit, warn) -> N
         elif dp._git(repo, "merge-base", "--is-ancestor", base, tip).returncode != 0:
             problem = f"{base} is still not merged into the branch"
         else:
-            problem = validate(t, settings)
+            done = _checked(job, [t], settings).get(ticket_id)   # raises _Pending until it is done
+            problem = done[1] if done and done[0] == tip else "the branch moved during its re-check"
         if problem:
-            _bounce(t, problem, emit, warn)
+            _bounce(t, problem, settings, emit, warn)
             drop_from_list({ticket_id}, now)
         else:
             if ticket_id not in {i for i, _ in read_list()}:   # shipped on its own before: it needs a line
@@ -675,6 +747,8 @@ def finish(settings: dict, now: datetime, emit, warn) -> None:
             continue
         try:
             (_finish_prep if job["kind"] == "prep" else _finish_reconcile)(job, settings, now, emit, warn)
+        except _Pending:
+            continue   # its re-checks run in the background; the job stays locked meanwhile
         except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired, lc.LaunchError) as exc:
             warn(f"{job['name']}: not finished, will retry ({exc})")
             gave_up = []

@@ -564,6 +564,9 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             dp.log("REVIEW_BACK", f"{t['id']} back to claimed: {why}")
             kaneo.mirror_quietly(new, warn)
             t = new   # claimed again: the alert checks below apply in full
+            if agents_known and agent is None:   # its tab was closed in review: nobody is on it
+                prep.relaunch_sent_back(t, settings, emit, warn)
+                return   # the new agent starts fresh: judge it from the next cycle
         else:
             return
     elif earned and stopped:

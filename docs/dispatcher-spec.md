@@ -431,7 +431,11 @@ place) and a note on the keeper; reads every branch's tip from git and, for each
 re-runs `scripts/check.sh` and `scripts/review.sh` (which applies the reviews the risk level
 needs) in its task folder, then saves a `Prep pass:` note after the new verdict (the review
 watch counts it as that tip's summary). A branch that fails any of that goes back to
-`claimed` (normal handling) and stays off the list. Tickets handed to an agent are locked:
+`claimed` (normal handling), gets a new agent in its task folder (if none can be started it
+gets a note and one low `needs_human` ping) and stays off the list. The re-checks run on a
+background thread (they can take hours), so the dispatch cycle keeps launching, pinging and
+running on-call meanwhile; the job stays locked until they are done (a one-shot `--once`
+waits for them). Tickets handed to an agent are locked:
 `--watch` does not judge them meanwhile. It then writes the ship list and sends one ping,
 `<N> ready to ship, list ready` (ntfy event `ship_list`, default priority; none if the list is empty).
 

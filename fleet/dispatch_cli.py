@@ -188,7 +188,11 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
 def _cmd_once(settings: dict) -> int:
     def offer(t: dict) -> bool:
         return _ask_yes_no(f"{t['id']}: start a new {t['assignee']} agent in the same task folder?")
-    return _cycle(settings, print, _warn, offer=offer)
+    code = _cycle(settings, print, _warn, offer=offer)
+    # A one-shot run has no next cycle: wait for the prep re-checks started above and finish the job.
+    prep.wait_checks()
+    _prep_quietly(lambda: prep.finish(settings, dp.Clock().now(), print, _warn), _warn)
+    return code
 
 
 def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None) -> int:
