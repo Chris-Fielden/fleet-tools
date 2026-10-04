@@ -218,7 +218,7 @@ def _save_leftovers(args, info: dict, changed: list, review_text: str) -> None:
                 continue  # the same review was recorded twice
             _tracker().add_note(t["id"], text)
             print(f"{t['id']} SHOULD FIX leftovers saved as a note")
-        except (tk.TicketError, tk.TicketInvalid, OSError, UnicodeDecodeError) as exc:
+        except (tk.TicketError, tk.TicketInvalid, st.SettingsError, OSError, UnicodeDecodeError) as exc:
             _warn(f"could not save the SHOULD FIX leftovers on {t['id']}: {exc}")
     if not args.propose_leftovers:
         return
@@ -246,7 +246,7 @@ def _save_leftovers(args, info: dict, changed: list, review_text: str) -> None:
             "type": "fix", "repo": parent["repo"], "branch": branch, "parent": parent["id"],
             "title": f"Leftover review items from {parent['id']}", "body": body}, needs_approval=True)
         print(f"{new['id']} proposed for the leftover SHOULD FIX items")
-    except (tk.TicketError, tk.TicketInvalid, OSError, UnicodeDecodeError) as exc:
+    except (tk.TicketError, tk.TicketInvalid, st.SettingsError, OSError, UnicodeDecodeError) as exc:
         _warn(f"could not propose a leftovers ticket for {parent['id']}: {exc}")
 
 

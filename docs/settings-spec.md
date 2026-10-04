@@ -24,7 +24,7 @@ with a plain message.
 | `tracker` | `local` | backend holding the tickets (see below) |
 | `id_prefixes` | `build BD, fix FX, review RV, question QN, investigate ID` | two capital letters per ticket type |
 | `emergency_prefix` | `EM` | prefix for any urgent ticket |
-| `kaneo.url`, `kaneo.workspace_id` | `null` | used when `kaneo.json` lacks them |
+| `kaneo.workspace_id` | `null` | used when `kaneo.json` lacks it (the url stays in `kaneo.json`: it decides where the key is sent) |
 | `kaneo.project_icon` | `Layout` | icon of projects the mirror creates |
 
 ## The tracker interface (`fleet/tracker.py`)
@@ -37,7 +37,8 @@ and `check` (health rows for `fleet doctor`). The `ticket` command, the
 `LocalTracker` is the first backend: the JSON store under
 `$FLEET_HOME/tickets` (source of truth) plus the one-way Kaneo mirror,
 unchanged. A Kaneo problem is a warning, never a failed operation. A new
-backend implements `Tracker` and is added to `BACKENDS`.
+backend implements `Tracker` and is added to both `tracker.BACKENDS` and
+`settings.TRACKERS` (a test keeps them in step). Id prefixes must all differ.
 
 Kaneo columns: an urgent ticket sits in **Urgent** only while it is open.
 Claiming it moves it to **In Progress**, then **In Review**, so Urgent shows

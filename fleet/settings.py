@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 
 from . import ticket as tk
@@ -39,12 +40,12 @@ DEFAULTS = {
     "id_prefixes": dict(tk.TYPE_PREFIX),
     "emergency_prefix": tk.EMERGENCY_PREFIX,
     # Non-secret Kaneo values. null means "use what kaneo.json says". The API
-    # key is never set here.
-    "kaneo": {"url": None, "workspace_id": None, "project_icon": "Layout"},
+    # key and the url (which decides where the key is sent) stay in kaneo.json.
+    "kaneo": {"workspace_id": None, "project_icon": "Layout"},
 }
 MIN_WATCH_INTERVAL = 30
-TRACKERS = ("local",)
-PREFIX_RE = r"[A-Z]{2}"
+TRACKERS = ("local",)  # keep in step with tracker.BACKENDS (a test checks)
+PREFIX_RE = re.compile(r"[A-Z]{2}")
 
 
 class SettingsError(Exception):
@@ -59,11 +60,14 @@ def legacy_settings_path() -> Path:
     return tk.fleet_home() / "dispatch.json"
 
 
+_ABSENT = object()
+
+
 def _read(path: Path):
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return None
+        return _ABSENT
     except (OSError, UnicodeDecodeError) as exc:
         raise SettingsError(f"cannot read {path}: {exc}") from None
     try:
@@ -77,7 +81,7 @@ def load_settings() -> dict:
     settings = copy.deepcopy(DEFAULTS)
     for path in (legacy_settings_path(), settings_path()):
         given = _read(path)
-        if given is not None:
+        if given is not _ABSENT:
             _merge(settings, given, path)
     for key in ("projects_dir", "research_dir"):
         try:
@@ -96,8 +100,6 @@ def _whole(path, given, key, minimum, what):
 
 
 def _merge(settings: dict, given, path: Path) -> None:
-    import re
-
     if not isinstance(given, dict):
         raise SettingsError(f"{path} must contain a JSON object")
     unknown = sorted(set(given) - set(DEFAULTS))
@@ -147,13 +149,16 @@ def _merge(settings: dict, given, path: Path) -> None:
         for kind, prefix in prefixes.items():
             if kind not in tk.TYPES:
                 raise SettingsError(f"{path}: id_prefixes has unknown ticket type '{kind}'")
-            if not isinstance(prefix, str) or not re.fullmatch(PREFIX_RE, prefix):
+            if not isinstance(prefix, str) or not PREFIX_RE.fullmatch(prefix):
                 raise SettingsError(f"{path}: the id prefix for {kind} must be two capital letters")
             settings["id_prefixes"][kind] = prefix
     if "emergency_prefix" in given:
-        if not isinstance(given["emergency_prefix"], str) or not re.fullmatch(PREFIX_RE, given["emergency_prefix"]):
+        if not isinstance(given["emergency_prefix"], str) or not PREFIX_RE.fullmatch(given["emergency_prefix"]):
             raise SettingsError(f"{path}: emergency_prefix must be two capital letters")
         settings["emergency_prefix"] = given["emergency_prefix"]
+    used = list(settings["id_prefixes"].values()) + [settings["emergency_prefix"]]
+    if len(set(used)) != len(used):
+        raise SettingsError(f"{path}: id prefixes must differ from each other and from emergency_prefix")
     if "kaneo" in given:
         k = given["kaneo"]
         if not isinstance(k, dict):
@@ -161,7 +166,7 @@ def _merge(settings: dict, given, path: Path) -> None:
         extra = sorted(set(k) - set(DEFAULTS["kaneo"]))
         if extra:
             raise SettingsError(f"{path}: unknown kaneo setting(s): {', '.join(extra)} "
-                                "(the API key belongs in kaneo.json, not here)")
+                                "(the API key and url belong in kaneo.json, not here)")
         for name, value in k.items():
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise SettingsError(f"{path}: kaneo.{name} must be a non-empty string or null")

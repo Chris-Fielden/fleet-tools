@@ -7,7 +7,6 @@ will launch the first eligible ticket that `decide` returns.
 from __future__ import annotations
 
 import contextlib
-import copy
 import fcntl
 import json
 import os

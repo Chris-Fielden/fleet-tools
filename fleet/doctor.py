@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import subprocess
 
 from . import dispatch as dp
 from . import settings as st
@@ -52,7 +53,10 @@ def _settings_rows() -> tuple[list[tuple[str, str, str]], dict | None]:
     projects = cfg["projects_dir"]
     rows.append(("ok" if projects.is_dir() else "fail", "projects_dir",
                  str(projects) if projects.is_dir() else f"{projects} is not a folder"))
-    problem = dp.research_dir_problem(cfg)
+    try:
+        problem = dp.research_dir_problem(cfg)
+    except (OSError, subprocess.SubprocessError) as exc:
+        problem = f"cannot check it ({type(exc).__name__}; is git installed?)"
     rows.append(("fail" if problem else "ok", "research_dir", problem or str(cfg["research_dir"])))
     rows.append(("ok", "herdr_workspace", cfg["herdr_workspace"]))
     rows.append(("ok", "tracker", cfg["tracker"]))

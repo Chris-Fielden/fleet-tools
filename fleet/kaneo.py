@@ -105,14 +105,14 @@ def load_config() -> dict:
         raise KaneoError(f"{path} is not readable JSON") from None
     if not isinstance(data, dict):
         raise KaneoError(f"{path} must contain a JSON object")
-    # url and workspace_id may instead come from settings.json (not secret).
+    # workspace_id may instead come from settings.json. The url may not: it
+    # decides where the API key goes, and only kaneo.json (mode 600) is trusted.
     try:
         shared = st.load_settings()["kaneo"]
     except st.SettingsError as exc:
         raise KaneoError(str(exc)) from None
-    for name in ("url", "workspace_id"):
-        if not data.get(name) and shared.get(name):
-            data[name] = shared[name]
+    if not data.get("workspace_id") and shared.get("workspace_id"):
+        data["workspace_id"] = shared["workspace_id"]
     for name in ("url", "workspace_id", "api_key"):
         if not isinstance(data.get(name), str) or not data[name]:
             raise KaneoError(f"{path} needs a non-empty '{name}'")
@@ -142,6 +142,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 class Client:
     def __init__(self, cfg: dict):
         self._base = cfg["url"]
+        self.base_url = cfg["url"]
         self._key = cfg["api_key"]
         self.workspace_id = cfg["workspace_id"]
         self._opener = urllib.request.build_opener(_NoRedirect)

@@ -149,7 +149,7 @@ class LocalTracker(Tracker):
             client.request("GET", "/project", query={"workspaceId": client.workspace_id})
         except kaneo.KaneoError as exc:
             return ("fail", "kaneo reachable", str(exc))
-        return ("ok", "kaneo reachable", f"{client._base}, workspace {client.workspace_id}")
+        return ("ok", "kaneo reachable", f"{client.base_url}, workspace {client.workspace_id}")
 
 
 BACKENDS = {"local": LocalTracker}

@@ -50,13 +50,20 @@ def test_settings_json_wins_over_legacy_dispatch_json():
     assert cfg["herdr_workspace"] == "new" and cfg["max_running"] == 2
 
 
+NULL_FILE = {"settings.json": "null"}
+
+
 @pytest.mark.parametrize("given", [
     {"nope": 1}, {"tracker": "jira"}, {"id_prefixes": {"build": "b"}},
     {"id_prefixes": {"wat": "AB"}}, {"emergency_prefix": "EMG"},
-    {"kaneo": {"api_key": "x"}}, {"kaneo": {"url": ""}},
+    {"kaneo": {"api_key": "x"}}, {"kaneo": {"url": "http://evil"}}, NULL_FILE, {"id_prefixes": {"fix": "BD"}},
 ])
 def test_bad_settings_are_a_plain_error(given):
-    write_settings(**given)
+    if given is NULL_FILE:
+        fleet_home().mkdir(parents=True, exist_ok=True)
+        (fleet_home() / "settings.json").write_text("null")
+    else:
+        write_settings(**given)
     with pytest.raises(st.SettingsError):
         st.load_settings()
 
@@ -73,14 +80,14 @@ def test_bad_settings_stop_ticket_new_with_a_message():
     assert r.returncode == 1 and "tracker" in r.stderr
 
 
-def test_kaneo_url_and_workspace_may_live_in_settings_but_not_the_key():
+def test_kaneo_workspace_may_live_in_settings_but_not_the_key_or_url():
     fake = FakeKaneo(API_KEY).start()
     try:
         home = fleet_home()
         home.mkdir(parents=True, exist_ok=True)
-        (home / "kaneo.json").write_text(json.dumps({"api_key": API_KEY}))
+        (home / "kaneo.json").write_text(json.dumps({"url": fake.url, "api_key": API_KEY}))
         (home / "kaneo.json").chmod(0o600)
-        write_settings(kaneo={"url": fake.url, "workspace_id": "ws1", "project_icon": "Box"})
+        write_settings(kaneo={"workspace_id": "ws1", "project_icon": "Box"})
         assert run("new", *new_args()).returncode == 0
         assert len(fake.tasks) == 1
         made = [w for w in fake.writes if w["path"].endswith("/project")]
@@ -182,3 +189,16 @@ def test_doctor_rejects_loose_kaneo_file_without_the_key():
     write_config("http://127.0.0.1:9", mode=0o644)
     r = fleet("doctor")
     assert r.returncode == 1 and "chmod 600" in r.stdout and API_KEY not in r.stdout
+
+
+def test_every_setting_backend_has_an_implementation():
+    assert set(st.TRACKERS) == set(tr.BACKENDS)
+
+
+def test_doctor_survives_a_missing_git(env, monkeypatch):
+    empty = env / "empty-bin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    r = subprocess.run([sys.executable, str(FLEET), "doctor"], capture_output=True, text=True,
+                       env=dict(os.environ))
+    assert r.returncode == 1 and "Traceback" not in r.stderr and "tool git" in r.stdout
