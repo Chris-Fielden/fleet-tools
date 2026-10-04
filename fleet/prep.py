@@ -40,7 +40,7 @@ from . import ticket as tk
 PREP_TZ = ZoneInfo("America/Los_Angeles")
 NOTE_PREFIX = "Prep pass:"      # a note by the dispatcher; review_watch counts it as a summary
 FOLDER_ID = "PREP"              # the agent folder under research_dir, and the tab label of the prep agent
-JOB_MAX = timedelta(hours=4)    # an agent still "working" after this long is treated as finished
+JOB_MAX = timedelta(hours=4)    # after this long a still-working agent is reported (its tickets stay locked)
 MAX_ATTEMPTS_PER_DAY = 3        # launch attempts of the prep agent per UTC day
 MAX_TRIES = 3                   # finishing a job may fail this often before it is given up
 CHECK_TIMEOUT = 30 * 60
@@ -512,8 +512,12 @@ def _finish_prep(job: dict, settings: dict, now: datetime, emit, warn) -> None:
 
     def recheck(t: dict) -> str | None:
         tip = tip_of(_repo(t, settings), t["branch"])
-        return "its branch is gone" if tip is None else (
-            validate(t, settings) if tip != job["tips"].get(t["id"]) else None)   # only a moved tip needs it
+        if tip is None:
+            return "its branch is gone"
+        if tip != job["tips"].get(t["id"]):
+            return validate(t, settings)   # only a moved tip needs the full re-check
+        dirty = dp._git(_worktree(t, settings), "status", "--porcelain")
+        return "the task folder has uncommitted changes" if dirty.stdout.strip() else None
 
     # A keeper is re-checked BEFORE its duplicates are cancelled: if what was folded into it does
     # not pass, the other tickets stay active.
@@ -579,6 +583,9 @@ def _finish_reconcile(job: dict, settings: dict, now: datetime, emit, warn) -> N
             _bounce(t, problem, emit, warn)
             drop_from_list({ticket_id}, now)
         else:
+            if ticket_id not in {i for i, _ in read_list()}:   # shipped on its own before: it needs a line
+                _write_list([line for _, line in read_list()]
+                            + [_line(t, settings, {}, [], {t["id"]: t})], now)
             emit(f"{ticket_id}  reconciled with main and re-checked; ready to ship again")
             dp.log("PREP_DONE", f"{ticket_id} reconciled")
     with _state() as st:
@@ -605,7 +612,10 @@ def finish(settings: dict, now: datetime, emit, warn) -> None:
         agent = agents.get(job["name"])
         started = _parse(job.get("started"))
         if not job.get("ready", True):
-            if started is not None and now - started > timedelta(minutes=10):   # a launch that died half way
+            # A launch that died half way. Its tickets are released only once herdr confirms that
+            # no such agent is running (listed and busy, or not asked, keeps the lock).
+            stopped = agent is None or agent.get("agent_status") in ("idle", "done")
+            if stopped and started is not None and now - started > timedelta(minutes=10):
                 warn(f"the {job['name']} launch never completed; releasing its tickets")
                 with _state() as st:
                     st["jobs"] = [j for j in st["jobs"] if j["name"] != job["name"]]

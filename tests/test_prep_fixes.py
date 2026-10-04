@@ -96,3 +96,36 @@ def test_odd_report_fields_are_ignored_not_fatal(q, herdr_log, env, bad):
     set_agent_status(env, "prep", "idle")
     _, warns = finish_prep(settings)
     assert not warns and [i for i, _ in prep.read_list()] == [a["id"]]
+
+
+def test_a_half_launched_job_with_a_busy_agent_keeps_its_tickets(q, herdr_log, env):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    settings, _, _ = start_prep()
+    with prep._state() as st:
+        st["jobs"][0].update(ready=False, started="2026-10-03T10:00:00Z")
+    finish_prep(settings, now=datetime(2026, 10, 3, 18, 0, tzinfo=timezone.utc))
+    assert prep.locked_ids() == {a["id"]}              # herdr lists it as working: still locked
+    set_agent_status(env, "prep", "idle")
+    finish_prep(settings, now=datetime(2026, 10, 3, 18, 0, tzinfo=timezone.utc))
+    assert prep.locked_ids() == set()
+
+
+def test_a_reconciled_ticket_shipped_alone_before_gets_a_list_line(q, herdr_log, env):
+    a, a_wt, b, b_wt = conflicting(q)
+    assert ship_main([a["id"]]) == 0 and ship_main([b["id"]]) == 1
+    assert merge(b_wt, "main").returncode != 0
+    (b_wt / "code.py").write_text("def shared():\n    return 0\n\ndef alpha():\n    return 'a'\n\ndef beta():\n    return 'b'\n")
+    git(b_wt, "add", "-A")
+    git(b_wt, "commit", "-q", "-m", "merge main")
+    set_agent_status(env, f"prep-{b['id'].lower()}", "idle")
+    finish_prep(dp.load_settings())
+    assert [i for i, _ in prep.read_list()] == [b["id"]]
+
+
+def test_uncommitted_edits_left_by_the_agent_keep_a_ticket_off_the_list(q, herdr_log, env):
+    a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
+    settings, _, _ = start_prep()
+    (a_wt / "one.txt").write_text("edited but not committed")
+    set_agent_status(env, "prep", "idle")
+    finish_prep(settings)
+    assert tk.load_ticket(a["id"])["status"] == "claimed" and prep.read_list() == []
