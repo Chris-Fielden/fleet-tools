@@ -637,3 +637,16 @@ def test_a_close_note_that_trips_the_secret_scan_drops_the_reviewer_name(rig, nt
     rig.cycle(6)
     t = rig.get()
     assert t["status"] == "failed" and "Codex" not in t["close_note"] and "withheld" in t["close_note"]
+
+
+def test_a_normal_fix_ticket_cannot_launch_into_the_on_call_folder_in_the_same_cycle(rig, ntfy, herdr_log):
+    stop_after_fail(rig)
+    rig.cycle(0)
+    rig.cycle(6)                                   # failed; on-call ticket OC-1 is open
+    (oc,) = oncall_tickets()
+    clash = mk(type="fix", branch=oc["branch"], parent=rig.id)   # a normal fix ticket on the same branch
+    world(rig, {"name": rig.id.lower(), "agent_status": "idle"})
+    go(rig, 3, 1)
+    assert tk.load_ticket(oc["id"])["status"] == "claimed"
+    assert tk.load_ticket(clash["id"])["status"] == "open"
+    assert agent_starts(herdr_log) == [oc["id"].lower()]

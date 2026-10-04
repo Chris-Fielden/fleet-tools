@@ -490,8 +490,8 @@ def _escalate_stuck_oncall(settings: dict, state: dict, emit, warn) -> None:
         folder = repo / ".worktrees" / oc["branch"].removeprefix("task/")
         if not dp.branch_exists(repo, oc["branch"]) and not (folder.exists() or folder.is_symlink()):
             continue
-        diagnosis = (f"Diagnosis: the on-call launch for {oc['parent']} failed and left {oc['branch']} "
-                     "or its task folder behind, so it cannot be retried. Nothing more will be launched for it.")
+        diagnosis = (f"Diagnosis: the on-call ticket for {oc['parent']} cannot be launched: {oc['branch']} "
+                     "or its task folder already exists (a failed launch left it, or someone made it). Nothing more will be launched for it.")
         try:
             closed = tk.set_status(oc["id"], "failed", allowed_from=("open",),
                                    close_note=_clip(f"Failed: {diagnosis}", tk.CLOSE_NOTE_MAX))

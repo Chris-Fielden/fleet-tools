@@ -125,6 +125,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
             oncall_code, message = lc.launch_oncall(d, settings, warn)
             code = code or oncall_code
             emit(message)
+            tickets = tk.list_tickets()   # the on-call ticket is claimed now: it holds its branch
             break
     # Investigations are read-only and don't compete with build work: one of
     # each kind may start per run.
