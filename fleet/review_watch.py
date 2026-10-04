@@ -35,7 +35,6 @@ from . import ticket as tk
 BLOCKED_AFTER = 10 * 60   # seconds an agent waits for input before a ping
 STALL_AFTER = 30 * 60     # seconds with no commit, note or log output before a ping
 UNRECORDED_GRACE = 2 * 60  # seconds review.sh gets to record a review it just saved
-SENT_LIMIT = 1000
 LOG_TAIL = 256 * 1024
 # Dispatcher log kinds that show a ticket's work moving. (RECONCILE_SKIP and
 # DECISION lines repeat every cycle and say nothing about the agent.)
@@ -65,7 +64,6 @@ def _load_state(warn) -> dict:
 
 
 def _save_state(state: dict) -> None:
-    state["sent"] = state["sent"][-SENT_LIMIT:]
     tk._write_atomic(state_path(), state)
 
 
@@ -148,7 +146,10 @@ def _ping(t: dict, event: str, key: str, state: dict, warn, detail: str | None =
 
 
 def _alert_pings(t: dict, repo: Path, tip: str, agent: dict | None, state: dict,
-                 now: datetime, emit, warn) -> None:
+                 now: datetime, emit, warn, quiet: bool = False) -> None:
+    """The FAIL and not-recorded pings always apply. `quiet` (the ticket is in
+    review, so its agent has stopped and its work is finished) leaves out the
+    blocked and stalled pings and ends any blocked spell."""
     tid, v = t["id"], t["verdict"]
     # 1. A recorded FAIL of this exact tip.
     if v is not None and v["commit"] == tip and v["result"] == "FAIL":
@@ -177,7 +178,7 @@ def _alert_pings(t: dict, repo: Path, tip: str, agent: dict | None, state: dict,
             emit(f"{tid}  {detail}")
             dp.log("ALERT", f"{tid} review_unrecorded {tip[:8]} {kind}")
     # 3. An agent waiting for a person.
-    if agent is not None and agent.get("agent_status") == "blocked":
+    if not quiet and agent is not None and agent.get("agent_status") == "blocked":
         since = state["blocked_since"].setdefault(tid, _stamp(now))
         waited = (now - (_parse(since) or now)).total_seconds()
         if waited >= BLOCKED_AFTER and _ping(
@@ -188,6 +189,8 @@ def _alert_pings(t: dict, repo: Path, tip: str, agent: dict | None, state: dict,
     else:
         state["blocked_since"].pop(tid, None)
     # 4. Nothing has happened for a long time.
+    if quiet:
+        return
     last = _last_activity(t, repo, tip, agent, state, now)
     idle = (now - last).total_seconds()
     if idle >= STALL_AFTER and _ping(t, "stalled", f"{tid}:stalled:{_stamp(last)}", state, warn,
@@ -224,6 +227,7 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
         busy = agents_known and agent is not None and not stopped
         if earned and not busy:
             _ping(t, "ship", f"{t['id']}:ship:{tip}", state, warn)  # a send that failed is retried
+            _alert_pings(t, repo, tip, agent, state, now, emit, warn, quiet=True)
             return
         new = _move(t, "claimed", ("review",), warn)
         if new:
@@ -231,15 +235,17 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             emit(f"{t['id']}  back to In Progress ({why})")
             dp.log("REVIEW_BACK", f"{t['id']} back to claimed: {why}")
             kaneo.mirror_quietly(new, warn)
-        return
-
-    if earned and stopped:
+            t = new   # claimed again: the alert checks below apply in full
+        else:
+            return
+    elif earned and stopped:
         new = _move(t, "review", ("claimed",), warn)
         if new:
             emit(f"{t['id']}  ready to ship: moved to In Review")
             dp.log("REVIEW_READY", f"{t['id']} {tip[:8]} ready to ship")
             kaneo.mirror_quietly(new, warn)
             _ping(new, "ship", f"{t['id']}:ship:{tip}", state, warn)
+            _alert_pings(new, repo, tip, agent, state, now, emit, warn, quiet=True)
         return
     _alert_pings(t, repo, tip, agent, state, now, emit, warn)
 

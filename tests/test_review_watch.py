@@ -455,6 +455,39 @@ def test_dispatcher_log_lines_for_the_ticket_count_but_repeating_ones_do_not(rig
     assert len(ntfy.requests) == 1
 
 
+def test_blocked_then_ready_then_blocked_again_starts_a_new_spell(rig, ntfy):
+    rig.set_agent("blocked")
+    rig.cycle(0)
+    rig.finish()           # idle now, with a PASS and a summary
+    rig.cycle(5)
+    assert rig.get()["status"] == "review"
+    rig.set_agent("blocked")
+    rig.cycle(6)            # back to claimed; blocked afresh
+    rig.cycle(12)
+    assert [t[0] for t in sent(ntfy)] == [f"{rig.id} ready to ship"]
+    rig.cycle(17)
+    assert [t[0] for t in sent(ntfy)][1:] == [f"Agent blocked: {rig.id}"]
+
+
+def test_an_unrecorded_review_is_noticed_on_a_ready_ticket(rig, ntfy):
+    rig.finish()
+    rig.review_file("Claude", "FAIL", age=600)   # saved after the recorded PASS, never recorded
+    rig.cycle()
+    titles = [t[0] for t in sent(ntfy)]
+    assert f"{rig.id} ready to ship" in titles and f"Review not recorded: {rig.id}" in titles
+
+
+def test_an_unrecorded_review_is_noticed_on_a_ticket_in_review(rig, ntfy):
+    rig.finish()
+    rig.cycle()
+    assert rig.get()["status"] == "review"
+    rig.review_file("Claude", "FAIL", age=600)
+    rig.cycle(5)
+    assert [t[0] for t in sent(ntfy)][-1] == f"Review not recorded: {rig.id}"
+    rig.cycle(10)
+    assert len(ntfy.requests) == 2
+
+
 def test_a_ticket_in_review_is_never_called_stalled(rig, ntfy):
     rig.finish()
     rig.cycle(0)

@@ -238,6 +238,12 @@ refuses it inside an agent. A ticket in review still holds its branch and its
 place in `max_running`; `ship` accepts `review` (and `claimed`), and reconcile
 marks either done once the branch is merged.
 
+A claimed ticket whose agent is no longer listed in herdr (its tab was closed)
+does not move to review: it stays `claimed` and shows up as a lost agent. A
+ticket already in review is not moved back for a vanished agent. Recording a
+review again (even a second PASS on the same commit) refreshes the verdict's
+time, so the agent's summary must come after the latest recording.
+
 The same pass sends the alert pings listed in notify-spec.md: recorded FAIL,
 review saved but not recorded (after a 2 minute grace), agent blocked over 10
 minutes, no activity for 30 minutes. Activity is a ticket change (claim, note,
