@@ -47,31 +47,52 @@ def _confirm(question: str) -> bool:
         return False
     try:
         return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
-    except EOFError:
+    except (EOFError, KeyboardInterrupt):
+        print()
         return False
+
+
+class _GateBroken(Exception):
+    pass
+
+
+def _field(repo: Path, wt: Path, branch: str, name: str) -> str:
+    """One gate field. The gate exits 1 when it has review problems, which is
+    normal here; a crash (other exit code, or anything on stderr) is not."""
+    done = _gate(repo, wt, branch, "--field", name)
+    if done.returncode not in (0, 1) or done.stderr.strip():
+        detail = done.stderr.strip().splitlines()[-1:] or [f"exit {done.returncode}"]
+        raise _GateBroken(f"ticket gate --field {name} failed ({detail[0]}); nothing was merged")
+    return done.stdout.strip()
 
 
 def _review_if_needed(repo: Path, name: str, branch: str, script: Path) -> str | None:
     """When the gate wants reviews and lacks them, run them now: both reviewers
     without asking at high risk, or (after a yes) the usual one when the tip
-    has no review at all. The merge script still applies the gate afterwards. Returns a
-    one-line problem, or None. Anything else the gate dislikes is left for the
-    merge script to report: this never decides whether a merge is allowed."""
+    has no review at all. The merge script still applies the gate afterwards.
+    Returns a one-line problem, or None. Anything else the gate dislikes is
+    left for the merge script to report: this never decides whether a merge
+    is allowed."""
     wt = repo / ".worktrees" / name
     review = repo / "scripts" / "review.sh"
     if not wt.is_dir() or not review.is_file():
         return None
-    if _gate(repo, wt, branch, "--field", "ok").stdout.strip() == "yes":
-        return None
+    try:
+        ok, risk = _field(repo, wt, branch, "ok"), _field(repo, wt, branch, "risk")
+        if ok == "yes":
+            return None
+        has_reviews = risk != "high" and _field(repo, wt, branch, "reviews")
+    except _GateBroken as exc:
+        return str(exc)
     env = dict(os.environ)
-    if _gate(repo, wt, branch, "--field", "risk").stdout.strip() == "high":
+    if risk == "high":
         print(f"ship: {branch} is high risk and lacks passing reviews; running both reviewers")
         env["REVIEWER"] = "both"
     else:
         # Below high risk, only the case where the tip has no review at all
         # (small fixes committed after the review) is offered; a review that
         # exists but is not a PASS is for the human to look at.
-        if _gate(repo, wt, branch, "--field", "reviews").stdout.strip():
+        if has_reviews:
             return None
         if not _confirm(f"ship: {branch} has no review of its latest commit. Run scripts/review.sh now?"):
             return None
