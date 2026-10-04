@@ -25,6 +25,7 @@ import urllib.request
 from pathlib import Path
 
 from . import ticket as tk
+from . import webconf
 
 TIMEOUT = 4  # seconds per socket operation (not DNS); use an IP url for a firm limit
 TITLE_MAX = 60
@@ -32,23 +33,31 @@ TITLE_MAX = 60
 # blocked agent now brings in an on-call agent instead); the names stay valid
 # so an older "priorities" setting in notify.json keeps loading.
 EVENTS = ("ready", "urgent", "failed", "proposed", "investigated", "ship", "blocked",
-          "review_failed", "review_unrecorded", "stalled", "oncall", "needs_human")
+          "review_failed", "review_unrecorded", "stalled", "oncall", "needs_human",
+          "shipped", "ship_failed")
 _HEADLINE = {"ready": "Review ready", "urgent": "Urgent ticket", "failed": "Ticket failed",
              "proposed": "Follow-up proposed", "investigated": "Investigation done",
              "ship": "Ready to ship", "blocked": "Agent blocked", "review_failed": "Review FAILED",
              "review_unrecorded": "Review not recorded", "stalled": "Ticket stalled",
-             "oncall": "On-call launched", "needs_human": "Needs a human"}
+             "oncall": "On-call launched", "needs_human": "Needs a human",
+             "shipped": "Shipped", "ship_failed": "Ship refused"}
 # ntfy's own names for its five priorities.
 PRIORITY_NUMBERS = {"min": 1, "low": 2, "default": 3, "high": 4, "max": 5}
 # Per event; override any of them under "priorities" in notify.json.
 PRIORITIES = {"ready": "default", "urgent": "high", "failed": "high", "proposed": "low",
               "investigated": "low", "ship": "default", "blocked": "high",
               "review_failed": "high", "review_unrecorded": "high", "stalled": "default",
-              "oncall": "low", "needs_human": "low"}
+              "oncall": "low", "needs_human": "low", "shipped": "default", "ship_failed": "high"}
 _TAGS = {"ready": ["mag"], "urgent": ["rotating_light"], "failed": ["x"], "proposed": ["bulb"],
          "investigated": ["mag_right"], "ship": ["white_check_mark"], "blocked": ["hand"],
          "review_failed": ["x"], "review_unrecorded": ["warning"], "stalled": ["hourglass"],
-         "oncall": ["pager"], "needs_human": ["sos"]}
+         "oncall": ["pager"], "needs_human": ["sos"], "shipped": ["rocket"],
+         "ship_failed": ["no_entry"]}
+# Events about a failure: their message says why (see _failure_lines).
+FAILURE_EVENTS = ("failed", "oncall", "needs_human")
+# Events whose `detail` is the whole point (the result of a web ship).
+RESULT_EVENTS = ("shipped", "ship_failed")
+BODY_MAX = 900
 
 
 class NotifyError(Exception):
@@ -123,9 +132,76 @@ def event_for_new(ticket: dict) -> str | None:
     return None
 
 
-def _short(text: str) -> str:
+def _short(text: str, limit: int = TITLE_MAX) -> str:
     text = re.sub(r"[\x00-\x1f\x7f\s]+", " ", text).strip()
-    return text if len(text) <= TITLE_MAX else text[:TITLE_MAX - 1] + "…"
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _first_must_fix(ticket: dict) -> str:
+    """The first line of the MUST FIX section of the saved review that failed
+    this ticket's reviewed commit ('' when there is none to read). Best effort."""
+    v = ticket.get("verdict")
+    if v is None or v["result"] != "FAIL" or not ticket.get("repo") or not ticket.get("branch"):
+        return ""
+    try:
+        from . import dispatch as dp
+        from . import risk as rk
+        repo = dp.load_settings()["projects_dir"] / ticket["repo"]
+        reviews = repo / ".worktrees" / ticket["branch"].removeprefix("task/") / ".reviews"
+        for _, info in sorted(rk.latest_reviews(reviews, v["commit"]).items()):
+            if info["verdict"] != "FAIL" or Path(info["file"]).is_symlink():
+                continue
+            must = rk.review_items(Path(info["file"]).read_text(encoding="utf-8"), "MUST FIX")
+            for line in must.splitlines():
+                line = re.sub(r"^[\s*#>_`-]*(\d+[.)]\s*)?", "", line).strip()
+                if line:
+                    return line
+    except Exception:  # best effort: a missing folder or review only means no line
+        return ""
+    return ""
+
+
+def _failure_lines(ticket: dict) -> list[str]:
+    """Why a ticket failed, from what the store holds: the reason (the close
+    note), who reviewed it, how many rounds failed, and the first MUST FIX line."""
+    lines = []
+    note = re.sub(r"^Failed:\s*", "", ticket.get("close_note") or "")
+    reason = re.split(r";\s*(?:failed by:|FAIL rounds:)", note, maxsplit=1)[0].strip()
+    if reason:
+        lines.append(f"Reason: {_short(reason, 300)}")
+    v = ticket.get("verdict")
+    failed = v is not None and v["result"] == "FAIL"
+    if failed:
+        who = sorted(r["reviewer"] for r in v["reviews"].values() if r["result"] == "FAIL")
+        lines.append(f"Reviewer: {_short(', '.join(who), 100)}")
+    rounds = set(ticket.get("fail_commits", []))
+    if failed:
+        rounds.add(v["commit"])
+    if rounds:
+        lines.append(f"FAIL rounds: {len(rounds)}")
+    must = _first_must_fix(ticket)
+    if must:
+        lines.append(f"MUST FIX: {_short(must, 300)}")
+    return lines
+
+
+def _actions(ticket: dict, event: str) -> list[dict]:
+    """Buttons on the notification: open the card; Ship on a ready ticket and
+    Approve on a proposed one. Both only open a confirmation page."""
+    from . import kaneo
+    out = []
+    card = kaneo.card_url(ticket["id"])
+    if card:
+        out.append({"action": "view", "label": "Open card", "url": card})
+    if event == "ship":
+        link = webconf.action_url("ship", ticket["id"])
+        if link:
+            out.append({"action": "view", "label": "Ship", "url": link})
+    elif event == "proposed":
+        link = webconf.action_url("approve", ticket["id"])
+        if link:
+            out.append({"action": "view", "label": "Approve", "url": link})
+    return out
 
 
 def _message(ticket: dict, event: str, cfg: dict, detail: str | None = None) -> dict:
@@ -143,14 +219,26 @@ def _message(ticket: dict, event: str, cfg: dict, detail: str | None = None) -> 
         title = f"{_HEADLINE[event]}: {ticket['id']}"
         text = f"{ticket['type']} · {ticket['status']} · {_short(ticket['title'])}"
     if detail:
-        text += f" · {_short(detail)}"
-    return {
+        text += f" · {_short(detail, 300 if event in RESULT_EVENTS else TITLE_MAX)}"
+    if event in FAILURE_EVENTS:
+        extra = _failure_lines(ticket)
+        if extra:
+            body = "\n".join([text, *extra])
+            # Never let a pasted secret out in a phone notification.
+            text = body if not tk.check_secrets("notification", body) else text
+    message = {
         "topic": cfg["topic"],
         "title": title,
-        "message": text,
+        "message": text[:BODY_MAX],
         "priority": PRIORITY_NUMBERS[cfg["priorities"][event]],
         "tags": _TAGS[event],
     }
+    actions = _actions(ticket, event)
+    if actions:
+        if actions[0]["label"] == "Open card":
+            message["click"] = actions[0]["url"]   # tapping the notification opens the card
+        message["actions"] = actions[:3]
+    return message
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

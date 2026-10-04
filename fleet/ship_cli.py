@@ -20,7 +20,12 @@ class _Parser(argparse.ArgumentParser):
         raise SystemExit(2)
 
 
+_last_message = ""   # the line the run ended with, for the phone ping of a web ship
+
+
 def _fail(message: str, code: int = 1) -> int:
+    global _last_message
+    _last_message = message
     print(f"ship: {message}", file=sys.stderr)
     return code
 
@@ -106,11 +111,64 @@ def _review_if_needed(repo: Path, name: str, branch: str, script: Path) -> str |
     return None
 
 
+def _blocked_lines(repo: Path, wt: Path, branch: str) -> str:
+    """The gate's own BLOCKED lines, joined, for a one-line reason."""
+    done = _gate(repo, wt, branch)
+    lines = [line.strip().removeprefix("BLOCKED: ") for line in done.stdout.splitlines()
+             if line.strip().startswith("BLOCKED:")]
+    return "; ".join(lines) or "the risk level or the reviews do not allow it"
+
+
+def _unattended_answer(repo: Path, wt: Path, branch: str, name: str, expect: str) -> str | int:
+    """Everything a web ship checks BEFORE finish-task runs, because nobody is at a
+    terminal to read what it says: the branch is still at the commit the page
+    showed, and the gate is satisfied with no review being run on the way. Returns
+    what finish-task's prompt is to be answered with (the typed ticket id at high
+    risk, else y), or the exit code of a refusal. finish-task then applies every
+    gate again itself, including the checks."""
+    tip = dp._git(repo, "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}").stdout.strip()
+    if tip != expect:
+        return _fail(f"{branch} is now at {tip[:8]}, not the {expect[:8]} that was confirmed; nothing was merged")
+    try:
+        if _field(repo, wt, branch, "ok") != "yes":
+            return _fail(f"not allowed: {_blocked_lines(repo, wt, branch)}; nothing was merged")
+        risk, word = _field(repo, wt, branch, "risk"), _field(repo, wt, branch, "confirm")
+    except _GateBroken as exc:
+        return _fail(str(exc))
+    if not risk or not word:
+        return _fail("could not work out the risk level; nothing was merged")
+    return word if risk == "high" else "y"
+
+
 def main(argv=None) -> int:
     p = _Parser(prog="ship")
     p.add_argument("id", help="ticket id, like BD-17")
+    p.add_argument("--non-interactive", metavar="COMMIT", dest="expect",
+                   help="used by the web endpoint: ship without a terminal, only if the branch is "
+                        "still at COMMIT and the gate passes with the reviews already on file; "
+                        "sends one phone ping with the result")
     args = p.parse_args(argv)
+    code = _ship(args)
+    if args.expect:
+        _ping_result(args.id, code)
+    return code
 
+
+def _ping_result(ticket_id: str, code: int) -> None:
+    """The one ping of a web ship: shipped, or why not. Never raises."""
+    from . import notify
+    try:
+        t = tk.load_ticket(ticket_id)
+    except (tk.TicketError, tk.TicketInvalid):
+        return
+    if code == 0:
+        notify.notify_quietly(t, "shipped", detail="merged" + (" and marked done" if t["status"] == "done"
+                                                              else f", card still {t['status']}"))
+    else:
+        notify.notify_quietly(t, "ship_failed", detail=_last_message or f"exit {code}")
+
+
+def _ship(args) -> int:
     who = tk.current_creator()
     if who != "human":
         return _fail(f"refusing to run inside an agent (running as {who}); only a human ships")
@@ -141,14 +199,29 @@ def main(argv=None) -> int:
     if not script.is_file():
         return _fail(f"{repo} has no scripts/finish-task.sh")
 
-    problem = _review_if_needed(repo, name, branch, script)
-    if problem:
-        return _fail(problem)
+    answer = None
+    if args.expect:
+        # No terminal: only a ticket already in review, at the confirmed commit.
+        if t["status"] != "review":
+            return _fail(f"{t['id']} is {t['status']}; only a ticket in review can be shipped from the web")
+        wt = repo / ".worktrees" / name
+        if not wt.is_dir():
+            return _fail(f"no worktree at {wt}; nothing was merged")
+        answer = _unattended_answer(repo, wt, branch, name, args.expect)
+        if isinstance(answer, int):
+            return answer
+    else:
+        problem = _review_if_needed(repo, name, branch, script)
+        if problem:
+            return _fail(problem)
 
     # Same terminal, same prompts: nothing is answered or skipped on the
     # human's behalf. FLEET_HOME and the rest of the environment carry over.
+    # (A web ship has no terminal: finish-task's one prompt is answered with
+    # what the confirmation page already made the person do.)
     try:
-        done = subprocess.run(["bash", str(script), name], cwd=repo, env=dict(os.environ))
+        done = subprocess.run(["bash", str(script), name], cwd=repo, env=dict(os.environ),
+                              input=answer + "\n" if answer else None, text=True)
     except OSError as exc:
         return _fail(f"could not run {script}: {exc}")
     if done.returncode != 0:

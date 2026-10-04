@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Wrapper: runs fleet.web:main from the repo this file lives in."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+
+from fleet.web import main  # noqa: E402
+
+sys.exit(main())
