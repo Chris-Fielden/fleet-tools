@@ -14,6 +14,28 @@ Only on a real transition, never on a re-run or a note:
 | `urgent` | An urgent ticket is created (wins over `ready`). |
 | `failed` | A ticket is closed as failed, or an investigation ends failed. |
 | `proposed` | A follow-up ticket is proposed. Off unless `"follow_ups": true`. |
+| `investigated` | An investigation ends done (`dispatch`). |
+| `ship` | `dispatch --watch` moved a ticket to In Review: "<ID> ready to ship", with risk level and title. |
+| `review_failed` | A recorded FAIL verdict for the branch's current tip; names the reviewer that failed. |
+| `review_unrecorded` | A review for the current tip is saved in `.reviews/` but is not on the ticket (`ticket review-result` failed or was never run). |
+| `blocked` | A claimed ticket's agent has waited for input for over 10 minutes. |
+| `stalled` | A claimed ticket has had no commit, note or dispatcher log line for 30 minutes (and herdr reports no change in the agent). |
+
+The last five come from `dispatch --watch` (see `fleet/review_watch.py`). They
+are decided from the stored ticket (verdict, notes), git, the review files, herdr
+and the dispatcher log, never from what the agent says in its summary. Each is
+sent once per commit (per stall, per blocked spell); what was sent is kept in
+`$FLEET_HOME/review-watch.json`, so a restart does not repeat it, and a send that
+failed is tried again on the next cycle.
+
+### Priorities
+
+Each message carries its ntfy priority in the JSON body and in a `Priority`
+header. Defaults: `urgent`, `failed`, `blocked`, `review_failed`,
+`review_unrecorded` = `high`; `ready`, `ship`, `stalled` = `default`;
+`proposed`, `investigated` = `low`. Override any of them in `notify.json`:
+`"priorities": {"stalled": "low", "ship": "high"}` (values: `min`, `low`,
+`default`, `high`, `max`). An unknown event or value makes the file unusable.
 
 Each message holds the ticket id, type, status and a title cut to 60
 characters. The body and notes are never sent. A failed send (server down,

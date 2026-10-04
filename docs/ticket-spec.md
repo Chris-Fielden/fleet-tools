@@ -41,7 +41,7 @@ launching, no hooks in this phase.
 | body | string | 1 to 4,000 characters. |
 | created_by | string | human, claude or codex. Set by the tool, never by the caller (see below). |
 | assignee | string or null | null until the dispatcher claims the ticket; then claude or codex. |
-| status | string | One of: proposed, open, claimed, done, failed, cancelled. |
+| status | string | One of: proposed, open, claimed, review, done, failed, cancelled. `review` (Kaneo: In Review) is set and cleared only by `dispatch --watch`, never by an agent: see "In review" in dispatcher-spec.md. |
 | priority | string, optional | `normal` (the default when absent) or `urgent`; nothing else is accepted. Supplied by the caller (`ticket new --priority`, or `alert`). |
 | risk | string, optional | `low`, `medium` or `high`. Set by the tool when the ticket is filed (see "Risk levels"); never supplied by the caller. Absent on older tickets, which count as `medium`. Only ever goes up. |
 | verdict | object or null | Null until a review is recorded. Then `{result: PASS or FAIL, commit: full id of the commit reviewed, reviewer: the latest, at, reviews: {codex or claude: {result, reviewer}}}`. Written by `ticket review-result` (run by `scripts/review.sh` from the saved review); two reviews of one commit combine (FAIL wins), a review of a new commit replaces it. Information only: the merge gate reads the saved review and the commit itself. Shown by `ticket show` and on the Kaneo card. |
@@ -126,7 +126,7 @@ ticket gate --base BASE --branch BRANCH --worktree DIR [--dir REPO] [--field ris
 ```
 
 - `new` validates everything, saves the ticket, and prints its id.
-- `list` prints one line per ticket, newest first: id, status, type, repo,
+- `list` prints one line per ticket, newest first (`--status review`: oldest first, the review queue): id, status, type, repo,
   branch, title. `--json` prints a JSON array instead.
 - `show` prints the whole ticket in a readable layout, or the raw JSON with
   `--json`.

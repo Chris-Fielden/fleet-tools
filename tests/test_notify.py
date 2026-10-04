@@ -19,7 +19,7 @@ class FakeNtfy:
         class H(BaseHTTPRequestHandler):
             def do_POST(self):
                 n = int(self.headers.get("Content-Length", 0))
-                outer.requests.append({"auth": self.headers.get("Authorization"),
+                outer.requests.append({"auth": self.headers.get("Authorization"), "priority": self.headers.get("Priority"),
                                        "body": json.loads(self.rfile.read(n))})
                 self.send_response(outer.status)
                 self.end_headers()
@@ -92,7 +92,7 @@ def test_plain_build_ticket_is_silent(ntfy):
 def test_urgent_created(ntfy):
     make(priority="urgent")
     assert len(ntfy.requests) == 1
-    assert ntfy.requests[0]["body"]["priority"] == 5
+    assert ntfy.requests[0]["body"]["priority"] == 4 and ntfy.requests[0]["priority"] == "high"
 
 
 def test_failed_close_notifies_but_done_does_not(ntfy):
@@ -151,7 +151,8 @@ def test_redirect_not_followed():
 
 def test_title_is_shortened_and_cleaned():
     msg = notify._message({"id": "BD-1", "type": "build", "status": "open",
-                           "title": "x" * 200 + "\n"}, "failed", "fleet")
+                           "title": "x" * 200 + "\n"}, "failed",
+                           {"topic": "fleet", "priorities": notify.PRIORITIES})
     assert len(msg["message"]) < 100 and "\n" not in msg["message"]
 
 

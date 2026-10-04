@@ -382,7 +382,8 @@ def decide(tickets: list[dict], settings: dict) -> list[Decision]:
     by_id = {t["id"]: t for t in tickets}
     # Investigations are read-only: they neither fill the capacity nor hold a
     # branch. They have their own rules (decide_investigations).
-    claimed = [t for t in tickets if t["status"] == "claimed" and t["type"] != "investigate"]
+    # A ticket in review still holds its branch and its place in the capacity.
+    claimed = [t for t in tickets if t["status"] in ("claimed", "review") and t["type"] != "investigate"]
     decisions = []
     picked = False
     open_tickets = sorted((t for t in tickets if t["status"] == "open" and t["type"] != "investigate"),
@@ -458,9 +459,9 @@ def is_merged(repo: Path, branch: str, since: str | None = None) -> bool:
 
 
 def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None):
-    """Set claimed tickets whose branch was merged to done. Yields the changed
+    """Set claimed (or in-review) tickets whose branch was merged to done. Yields the changed
     tickets."""
-    for t in sorted((t for t in tickets if t["status"] == "claimed" and t["type"] != "investigate"),
+    for t in sorted((t for t in tickets if t["status"] in ("claimed", "review") and t["type"] != "investigate"),
                     key=tk.oldest_first_key):
         repo = settings["projects_dir"] / t["repo"]
         if repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir():
@@ -470,7 +471,7 @@ def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None):
             log("RECONCILE_SKIP", f"{t['id']} {t['branch']} not merged")
             continue
         try:
-            new = tk.set_status(t["id"], "done", allowed_from=("claimed",))
+            new = tk.set_status(t["id"], "done", allowed_from=("claimed", "review"))
         except tk.TicketError as exc:
             log("RECONCILE_SKIP", f"{t['id']} {exc}")
             continue
