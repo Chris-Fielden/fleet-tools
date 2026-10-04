@@ -43,6 +43,9 @@ DEFAULTS = {
     # cap; these launches do not count against max_launches_per_day.
     "oncall_prefix": tk.ONCALL_PREFIX,
     "max_oncall_per_day": 3,
+    # FAIL verdicts on different commits before a claimed ticket is "going in
+    # circles" and truly fails.
+    "fail_rounds_threshold": 8,
     # Non-secret Kaneo values. null means "use what kaneo.json says". The API
     # key and the url (which decides where the key is sent) stay in kaneo.json.
     "kaneo": {"workspace_id": None, "project_icon": "Layout"},
@@ -166,6 +169,8 @@ def _merge(settings: dict, given, path: Path) -> None:
         settings["oncall_prefix"] = given["oncall_prefix"]
     if "max_oncall_per_day" in given:
         settings["max_oncall_per_day"] = _whole(path, given, "max_oncall_per_day", 0, "0 or more")
+    if "fail_rounds_threshold" in given:
+        settings["fail_rounds_threshold"] = _whole(path, given, "fail_rounds_threshold", 1, "1 or more")
     used = list(settings["id_prefixes"].values()) + [settings["emergency_prefix"], settings["oncall_prefix"]]
     if len(set(used)) != len(used):
         raise SettingsError(f"{path}: id prefixes must differ from each other and from emergency_prefix and oncall_prefix")

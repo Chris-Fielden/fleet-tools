@@ -262,8 +262,8 @@ herdr (never from an agent's summary):
 
 1. its agent has been `idle`/`done` for 5 minutes in a row while the branch tip
    is still the commit that got a FAIL;
-2. it has FAIL verdicts on 3 or more different commits (`fail_commits` on the
-   ticket) and the latest verdict is still FAIL (going in circles);
+2. it has FAIL verdicts on `fail_rounds_threshold` (default 8) or more different
+   commits (`fail_commits` on the ticket) and the latest verdict is still FAIL (going in circles);
 3. its agent has been `blocked` (waiting for input) for 20 minutes. Permission
    prompts are never answered; they are failures;
 4. nothing has happened for 45 minutes (no commit, note, log line or herdr
