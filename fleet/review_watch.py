@@ -47,6 +47,7 @@ LOG_TAIL = 256 * 1024
 # DECISION lines repeat every cycle and say nothing about the agent.)
 ACTIVITY_LOG_KINDS = ("LAUNCHED", "RELAUNCHED", "REVIEW_READY", "REVIEW_BACK")
 FAILURE_EVENTS = ("oncall", "needs_human")
+FAILURE_KEYS_KEPT = 500   # sent-keys of closed tickets' failure pings; the oldest go first
 LEFTOVERS_PREFIX = "SHOULD FIX leftovers from"  # saved by `ticket review-result`, not a summary
 
 
@@ -66,7 +67,8 @@ def _load_state(warn) -> dict:
                          blocked_since=data["blocked_since"], seen=data["seen"],
                          stopped_since=data.get("stopped_since", {}),
                          pending=[p for p in data.get("pending", []) if isinstance(p, dict)
-                                  and isinstance(p.get("id"), str) and p.get("event") in FAILURE_EVENTS])
+                                  and isinstance(p.get("id"), str) and p.get("event") in FAILURE_EVENTS
+                                  and isinstance(p.get("detail"), (str, type(None)))])
         else:
             warn(f"{state_path()} has an unexpected shape; starting with an empty one")
     except FileNotFoundError:
@@ -374,12 +376,12 @@ def _fail_ticket(t: dict, reason: str, repo: Path, tip: str, settings: dict, sta
         failed = tk.set_status(tid, "failed", allowed_from=("claimed",),
                                close_note=_clip(f"Failed: {detail}", tk.CLOSE_NOTE_MAX))
     except tk.TicketError as exc:
-        dp.log("FAIL_SKIP", f"{tid} {exc}")
+        lc._safe_log("FAIL_SKIP", f"{tid} {exc}")
         warn(f"{tid}: could not close as failed: {exc}")
         return
     kaneo.mirror_quietly(failed, warn)
     emit(f"{tid}  failed: {detail}; its agent's herdr tab is left open (close it by hand if it is still there)")
-    dp.log("FAILED", f"{tid} {_clip(detail, 200)}")
+    lc._safe_log("FAILED", f"{tid} {_clip(detail, 200)}")
     tickets = tk.list_tickets()
     if t.get("oncall"):
         original = t["parent"]
@@ -398,7 +400,7 @@ def _fail_ticket(t: dict, reason: str, repo: Path, tip: str, settings: dict, sta
         if oc is not None:
             kaneo.mirror_quietly(oc, warn)
             _note(tid, f"On-call ticket {oc['id']} was filed to fix this. {detail}.", warn)
-            dp.log("ONCALL_FILED", f"{oc['id']} for {tid}")
+            lc._safe_log("ONCALL_FILED", f"{oc['id']} for {tid}")
             _notify_failure(failed, "oncall", state, warn, oc["id"])
             return
         why = "the on-call ticket could not be filed"
@@ -413,7 +415,7 @@ def _human(ticket_id: str, note: str, state: dict, warn) -> None:
     except (tk.TicketError, tk.TicketInvalid) as exc:
         warn(f"{ticket_id}: {exc}")
         return
-    dp.log("NEEDS_HUMAN", f"{ticket_id}")
+    lc._safe_log("NEEDS_HUMAN", f"{ticket_id}")
     _notify_failure(ticket, "needs_human", state, warn)
 
 
@@ -489,13 +491,13 @@ def _escalate_stuck_oncall(settings: dict, state: dict, emit, warn) -> None:
         diagnosis = (f"Diagnosis: the on-call launch for {oc['parent']} failed and left {oc['branch']} "
                      "or its task folder behind, so it cannot be retried. Nothing more will be launched for it.")
         try:
-            tk.set_status(oc["id"], "failed", allowed_from=("open",),
-                          close_note=_clip(f"Failed: {diagnosis}", tk.CLOSE_NOTE_MAX))
+            closed = tk.set_status(oc["id"], "failed", allowed_from=("open",),
+                                   close_note=_clip(f"Failed: {diagnosis}", tk.CLOSE_NOTE_MAX))
         except tk.TicketError:
             continue
-        kaneo.mirror_quietly(tk.load_ticket(oc["id"]), warn)
+        kaneo.mirror_quietly(closed, warn)
         emit(f"{oc['id']}  failed: on-call launch left {oc['branch']} behind")
-        dp.log("FAILED", f"{oc['id']} on-call launch left {oc['branch']} behind")
+        lc._safe_log("FAILED", f"{oc['id']} on-call launch left {oc['branch']} behind")
         _note(oc["id"], diagnosis, warn)
         _human(oc["parent"], diagnosis, state, warn)
 
@@ -528,8 +530,10 @@ def check(settings: dict, now: datetime, emit, warn) -> None:
     for name in ("blocked_since", "stopped_since", "seen"):
         state[name] = {k: v for k, v in state[name].items() if k in live}
     # Keys of the failure pings stay: their ticket is closed, and the key is the record that it was sent.
-    state["sent"] = [k for k in state["sent"]
-                     if k.split(":", 1)[0] in live or k.rsplit(":", 1)[-1] in FAILURE_EVENTS]
+    kept = [k for k in state["sent"] if k.split(":", 1)[0] in live]
+    kept_failures = [k for k in state["sent"]
+                     if k.split(":", 1)[0] not in live and k.rsplit(":", 1)[-1] in FAILURE_EVENTS]
+    state["sent"] = kept + kept_failures[-FAILURE_KEYS_KEPT:]
     try:
         _save_state(state)
     except OSError as exc:

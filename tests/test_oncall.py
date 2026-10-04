@@ -14,6 +14,7 @@ from conftest import run
 from fake_kaneo import FakeKaneo
 from fleet import dispatch as dp
 from fleet import notify
+from fleet import review_watch as rw
 from fleet import settings as st
 from fleet import ticket as tk
 from test_dispatch import calls, claim, git, herdr_log, make_repo, mk, projects  # noqa: F401
@@ -561,3 +562,57 @@ def test_oncall_base_needs_an_on_call_ticket_and_a_full_commit(rig):
     rig.edit(oncall_base="a" * 40)                       # not an on-call ticket
     with pytest.raises(tk.TicketError, match="oncall_base"):
         rig.get()
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled", "review", "done"])
+def test_the_on_call_slot_stays_taken_while_any_on_call_agent_runs_whatever_its_status(rig, status):
+    first = tk.create_ticket({"type": "fix", "repo": "app", "branch": "task/oc-a", "title": "a", "body": "b",
+                              "parent": rig.id}, oncall=True)
+    second = tk.create_ticket({"type": "fix", "repo": "app", "branch": "task/oc-b", "title": "b", "body": "b",
+                               "parent": rig.id}, oncall=True)
+    tk.set_status(first["id"], "claimed", allowed_from=("open",), assignee="claude")
+    tk.set_status(first["id"], status, allowed_from=("claimed",))
+    running = {first["id"].lower()}
+    d = dp.decide_oncall(tk.list_tickets(), rig.settings, running)
+    assert [(x.ticket["id"], x.eligible) for x in d] == [(second["id"], False)]
+    assert dp.decide_oncall(tk.list_tickets(), rig.settings, set())[0].eligible
+
+
+def test_a_log_write_that_fails_does_not_stop_recovery(rig, ntfy, monkeypatch):
+    def broken(kind, message):
+        raise OSError("disk full")
+    monkeypatch.setattr(dp, "log", broken)
+    stop_after_fail(rig)
+    rig.cycle(0)
+    rig.cycle(6)
+    assert rig.get()["status"] == "failed" and len(oncall_tickets()) == 1
+    assert [t[0] for t in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it"]
+
+
+def test_a_stuck_on_call_escalation_survives_a_failing_log_write(rig, ntfy, monkeypatch):
+    stop_after_fail(rig)
+    rig.cycle(0)
+    rig.cycle(6)
+    (oc,) = oncall_tickets()
+    (rig.repo / ".worktrees" / oc["branch"].removeprefix("task/")).mkdir()
+    monkeypatch.setattr(dp, "log", lambda kind, message: (_ for _ in ()).throw(OSError("disk full")))
+    rig.cycle(7)
+    assert tk.load_ticket(oc["id"])["status"] == "failed"
+    assert [t[0] for t in sent(ntfy)][-1] == f"{rig.id} needs a human, see notes"
+
+
+def test_failure_ping_keys_of_closed_tickets_are_capped(rig, ntfy, monkeypatch):
+    monkeypatch.setattr(rw, "FAILURE_KEYS_KEPT", 2)
+    rw.state_path().write_text(json.dumps({
+        "sent": [f"X-{n}:oncall" for n in range(5)], "blocked_since": {}, "seen": {}}))
+    rig.cycle()
+    assert json.loads(rw.state_path().read_text())["sent"] == ["X-3:oncall", "X-4:oncall"]
+
+
+def test_a_pending_ping_with_a_bad_detail_is_dropped_on_load(rig):
+    rw.state_path().write_text(json.dumps({
+        "sent": [], "blocked_since": {}, "seen": {},
+        "pending": [{"id": "BD-1", "event": "oncall", "detail": ["x"]},
+                    {"id": "BD-1", "event": "oncall", "detail": "OC-1"}]}))
+    state = rw._load_state(lambda m: None)
+    assert state["pending"] == [{"id": "BD-1", "event": "oncall", "detail": "OC-1"}]

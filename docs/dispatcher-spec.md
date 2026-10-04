@@ -282,7 +282,9 @@ The agent works in a new task folder on branch `task/oc-<failed id>` that starts
 from the failed branch's tip, and then follows the normal ready-to-ship flow.
 It uses the `builder` agent. The slot stays taken while the agent of an on-call
 ticket that has failed is still running in herdr. A failed ticket's own agent tab
-is left open (the line says so); close it by hand. A launch that fails after the
+is left open (the line says so); close it by hand. A closed ticket no longer
+counts against `max_running`, so a still-running old agent can briefly make one
+more agent than `max_running` run. A launch that fails after the
 folder was made is cleaned up (only while the folder and branch are untouched)
 and retried; if they cannot be removed the on-call ticket is closed as failed
 with a diagnosis note and one "needs a human" ping. The two failure pings are
