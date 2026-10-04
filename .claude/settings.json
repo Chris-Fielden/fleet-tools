@@ -60,5 +60,38 @@
   "statusLine": {
     "type": "command",
     "command": "python3 \"$(git rev-parse --show-toplevel)/bin/fleet-statusline\""
+  },
+  "permissions": {
+    "allow": [
+      "Bash(cat *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git diff *)",
+      "Bash(git diff)",
+      "Bash(git log *)",
+      "Bash(git log)",
+      "Bash(git show *)",
+      "Bash(git status *)",
+      "Bash(git status)",
+      "Bash(head *)",
+      "Bash(ls *)",
+      "Bash(ls)",
+      "Bash(pwd)",
+      "Bash(python3 -m pytest *)",
+      "Bash(python3 -m pytest)",
+      "Bash(scripts/ask-codex.sh *)",
+      "Bash(scripts/check.sh *)",
+      "Bash(scripts/check.sh)",
+      "Bash(scripts/review.sh *)",
+      "Bash(scripts/review.sh)",
+      "Bash(tail *)",
+      "Bash(ticket note *)",
+      "Bash(ticket show *)",
+      "Bash(wc *)"
+    ],
+    "deny": [
+      "Bash(git push *)",
+      "Bash(git push)"
+    ]
   }
 }
