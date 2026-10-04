@@ -31,7 +31,13 @@ FIELDS = (
     "created_by", "assignee", "status", "verdict", "created_at", "updated_at",
 )
 # Optional fields: may be absent from a stored ticket.
-OPTIONAL_FIELDS = ("close_note", "base_commit", "seq", "priority", "risk", "notes", "started_at")
+OPTIONAL_FIELDS = ("close_note", "base_commit", "seq", "priority", "risk", "notes", "started_at",
+                   "oncall", "oncall_base", "fail_commits")
+# oncall: true on the fix ticket the dispatcher files for the on-call agent.
+# oncall_base: the failed branch's tip when the ticket failed; the on-call branch
+# starts from exactly that commit, however long it waits for the on-call slot.
+# fail_commits: every commit that got a recorded FAIL, oldest first (a verdict
+# only keeps the latest, and "going in circles" counts rounds).
 CLOSE_NOTE_MAX = 500
 NOTE_MAX = 4000
 REVIEW_KINDS = ("codex", "claude")
@@ -39,6 +45,7 @@ VERDICT_RESULTS = ("PASS", "FAIL")
 REVIEWER_MAX = 80
 NOTES_LIMIT = 50  # notes per ticket
 BODY_MAX = 4000
+ONCALL_BODY_MAX = 12000  # an on-call ticket carries the failed ticket's whole spec (up to BODY_MAX) plus context
 AGENTS = ("claude", "codex")
 CLOSE_OUTCOMES = {"done": "done", "failed": "failed", "cancelled": "cancelled"}
 # Fields a caller may supply when creating a ticket. Everything else in
@@ -60,6 +67,7 @@ TYPE_PREFIX = {
     "investigate": "ID",
 }
 EMERGENCY_PREFIX = "EM"
+ONCALL_PREFIX = "OC"
 COUNTERS_FILE = ".counters"
 AGENT_TICKET_LIMIT = 5      # new tickets per hour, per agent kind
 AGENT_TICKET_WINDOW = 3600  # seconds
@@ -273,7 +281,8 @@ def validate_stored(data) -> list[str]:
         return errors
     if not _is_str(data["id"]) or not ID_RE.fullmatch(data["id"]):
         errors.append("id is not a valid ticket id")
-    _check_common(data, errors)
+    long_ok = data.get("oncall") is True and _is_str(data["body"]) and len(data["body"]) <= ONCALL_BODY_MAX
+    _check_common({**data, "body": data["body"][:BODY_MAX]} if long_ok else data, errors)
     if data["created_by"] not in CREATORS:
         errors.append(f"created_by must be one of: {', '.join(CREATORS)}")
     if data["status"] not in STATUSES:
@@ -290,6 +299,16 @@ def validate_stored(data) -> list[str]:
         errors.append("base_commit must be a git commit id (7 to 40 hex characters)")
     if "risk" in data and data["risk"] not in rk.LEVELS:
         errors.append(f"risk must be one of: {', '.join(rk.LEVELS)}")
+    if "oncall" in data and data["oncall"] is not True:
+        errors.append("oncall must be true when present")
+    base_tip = data.get("oncall_base")
+    if "oncall_base" in data and not (_is_str(base_tip) and re.fullmatch(r"[0-9a-f]{40}", base_tip)
+                                      and data.get("oncall") is True):
+        errors.append("oncall_base must be a full commit id, on an on-call ticket")
+    fails = data.get("fail_commits")
+    if "fail_commits" in data and not (
+            isinstance(fails, list) and all(_is_str(c) and re.fullmatch(r"[0-9a-f]{40}", c) for c in fails)):
+        errors.append("fail_commits must be a list of full commit ids")
     if "started_at" in data and not _is_time(data["started_at"]):
         errors.append("started_at must be a UTC ISO 8601 time like 2025-01-01T00:00:00Z")
     if "notes" in data:
@@ -383,13 +402,15 @@ def list_tickets() -> list[dict]:
     return tickets
 
 
-def id_prefix(fields: dict) -> str:
-    """The id prefix for a new ticket: urgent wins, otherwise by type."""
+def id_prefix(fields: dict, oncall: bool = False) -> str:
+    """The id prefix for a new ticket: on-call, then urgent, otherwise by type."""
     from . import settings  # here, not at the top: settings imports this module
     try:
         cfg = settings.load_settings()
     except settings.SettingsError as exc:
         raise TicketError(str(exc)) from None
+    if oncall:
+        return cfg["oncall_prefix"]
     if fields.get("priority") == "urgent":
         return cfg["emergency_prefix"]
     return cfg["id_prefixes"][fields["type"]]
@@ -462,10 +483,18 @@ def _check_agent_rate(creator: str) -> None:
             f"(the limit is {AGENT_TICKET_LIMIT}). Wait, or ask the human to create it.")
 
 
-def create_ticket(fields: dict, *, needs_approval: bool = False) -> dict:
-    """Validate, check for secrets, assign an id and save. Returns the ticket."""
+def create_ticket(fields: dict, *, needs_approval: bool = False, oncall: bool = False,
+                  oncall_base: str | None = None) -> dict:
+    """Validate, check for secrets, assign an id and save. Returns the ticket.
+    `oncall` (the dispatcher only, a fix ticket) gives it the on-call prefix and flag."""
     creator = current_creator()
-    errors = validate_new(fields)
+    if oncall and (creator != "human" or fields.get("type") != "fix"):
+        raise TicketError("only the dispatcher can file an on-call fix ticket")
+    if oncall_base is not None and not (oncall and re.fullmatch(r"[0-9a-f]{40}", oncall_base)):
+        raise TicketError("oncall_base must be a full commit id, on an on-call ticket")
+    # An on-call body may be longer than BODY_MAX: every other rule still applies.
+    clipped = oncall and isinstance(fields.get("body"), str) and len(fields["body"]) <= ONCALL_BODY_MAX
+    errors = validate_new({**fields, "body": fields["body"][:BODY_MAX]} if clipped else fields)
     if not errors:
         errors += check_secrets(fields["title"], fields["body"])
     if errors:
@@ -494,7 +523,7 @@ def create_ticket(fields: dict, *, needs_approval: bool = False) -> dict:
             if t == "build" and parent_ticket["type"] != "investigate":
                 raise TicketInvalid(["a build ticket's parent must be an investigate ticket"])
         now = _now()
-        new_id, seq = _assign_ids(id_prefix(fields))
+        new_id, seq = _assign_ids(id_prefix(fields, oncall))
         ticket = {
             "id": new_id,
             "type": t,
@@ -515,6 +544,10 @@ def create_ticket(fields: dict, *, needs_approval: bool = False) -> dict:
         }
         if fields.get("priority") is not None:
             ticket["priority"] = fields["priority"]
+        if oncall:
+            ticket["oncall"] = True
+            if oncall_base is not None:
+                ticket["oncall_base"] = oncall_base
         _write_atomic(_ticket_path(ticket["id"]), ticket)
     return ticket
 
@@ -684,6 +717,8 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
             failed = any(r["result"] == "FAIL" for r in reviews.values())
             t["verdict"] = {"result": "FAIL" if failed else "PASS",
                             "commit": commit, "reviewer": reviewer, "at": now, "reviews": reviews}
+            if failed and commit not in t.get("fail_commits", []):
+                t["fail_commits"] = t.get("fail_commits", []) + [commit]
             t["updated_at"] = now
             _write_atomic(_ticket_path(t["id"]), t)
             changed.append(t)

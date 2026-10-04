@@ -39,6 +39,10 @@ DEFAULTS = {
     # emergency_prefix whatever their type.
     "id_prefixes": dict(tk.TYPE_PREFIX),
     "emergency_prefix": tk.EMERGENCY_PREFIX,
+    # On-call: its own reserved slot (one agent at a time) and its own daily
+    # cap; these launches do not count against max_launches_per_day.
+    "oncall_prefix": tk.ONCALL_PREFIX,
+    "max_oncall_per_day": 3,
     # Non-secret Kaneo values. null means "use what kaneo.json says". The API
     # key and the url (which decides where the key is sent) stay in kaneo.json.
     "kaneo": {"workspace_id": None, "project_icon": "Layout"},
@@ -156,9 +160,15 @@ def _merge(settings: dict, given, path: Path) -> None:
         if not isinstance(given["emergency_prefix"], str) or not PREFIX_RE.fullmatch(given["emergency_prefix"]):
             raise SettingsError(f"{path}: emergency_prefix must be two capital letters")
         settings["emergency_prefix"] = given["emergency_prefix"]
-    used = list(settings["id_prefixes"].values()) + [settings["emergency_prefix"]]
+    if "oncall_prefix" in given:
+        if not isinstance(given["oncall_prefix"], str) or not PREFIX_RE.fullmatch(given["oncall_prefix"]):
+            raise SettingsError(f"{path}: oncall_prefix must be two capital letters")
+        settings["oncall_prefix"] = given["oncall_prefix"]
+    if "max_oncall_per_day" in given:
+        settings["max_oncall_per_day"] = _whole(path, given, "max_oncall_per_day", 0, "0 or more")
+    used = list(settings["id_prefixes"].values()) + [settings["emergency_prefix"], settings["oncall_prefix"]]
     if len(set(used)) != len(used):
-        raise SettingsError(f"{path}: id prefixes must differ from each other and from emergency_prefix")
+        raise SettingsError(f"{path}: id prefixes must differ from each other and from emergency_prefix and oncall_prefix")
     if "kaneo" in given:
         k = given["kaneo"]
         if not isinstance(k, dict):

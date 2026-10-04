@@ -43,7 +43,8 @@ def _warn(message: str) -> None:
 
 def _cmd_dry_run(settings: dict) -> int:
     tickets = tk.list_tickets()
-    for d in dp.decide(tickets, settings) + dp.decide_investigations(tickets, settings):
+    for d in (dp.decide(tickets, settings) + dp.decide_investigations(tickets, settings)
+              + dp.decide_oncall(tickets, settings, running_agents(tickets, _warn))):
         print(d.line())
         if d.skip:
             dp.log("DECISION", f"{d.ticket['id']} skip: {d.skip}")
@@ -77,6 +78,19 @@ def _ask_yes_no(question: str) -> bool:
         return False
 
 
+def running_agents(tickets: list[dict], warn) -> frozenset | None:
+    """The lowercase ids of herdr agents that have not stopped, for the on-call slot;
+    None if herdr cannot be asked (the slot is then busy: fail closed). Herdr is
+    only asked when an on-call ticket is waiting."""
+    if not any(t.get("oncall") and t["status"] == "open" for t in tickets):
+        return frozenset()
+    try:
+        return frozenset(a.get("name") for a in lc.list_agents() if a.get("agent_status") not in ("idle", "done"))
+    except lc.LaunchError as exc:
+        warn(f"on-call launch deferred: cannot ask herdr which agents are running ({exc})")
+        return None
+
+
 def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None, checks=None) -> int:
     """The steps of one --once run; returns the exit code. `reserve()` is called
     before each launch and says whether it may go ahead (False: the daily limit
@@ -107,6 +121,22 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     if checks is not None:
         checks(emit, warn)
     tickets = tk.list_tickets()
+    # The on-call agent has its own slot: it starts at once, whatever the normal
+    # queue is doing, and never counts against the daily launch limit.
+    running = running_agents(tickets, warn)
+    for d in dp.decide_oncall(tickets, settings, running):
+        if d.skip and not d.skip.startswith(dp.QUEUE_SKIPS):
+            emit(f"{d.ticket['id']}  on-call not launched: {d.skip}")   # a blocker, not just a queue
+            dp.log("DECISION", f"{d.ticket['id']} skip: {d.skip}")
+        if d.eligible:
+            try:
+                oncall_code, message = lc.launch_oncall(d, settings, warn)
+            except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+                oncall_code, message = 1, f"{d.ticket['id']}  on-call launch failed: {exc}"
+            code = code or oncall_code
+            emit(message)
+            tickets = tk.list_tickets()   # the on-call ticket is claimed now: it holds its branch
+            break
     # Investigations are read-only and don't compete with build work: one of
     # each kind may start per run.
     started = False

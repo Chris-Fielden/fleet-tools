@@ -38,7 +38,7 @@ launching, no hooks in this phase.
 | commit | string or null | Required for review, otherwise null. 7 to 40 lowercase hex characters. |
 | parent | string or null | Required for review and fix; must be the id of an existing ticket. Optional for question; for build, null, or the id of an investigate ticket (a follow-up). |
 | title | string | 1 to 100 characters, a single line. |
-| body | string | 1 to 4,000 characters. |
+| body | string | 1 to 4,000 characters (an on-call ticket may hold up to 12,000: it carries the failed ticket's whole spec). |
 | created_by | string | human, claude or codex. Set by the tool, never by the caller (see below). |
 | assignee | string or null | null until the dispatcher claims the ticket; then claude or codex. |
 | status | string | One of: proposed, open, claimed, review, done, failed, cancelled. `review` (Kaneo: In Review) is set and cleared only by `dispatch --watch`, never by an agent: see "In review" in dispatcher-spec.md. |
@@ -50,6 +50,9 @@ launching, no hooks in this phase.
 | close_note | string, optional | 1 to 500 characters, gitleaks-checked. Set by `ticket close --note`. Absent otherwise. |
 | base_commit | string, optional | Git commit id (7 to 40 hex characters): main's tip when the dispatcher claimed the ticket. Reconcile only counts a `Merge <branch>` commit made after it. Absent on tickets claimed before this field existed (they count any merge in main's history). |
 | seq | integer, optional | Creation sequence, 1 or more, counting up across all tickets. Set by the tool; the tie-breaker when `created_at` is equal. Absent on tickets made before short ids (they count as 0). |
+| oncall | true, optional | Set only on the fix ticket the dispatcher files for the on-call agent after a true failure (prefix `OC`). Never supplied by a caller; an agent cannot file one. |
+| oncall_base | string, optional | On an on-call ticket: the full id of the failed branch's tip when the ticket failed. The on-call branch starts from exactly that commit, however long it waits for the on-call slot. |
+| fail_commits | list, optional | Full ids of every commit that got a recorded FAIL, oldest first. Added by `ticket review-result` (a verdict keeps only the latest, so this is what counts FAIL rounds). |
 | created_at | string | UTC time, ISO 8601, set by the tool. |
 | updated_at | string | UTC time, ISO 8601, set by the tool. |
 
@@ -68,6 +71,7 @@ with no padding: `BD-1`, `BD-2`, `FX-1`, `EM-1`.
 | QN | question |
 | ID | investigate (ideas) |
 | EM | any ticket whose `priority` is `urgent` (wins over the type prefix) |
+| OC | the on-call fix ticket filed after a true failure (`oncall_prefix`; wins over everything) |
 
 - The prefix comes from one lookup table (`TYPE_PREFIX`, plus
   `EMERGENCY_PREFIX`) in `fleet/ticket.py`; those are the defaults, and

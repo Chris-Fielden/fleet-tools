@@ -24,6 +24,8 @@ with a plain message.
 | `tracker` | `local` | backend holding the tickets (see below) |
 | `id_prefixes` | `build BD, fix FX, review RV, question QN, investigate ID` | two capital letters per ticket type |
 | `emergency_prefix` | `EM` | prefix for any urgent ticket |
+| `oncall_prefix` | `OC` | prefix for the on-call fix tickets filed after a true failure |
+| `max_oncall_per_day` | `3` | on-call attempts a day (UTC); they do not count against `max_launches_per_day` |
 | `kaneo.workspace_id` | `null` | used when `kaneo.json` lacks it (the url stays in `kaneo.json`: it decides where the key is sent) |
 | `kaneo.project_icon` | `Layout` | icon of projects the mirror creates |
 
