@@ -48,6 +48,14 @@ if world is not None and cmd in ("workspace list", "workspace create", "tab list
     else:
         out = {"result": {"agents": world["agents"]}}
     json.dump(world, open(world_file, "w"))
+elif cmd == "status server":   # FAKE_HERDR_SERVER: a file that exists while the server "runs"
+    print("status: running" if os.path.exists(os.environ.get("FAKE_HERDR_SERVER", "")) else "status: stopped")
+    sys.exit(0)
+elif args[:1] == ["server"] and len(args) == 1:
+    open(os.environ["FAKE_HERDR_SERVER"], "w").close()
+    sys.exit(0)
+elif cmd == "pane run":
+    out = {"result": {}}
 elif cmd == "workspace create":
     out = {"result": {"workspace": {"workspace_id": "w9", "label": args[args.index("--label") + 1]}}}
 elif cmd == "tab list":
