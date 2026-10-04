@@ -116,7 +116,8 @@ def claude_usage(home: Path, now: datetime) -> dict:
     root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude") / "projects"
     t5, t7 = now - FIVE_HOURS, now - WEEK
     zero = {"fresh_input": 0, "output": 0, "cache_read": 0}
-    five, week = dict(zero), dict(zero)
+    five, week, today = dict(zero), dict(zero), dict(zero)
+    t0 = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
     newest = None
     seen = set()
     unreadable: list[str] = []
@@ -145,12 +146,15 @@ def claude_usage(home: Path, now: datetime) -> dict:
                 week[k] += v
                 if ts >= t5:
                     five[k] += v
+                if ts >= t0:
+                    today[k] += v
             if newest is None or ts > newest:
                 newest = ts
     return {
         "tool": "claude", "limit_known": False,
         "five_hour": _window(tokens=sum(five.values()), recorded_at=newest, breakdown=five),
         "weekly": _window(tokens=sum(week.values()), recorded_at=newest, breakdown=week),
+        "today": _window(tokens=sum(today.values()), recorded_at=newest, breakdown=today),
         "note": "limit unknown: Claude Code does not record its plan limit locally",
         "unreadable": unreadable,
     }

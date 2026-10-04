@@ -13,6 +13,8 @@ from . import service as sv
 from . import settings as st
 from . import ticket as tk
 from . import usage as us
+from .status import snapshot
+from .status_server import DEFAULT_PORT, serve
 
 
 class _Parser(argparse.ArgumentParser):
@@ -32,7 +34,12 @@ def main(argv=None) -> int:
     s.add_argument("--pause", action="store_true", help="wait for Enter at the end (for the desktop launcher)")
     sub.add_parser("stop", help="stop dispatch --watch; agents are left running")
     sub.add_parser("restart", help="stop, then start")
-    sub.add_parser("status", help="herdr, the dispatcher, Kaneo, ntfy and tailscale serve (no secrets)")
+    stat = sub.add_parser("status", help="herdr, the dispatcher, Kaneo, ntfy and tailscale serve (no secrets)")
+    stat.add_argument("--json", action="store_true",
+                      help="the widget snapshot instead: tokens, plan usage, agents, ready to ship, launches")
+    ss = sub.add_parser("status-serve", help="serve that snapshot read-only for the Mac widgets (tailnet only)")
+    ss.add_argument("--host", default="127.0.0.1", help="loopback or tailnet address (default 127.0.0.1)")
+    ss.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"default {DEFAULT_PORT}")
     lg = sub.add_parser("logs", help="tail the dispatcher log and the other fleet logs")
     lg.add_argument("-n", type=int, default=30, metavar="LINES", help="lines per log (default 30)")
     a = sub.add_parser("autostart", help="start the fleet at boot (a systemd --user service); default off")
@@ -43,6 +50,15 @@ def main(argv=None) -> int:
 
     if args.cmd == "doctor":
         return doctor.main()
+    if args.cmd == "status" and args.json:
+        print(json.dumps(snapshot(), indent=2))
+        return 0
+    if args.cmd == "status-serve":
+        try:
+            return serve(args.host, args.port)
+        except (ValueError, OSError) as exc:
+            print(f"fleet: {exc}", file=sys.stderr)
+            return 1
     if args.cmd in ("start", "stop", "restart", "status", "logs", "autostart", "launcher"):
         return _service(args)
 

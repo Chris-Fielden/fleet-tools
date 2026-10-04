@@ -510,7 +510,10 @@ def guard_hook_settings() -> dict:
     missing = [a for a in scripts if not Path(a).is_file()]
     if not scripts or missing:
         raise LaunchError(f"the guard hook scripts are missing: {', '.join(missing) or 'none listed'}")
-    return {"hooks": {"PreToolUse": pre}}
+    bin_dir = HOOKS_DIR.parent.parent / "bin"
+    statusline = bin_dir / "fleet-statusline"
+    return {"hooks": {"PreToolUse": pre},
+            "statusLine": {"type": "command", "command": shlex.join(["python3", str(statusline)])}}
 
 
 def research_folder(ticket_id: str, settings: dict) -> Path:
