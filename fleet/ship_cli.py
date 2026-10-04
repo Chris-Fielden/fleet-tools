@@ -129,7 +129,27 @@ def _conflict_agent(repo: Path, t: dict, settings: dict) -> str | None:
 
 
 def _ship_one(ticket_id: str, in_list: bool = False) -> int:
-    """Ship one ticket; prints what happened and returns the exit code."""
+    """Ship one ticket; prints what happened and returns the exit code. The ticket is reserved
+    for the whole run, so no prep or reconcile agent can start on its branch meanwhile."""
+    try:
+        t = tk.load_ticket(ticket_id)
+    except tk.TicketInvalid as exc:
+        return _fail(f"unknown ticket ID: {exc}")
+    except tk.TicketError as exc:
+        return _fail(str(exc))
+    try:
+        problem = prep.reserve_shipping(t["id"])
+    except OSError as exc:   # fail closed: an agent may be working on it
+        return _fail(f"cannot tell whether an agent is working on {t['id']} ({exc}); nothing was merged")
+    if problem:
+        return _fail(problem)
+    try:
+        return _ship_reserved(t["id"], in_list)
+    finally:
+        prep.release_shipping(t["id"])
+
+
+def _ship_reserved(ticket_id: str, in_list: bool) -> int:
     try:
         t = tk.load_ticket(ticket_id)
     except tk.TicketInvalid as exc:
@@ -140,8 +160,6 @@ def _ship_one(ticket_id: str, in_list: bool = False) -> int:
         return _fail(f"{t['id']} is {t['status']}; only a ticket in review (or still claimed) can be shipped")
     if in_list and t["status"] != "review":
         return _fail(f"{t['id']} is {t['status']}, not in review any more, so it is no longer ready")
-    if t["id"] in prep.locked_ids():
-        return _fail(f"an agent is still working on {t['id']}; wait for its ping")
     repo_name, branch = t.get("repo"), t.get("branch")
     if not repo_name or not branch:
         return _fail(f"{t['id']} has no repo and branch to ship")
@@ -178,6 +196,7 @@ def _ship_one(ticket_id: str, in_list: bool = False) -> int:
         return _fail(f"could not run {script}: {exc}")
     if done.returncode != 0:
         if t["status"] == "review":
+            prep.release_shipping(t["id"])   # the reconcile agent must be able to reserve it
             conflict = _conflict_agent(repo, t, settings)
             if conflict:
                 return _fail(conflict)

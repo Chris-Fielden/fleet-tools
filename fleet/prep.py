@@ -105,7 +105,7 @@ def list_path() -> Path:
 
 
 def _empty() -> dict:
-    return {"covered": [], "jobs": [], "attempts": {"day": "", "n": 0}}
+    return {"covered": [], "jobs": [], "attempts": {"day": "", "n": 0}, "shipping": []}
 
 
 def _load() -> dict:
@@ -122,8 +122,11 @@ def _load() -> dict:
           and isinstance(data.get("attempts"), dict)
           and all(isinstance(j, dict) and isinstance(j.get("name"), str) and isinstance(j.get("ids"), list)
                   and isinstance(j.get("tips"), dict) and j.get("kind") in ("prep", "reconcile") for j in jobs))
-    if not ok:
+    shipping = data.get("shipping", []) if ok else None
+    if not ok or not (isinstance(shipping, list) and all(
+            isinstance(r, dict) and isinstance(r.get("id"), str) and isinstance(r.get("pid"), int) for r in shipping)):
         raise OSError(f"{path} has an unexpected shape")
+    data["shipping"] = shipping
     return data
 
 
@@ -143,12 +146,48 @@ def _state():
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
-def locked_ids() -> set[str]:
-    """Ids of tickets an agent of this module is working on. An unreadable state locks nothing."""
+def _alive(pid: int) -> bool:
     try:
-        return {i for j in _load()["jobs"] for i in j["ids"] if isinstance(i, str)}
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:   # EPERM: it exists
+        return True
+    return True
+
+
+def _busy(state: dict) -> set[str]:
+    """Ids held by an agent job or by a running `ship` (a dead one holds nothing)."""
+    ids = {i for j in state["jobs"] for i in j["ids"] if isinstance(i, str)}
+    return ids | {r["id"] for r in state["shipping"] if _alive(r["pid"])}
+
+
+def locked_ids() -> set[str]:
+    """Ids of tickets an agent job of this module, or a running `ship`, is working on.
+    Raises OSError when the state cannot be read: callers must fail closed, not assume nothing is locked."""
+    return _busy(_load())
+
+
+def reserve_shipping(ticket_id: str) -> str | None:
+    """Claim a ticket for `ship`, atomically with the agent reservations (same lock as _start_job).
+    Returns a one-line problem, or None when it is now reserved."""
+    with _state() as st:
+        if any(ticket_id in j["ids"] for j in st["jobs"]):
+            return f"an agent is still working on {ticket_id}; wait for its ping"
+        if any(r["id"] == ticket_id and r["pid"] != os.getpid() and _alive(r["pid"]) for r in st["shipping"]):
+            return f"{ticket_id} is already being shipped"
+        st["shipping"] = [r for r in st["shipping"] if r["id"] != ticket_id and _alive(r["pid"])]
+        st["shipping"].append({"id": ticket_id, "pid": os.getpid()})
+    return None
+
+
+def release_shipping(ticket_id: str) -> None:
+    """Drop this process's reservation (safe to call twice); one that cannot be written expires with the process."""
+    try:
+        with _state() as st:
+            st["shipping"] = [r for r in st["shipping"] if r["id"] != ticket_id or r["pid"] != os.getpid()]
     except OSError:
-        return set()
+        pass
 
 
 def _stamp(when: datetime) -> str:
@@ -219,7 +258,7 @@ def _manifest(tickets: list[dict], settings: dict) -> dict:
 
 def _fresh(tickets: list[dict], settings: dict, state: dict) -> list[dict]:
     """Tickets in review that no earlier prep pass covered at their current tip."""
-    covered, locked = set(state["covered"]), {i for j in state["jobs"] for i in j["ids"]}
+    covered, locked = set(state["covered"]), _busy(state)
     fresh = []
     for t in review_tickets(tickets):
         tip = tip_of(_repo(t, settings), t["branch"])
@@ -256,7 +295,7 @@ def _start_job(kind: str, tickets: list[dict], settings: dict, warn) -> dict:
     if problem:
         raise lc.LaunchError(problem)
     with _state() as st:
-        locked = {i for j in st["jobs"] for i in j["ids"]}
+        locked = _busy(st)
         if kind == "prep" and any(j["kind"] == "prep" for j in st["jobs"]):
             raise lc.LaunchError("a prep agent is already running")
         tickets = [t for t in tickets if t["id"] not in locked]

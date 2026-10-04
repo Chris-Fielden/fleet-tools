@@ -1,6 +1,7 @@
 """EM-9 review fixes: branch ownership, tips recorded early, keeper validated first, odd reports."""
 
 import json
+import subprocess
 from datetime import datetime, timezone
 
 import pytest
@@ -129,3 +130,49 @@ def test_uncommitted_edits_left_by_the_agent_keep_a_ticket_off_the_list(q, herdr
     set_agent_status(env, "prep", "idle")
     finish_prep(settings)
     assert tk.load_ticket(a["id"])["status"] == "claimed" and prep.read_list() == []
+
+
+def test_a_ticket_being_shipped_is_left_out_of_the_prep_agent(q, herdr_log, env, monkeypatch):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    b, _ = in_review(q, "task/two", {"two.txt": "2"})
+    assert prep.reserve_shipping(a["id"]) is None
+    assert prep.locked_ids() == {a["id"]}
+    settings, _, _ = start_prep()
+    manifest = json.loads((lc.research_folder(prep.FOLDER_ID, settings) / "manifest-prep.json").read_text())
+    assert [t["id"] for t in manifest["tickets"]] == [b["id"]]
+
+
+def test_ship_reserves_its_ticket_while_it_runs_and_releases_it_after(q, herdr_log, env, monkeypatch):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    seen = []
+    real = subprocess.run
+
+    def spy(cmd, *args, **kw):
+        if any("finish-task" in str(c) for c in cmd):
+            seen.append(prep.locked_ids())
+        return real(cmd, *args, **kw)
+
+    monkeypatch.setattr("fleet.ship_cli.subprocess.run", spy)
+    assert ship_main([a["id"]]) == 0
+    assert seen == [{a["id"]}] and prep.locked_ids() == set()
+
+
+def test_ship_refuses_a_ticket_another_ship_holds_and_ignores_a_dead_one(q, env, capsys):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    with prep._state() as st:
+        st["shipping"].append({"id": a["id"], "pid": 1})     # init: alive, not us
+    assert ship_main([a["id"]]) == 1 and "already being shipped" in capsys.readouterr().err
+    with prep._state() as st:
+        st["shipping"] = [{"id": a["id"], "pid": 2 ** 22 + 12345}]   # no such process
+    assert prep.locked_ids() == set()
+    assert ship_main([a["id"]]) == 0
+
+
+def test_an_unreadable_prep_state_fails_closed(q, env, capsys):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    (env / "fleet" / "prep.json").write_text("{not json")
+    with pytest.raises(OSError):
+        prep.locked_ids()
+    assert ship_main([a["id"]]) == 1
+    assert "cannot tell whether an agent is working" in capsys.readouterr().err
+    assert tk.load_ticket(a["id"])["status"] == "review"

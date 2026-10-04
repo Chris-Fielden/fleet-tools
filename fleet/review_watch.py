@@ -616,7 +616,11 @@ def check(settings: dict, now: datetime, emit, warn) -> None:
     _retry_pending(state, warn)
     process_recoveries(settings, state, now, emit, warn)
     recovering = {r["id"] for r in pending_recoveries(warn)}   # a ticket with a record is never checked again
-    locked = prep.locked_ids()   # a prep agent is working on these branches: not ours to judge now
+    try:
+        locked = prep.locked_ids()   # a prep agent is working on these branches: not ours to judge now
+    except OSError as exc:
+        warn(f"prep state unreadable ({exc}); not judging any ticket this cycle")
+        return
     recovering |= locked
     tickets = sorted((t for t in tk.list_tickets()
                       if t["status"] in ("claimed", "review") and t["type"] in dp.LAUNCH_TYPES
