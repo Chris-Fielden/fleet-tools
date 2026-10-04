@@ -16,8 +16,8 @@ def render(data, now=None):
     if title == fs.OFFLINE:
         return [title + " | color=red"]
     href = data.get("kaneo_url")
-    link = f" href={href}" if isinstance(href, str) and href.startswith(("http://", "https://")) else ""
-    lines = [title + link, "---"]
+    link = f" | href={href}" if isinstance(href, str) and href.startswith(("http://", "https://")) else ""
+    lines = [title + link, "---"]  # SwiftBar: text, then " | " and parameters
     lines += [line + link for line in fs.details(data)]
     return lines
 

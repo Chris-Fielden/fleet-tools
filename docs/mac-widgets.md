@@ -16,7 +16,9 @@ tailnet the same way as Kaneo and ntfy:
 The server also checks each request itself: it answers 403 to anything that
 is not from a tailnet address (100.64.0.0/10, fd7a:115c:a1e0::/48), or from
 the local `tailscale serve` proxy on behalf of one, and to Funnel requests.
-It refuses to listen on any other address.
+It refuses to listen on any other address. A request straight to loopback is
+allowed (only counts and ticket ids are in it), so do not put a reverse proxy
+that is not `tailscale serve` in front of it.
 
 Snapshot fields: `tokens` (Claude tokens for the last 5 hours, today and the
 week from local session logs; Codex logs hold only rate limits, so `codex` is
@@ -45,7 +47,8 @@ Copy the files in `contrib/mac/` into one folder (or symlink them). Set
 `http://loic:8788/status.json` (the default).
 
 SwiftBar: install SwiftBar, choose a plugin folder, link `fleet.30s.py` and
-`fleet_summary.py` into it, `chmod +x fleet.30s.py`. Clicking the item or its
+`fleet_summary.py` into it, `chmod +x fleet.30s.py`, and put a `.swiftbarignore` file in the plugin folder
+containing `fleet_summary.py` (it is a helper, not a plugin). Clicking the item or its
 lines opens the Kaneo board.
 
 iTerm2: enable the Python API (Settings > General > Magic), then

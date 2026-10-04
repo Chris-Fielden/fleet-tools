@@ -189,10 +189,10 @@ def _snap(**over):
 def test_widget_summary_estimate_and_real():
     fs = _mac("fleet_summary")
     s = _snap(agents_running=[{"id": "BD-1", "minutes": 3}], ready_to_ship=["BD-2", "BD-3"])
-    assert fs.summarize(s, NOW).endswith("| 1 running | 2 to ship")
+    assert fs.summarize(s, NOW).endswith("· 1 running · 2 to ship")
     assert "(est)" in fs.summarize(s, NOW)
     planusage.record(PAYLOAD, NOW)
-    assert fs.summarize(status.snapshot(NOW), NOW).startswith("5h 42.5% |")
+    assert fs.summarize(status.snapshot(NOW), NOW).startswith("5h 42.5% ·")
 
 
 def test_widget_offline_states():
@@ -212,7 +212,9 @@ def test_swiftbar_plugin_offline_and_board_link():
     bar = _mac("swiftbar_plugin", "fleet.30s.py")
     assert bar.render(None) == ["fleet offline | color=red"]
     lines = bar.render(_snap(kaneo_url="https://kaneo.example/board"), NOW)
-    assert "href=https://kaneo.example/board" in lines[0] and lines[1] == "---"
+    assert lines[0].endswith(" | href=https://kaneo.example/board") and lines[1] == "---"
+    assert lines[0].count("|") == 1 and all(l.count("|") == 1 for l in lines[2:])
+    assert all(l.endswith(" | href=https://kaneo.example/board") for l in lines[2:])
 
 
 def test_iterm_component_text_and_click_target():

@@ -68,7 +68,7 @@ def summarize(data, now=None):
         ready = len(data["ready_to_ship"])
     except (KeyError, TypeError):
         return OFFLINE
-    return f"{usage_text(data)} | {running} running | {ready} to ship"
+    return f"{usage_text(data)} · {running} running · {ready} to ship"
 
 
 def details(data):
@@ -77,10 +77,13 @@ def details(data):
     try:
         for tool, label in (("claude", "Claude"), ("codex", "Codex")):
             for key, name in (("five_hour", "5h"), ("weekly", "week")):
-                w = data["plan_usage"][tool].get(key)
-                if w:
+                plan = data["plan_usage"][tool]
+                w = plan.get(key)
+                if w and not plan.get("estimate"):
                     note = " (stale: window has reset)" if w.get("stale") else ""
-                    out.append(f"{label} {name}: {w['used_percent']:g}% used, resets {w.get('resets_at') or '?'}{note}")
+                    age = w.get("age_seconds")
+                    seen = f", seen {age // 60} min ago" if isinstance(age, int) else ""
+                    out.append(f"{label} {name}: {w['used_percent']:g}% used, resets {w.get('resets_at') or '?'}{seen}{note}")
         if data["plan_usage"]["claude"].get("estimate"):
             t = data["tokens"]["claude"]
             out.append(f"Claude tokens (estimate): 5h {_tokens(t['five_hour'])}, today {_tokens(t['today'])}, "
