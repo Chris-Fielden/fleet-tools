@@ -212,10 +212,11 @@ def dispatcher_pid() -> int | None:
     return None
 
 
-def start_dispatcher() -> bool:
-    """Start `dispatch --watch` in a tab of fleet-tools. True if started."""
-    if dispatcher_running():
-        return False
+START_ATTEMPTS = 3
+
+
+def _start_in_herdr() -> None:
+    """One try at starting the watching dispatcher in a herdr tab."""
     workspace = lc.ensure_workspace(TOOLS_WORKSPACE)
     _close_tabs(workspace)   # a leftover tab of a dispatcher that is gone
     workspace = lc.ensure_workspace(TOOLS_WORKSPACE)   # closing its last tab removes a workspace
@@ -225,11 +226,61 @@ def start_dispatcher() -> bool:
             args += ["--env", f"{name}={os.environ[name]}"]
     created = lc.herdr(*args)
     pane = lc._result(created, "root_pane", "pane_id")
-    lc.herdr("pane", "run", pane, shlex.join([sys.executable, str(ROOT / "bin" / "dispatch"), "--watch"]))
-    if not _wait_for(dispatcher_running):
-        raise ServiceError(f"dispatch --watch did not start (look at the '{DISPATCH_TAB}' tab "
-                           f"of workspace {TOOLS_WORKSPACE})")
-    return True
+    lc.herdr_run("pane", "run", pane, shlex.join([sys.executable, str(ROOT / "bin" / "dispatch"), "--watch"]))
+
+
+def _start_directly() -> None:
+    """Start the watching dispatcher as a plain background process, without herdr."""
+    log = tk.fleet_home() / "dispatch-direct.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(log, "ab") as out:
+            subprocess.Popen([sys.executable, str(ROOT / "bin" / "dispatch"), "--watch"], cwd=ROOT,
+                             stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True)
+    except OSError as exc:
+        raise ServiceError(f"could not start the dispatcher directly: {exc.strerror or type(exc).__name__}") from None
+
+
+def _ping_down(reason: str) -> None:
+    try:
+        notify.send_alert("dispatcher_down", "Fleet dispatcher is down",
+                          f"fleet start could not bring the dispatcher up: {reason}")
+    except notify.NotConfigured:
+        pass
+    except Exception as exc:   # best effort: the error the caller raises is what counts
+        print(f"fleet: warning: could not send the dispatcher-down ping ({type(exc).__name__})",
+              file=sys.stderr)
+
+
+def start_dispatcher() -> bool:
+    """Start the watching dispatcher. Success means a dispatcher process is
+    alive, whatever herdr said: retry through herdr, then start it directly,
+    and send one high ping if it is still down. True if started."""
+    if dispatcher_running():
+        return False
+    problems: list[str] = []
+    for _ in range(START_ATTEMPTS):
+        try:
+            _start_in_herdr()
+        except (lc.LaunchError, ServiceError) as exc:
+            problems.append(str(exc))
+        if _wait_for(dispatcher_running):
+            if problems:
+                print(f"fleet: warning: herdr reported a problem ({problems[-1]}) "
+                      "but the dispatcher is running", file=sys.stderr)
+            return True
+    print("fleet: warning: the dispatcher did not start through herdr"
+          + (f" ({problems[-1]})" if problems else "") + "; starting it directly", file=sys.stderr)
+    try:
+        _start_directly()
+    except ServiceError as exc:
+        problems.append(str(exc))
+    if _wait_for(dispatcher_running):
+        return True
+    reason = problems[-1] if problems else f"nothing appeared after {START_ATTEMPTS} tries and a direct start"
+    _ping_down(reason)
+    raise ServiceError(f"the dispatcher did not start ({reason}; look at the '{DISPATCH_TAB}' tab "
+                       f"of workspace {TOOLS_WORKSPACE})")
 
 
 def stop_dispatcher() -> str:

@@ -76,8 +76,69 @@ def test_start_creates_everything_then_is_idempotent(env, monkeypatch, capsys):
 
 def test_start_fails_plainly_if_dispatcher_never_appears(monkeypatch, capsys):
     monkeypatch.setattr(sv, "dispatcher_running", lambda: False)
+    monkeypatch.setattr(sv, "_start_directly", lambda: None)
     assert usage_cli.main(["start"]) == 1
     assert "did not start" in capsys.readouterr().err
+
+
+def stand_in(env):
+    path = env / "stand-in.py"
+    path.write_text("import sys, time\nsys.path.insert(0, %r)\nfrom fleet import dispatch as dp\n"
+                    "with dp.single_instance():\n    time.sleep(60)\n" % str(ROOT))
+    return path
+
+
+def test_start_succeeds_when_herdr_prints_text_but_the_dispatcher_runs(env, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_HERDR_RUN_AS", str(stand_in(env)))
+    monkeypatch.setenv("FAKE_HERDR_RUN_TEXT", "ok, ran it (not json)")
+    monkeypatch.setattr(sv, "WAIT_SECONDS", 5)
+    assert usage_cli.main(["start"]) == 0
+    assert "dispatcher: started" in capsys.readouterr().out
+    assert sv.dispatcher_running()
+    usage_cli.main(["stop"])
+
+
+def test_start_warns_but_succeeds_when_herdr_fails_yet_the_dispatcher_is_alive(env, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_HERDR_RUN_AS", str(stand_in(env)))
+    monkeypatch.setenv("FAKE_HERDR_RUN_FAIL", "1")
+    monkeypatch.setattr(sv, "WAIT_SECONDS", 5)
+    assert usage_cli.main(["start"]) == 0
+    assert "but the dispatcher is running" in capsys.readouterr().err
+    usage_cli.main(["stop"])
+
+
+def test_start_retries_herdr_then_falls_back_to_a_direct_start(env, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_HERDR_RUN_FAIL", "1")
+    direct = []
+    state = {"up": False}
+    monkeypatch.setattr(sv, "dispatcher_running", lambda: state["up"])
+    monkeypatch.setattr(sv, "_start_directly", lambda: direct.append(1) or state.update(up=True))
+    assert usage_cli.main(["start"]) == 0
+    assert direct == [1]
+    assert len([c for c in calls(env) if c[:2] == ["pane", "run"]]) == sv.START_ATTEMPTS
+    assert "starting it directly" in capsys.readouterr().err
+
+
+def test_start_sends_one_high_ping_when_the_dispatcher_stays_down(env, monkeypatch, capsys):
+    monkeypatch.setattr(sv, "dispatcher_running", lambda: False)
+    monkeypatch.setattr(sv, "_start_directly", lambda: None)
+    sent = []
+    monkeypatch.setattr(sv.notify, "send_alert", lambda *a: sent.append(a))
+    assert usage_cli.main(["start"]) == 1
+    assert len(sent) == 1 and sent[0][0] == "dispatcher_down"
+
+
+def test_the_dispatcher_down_ping_is_high_priority(env, monkeypatch):
+    import json as js
+    from fleet import notify
+    (env / "fleet" / "notify.json").write_text(js.dumps({"url": "http://127.0.0.1:9", "topic": "t"}))
+    (env / "fleet" / "notify.json").chmod(0o600)
+    cfg = notify.load_config()
+    assert cfg["priorities"]["dispatcher_down"] == "high"
+    got = {}
+    monkeypatch.setattr(notify, "_post", lambda c, m, p: got.update(m=m, p=p) or True)
+    assert notify.send_alert("dispatcher_down", "down", "why")
+    assert got["p"] == "high" and got["m"]["priority"] == 4
 
 
 def test_start_refuses_inside_an_agent(env, monkeypatch, capsys):

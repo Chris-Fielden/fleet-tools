@@ -34,25 +34,27 @@ TITLE_MAX = 60
 # so an older "priorities" setting in notify.json keeps loading.
 EVENTS = ("ready", "urgent", "failed", "proposed", "investigated", "ship", "blocked",
           "review_failed", "review_unrecorded", "stalled", "oncall", "needs_human",
-          "shipped", "ship_failed")
+          "shipped", "ship_failed", "dispatcher_down")
 _HEADLINE = {"ready": "Review ready", "urgent": "Urgent ticket", "failed": "Ticket failed",
              "proposed": "Follow-up proposed", "investigated": "Investigation done",
              "ship": "Ready to ship", "blocked": "Agent blocked", "review_failed": "Review FAILED",
              "review_unrecorded": "Review not recorded", "stalled": "Ticket stalled",
              "oncall": "On-call launched", "needs_human": "Needs a human",
-             "shipped": "Shipped", "ship_failed": "Ship refused"}
+             "shipped": "Shipped", "ship_failed": "Ship refused",
+             "dispatcher_down": "Dispatcher down"}
 # ntfy's own names for its five priorities.
 PRIORITY_NUMBERS = {"min": 1, "low": 2, "default": 3, "high": 4, "max": 5}
 # Per event; override any of them under "priorities" in notify.json.
 PRIORITIES = {"ready": "default", "urgent": "high", "failed": "high", "proposed": "low",
               "investigated": "low", "ship": "default", "blocked": "high",
               "review_failed": "high", "review_unrecorded": "high", "stalled": "default",
-              "oncall": "low", "needs_human": "low", "shipped": "default", "ship_failed": "high"}
+              "oncall": "low", "needs_human": "low", "shipped": "default", "ship_failed": "high",
+              "dispatcher_down": "high"}
 _TAGS = {"ready": ["mag"], "urgent": ["rotating_light"], "failed": ["x"], "proposed": ["bulb"],
          "investigated": ["mag_right"], "ship": ["white_check_mark"], "blocked": ["hand"],
          "review_failed": ["x"], "review_unrecorded": ["warning"], "stalled": ["hourglass"],
          "oncall": ["pager"], "needs_human": ["sos"], "shipped": ["rocket"],
-         "ship_failed": ["no_entry"]}
+         "ship_failed": ["no_entry"], "dispatcher_down": ["rotating_light"]}
 # Events about a failure: their message says why (see _failure_lines).
 FAILURE_EVENTS = ("failed", "oncall", "needs_human")
 # Events whose `detail` is the whole point (the result of a web ship).
@@ -254,12 +256,26 @@ def send(ticket: dict, event: str, detail: str | None = None) -> bool:
     cfg = load_config()
     if event == "proposed" and not cfg["follow_ups"]:
         return False
+    return _post(cfg, _message(ticket, event, cfg, detail), cfg["priorities"][event])
+
+
+def send_alert(event: str, title: str, text: str) -> bool:
+    """Send a notification about the fleet itself, not a ticket. Raises
+    NotConfigured or NotifyError."""
+    if event not in EVENTS:
+        raise NotifyError(f"unknown event: {event}")
+    cfg = load_config()
+    message = {"topic": cfg["topic"], "title": _short(title, 120), "message": text[:BODY_MAX],
+               "priority": PRIORITY_NUMBERS[cfg["priorities"][event]], "tags": _TAGS[event]}
+    return _post(cfg, message, cfg["priorities"][event])
+
+
+def _post(cfg: dict, message: dict, priority: str) -> bool:
     headers = {"Content-Type": "application/json"}
     if cfg["token"]:
         headers["Authorization"] = f"Bearer {cfg['token']}"
-    message = _message(ticket, event, cfg, detail)
     # ntfy reads the priority from the JSON body; the header says the same.
-    headers["Priority"] = cfg["priorities"][event]
+    headers["Priority"] = priority
     body = json.dumps(message).encode("utf-8")
     req = urllib.request.Request(cfg["url"], data=body, headers=headers, method="POST")
     opener = urllib.request.build_opener(_NoRedirect)
