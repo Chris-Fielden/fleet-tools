@@ -1,4 +1,4 @@
-"""The `fleet` command. Currently one subcommand: `fleet usage [--json]`."""
+"""The `fleet` command: `fleet usage [--json]` and `fleet doctor`."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 
+from . import doctor
 from . import usage as us
 
 
@@ -21,7 +22,11 @@ def main(argv=None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True, parser_class=_Parser)
     u = sub.add_parser("usage", help="each AI tool's usage against its limits (local, read-only)")
     u.add_argument("--json", action="store_true", help="machine-readable output")
+    sub.add_parser("doctor", help="check the settings, the tools on PATH and the tracker (read-only)")
     args = p.parse_args(argv)
+
+    if args.cmd == "doctor":
+        return doctor.main()
 
     results = us.collect()
     if args.json:

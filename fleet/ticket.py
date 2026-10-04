@@ -385,9 +385,14 @@ def list_tickets() -> list[dict]:
 
 def id_prefix(fields: dict) -> str:
     """The id prefix for a new ticket: urgent wins, otherwise by type."""
+    from . import settings  # here, not at the top: settings imports this module
+    try:
+        cfg = settings.load_settings()
+    except settings.SettingsError as exc:
+        raise TicketError(str(exc)) from None
     if fields.get("priority") == "urgent":
-        return EMERGENCY_PREFIX
-    return TYPE_PREFIX[fields["type"]]
+        return cfg["emergency_prefix"]
+    return cfg["id_prefixes"][fields["type"]]
 
 
 def _read_counters() -> dict:

@@ -7,7 +7,6 @@ will launch the first eligible ticket that `decide` returns.
 from __future__ import annotations
 
 import contextlib
-import copy
 import fcntl
 import json
 import os
@@ -20,27 +19,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import ticket as tk
+from .settings import (  # noqa: F401  (re-exported: callers use dp.load_settings etc.)
+    DEFAULTS, MIN_WATCH_INTERVAL, SettingsError, load_settings, settings_path)
 
-DEFAULTS = {
-    "builder": "claude",
-    "models": {"claude": "sonnet", "codex": None},
-    "max_running": 1,
-    "projects_dir": "~/projects",
-    "research_dir": "~/fleet-research",
-    "herdr_workspace": "fleet",
-    "auto_investigate": True,
-    "max_investigations_per_day": 3,
-    "watch_interval_seconds": 120,
-    "max_launches_per_day": 10,
-}
-MIN_WATCH_INTERVAL = 30
 LAUNCH_TYPES = ("build", "fix")
 MAIN_BRANCHES = ("main", "master")
 TASK_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{1,40}")  # what scripts/new-task.sh accepts
-
-
-class SettingsError(Exception):
-    pass
 
 
 class AlreadyRunning(Exception):
@@ -52,10 +36,6 @@ class WatchRestart(Exception):
 
 
 # --- locations, log, lock ----------------------------------------------------
-
-def settings_path() -> Path:
-    return tk.fleet_home() / "dispatch.json"
-
 
 def log_path() -> Path:
     return tk.fleet_home() / "dispatch.log"
@@ -149,32 +129,7 @@ def add_launches(day: str, n: int = 1) -> None:
         raise
 
 
-# --- settings ----------------------------------------------------------------
-
-def load_settings() -> dict:
-    """Defaults, overridden by $FLEET_HOME/dispatch.json if present."""
-    settings = copy.deepcopy(DEFAULTS)
-    path = settings_path()
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        raw = None
-    except (OSError, UnicodeDecodeError) as exc:
-        raise SettingsError(f"cannot read {path}: {exc}") from None
-    if raw is not None:
-        try:
-            given = json.loads(raw)
-        except ValueError as exc:
-            raise SettingsError(f"{path} is not valid JSON: {exc}") from None
-        _merge(settings, given, path)
-    for key in ("projects_dir", "research_dir"):
-        try:
-            settings[key] = Path(settings[key]).expanduser().absolute()
-        except RuntimeError:
-            raise SettingsError(f"{key} '{settings[key]}' starts with ~ "
-                                "but that home folder can't be found") from None
-    return settings
-
+# --- settings: see fleet/settings.py (re-exported here) ----------------------
 
 def research_problem(settings: dict) -> str | None:
     """Why no research agent can be launched right now, or None. Only Claude's
@@ -202,58 +157,6 @@ def research_dir_problem(settings: dict) -> str | None:
         if here == private or here.is_relative_to(private) or private.is_relative_to(here):
             return f"research_dir {settings['research_dir']} overlaps the fleet's private folder {private}"
     return None
-
-
-def _merge(settings: dict, given, path: Path) -> None:
-    if not isinstance(given, dict):
-        raise SettingsError(f"{path} must contain a JSON object")
-    unknown = sorted(set(given) - set(DEFAULTS))
-    if unknown:
-        raise SettingsError(f"{path}: unknown setting(s): {', '.join(unknown)}")
-    if "builder" in given:
-        if given["builder"] not in tk.AGENTS:
-            raise SettingsError(f"{path}: builder must be one of: {', '.join(tk.AGENTS)}")
-        settings["builder"] = given["builder"]
-    if "models" in given:
-        models = given["models"]
-        if not isinstance(models, dict):
-            raise SettingsError(f"{path}: models must be an object like {{\"claude\": \"sonnet\"}}")
-        for agent, model in models.items():
-            if agent not in tk.AGENTS:
-                raise SettingsError(f"{path}: models has unknown agent '{agent}'")
-            if model is not None and (not isinstance(model, str) or not model.strip()):
-                raise SettingsError(f"{path}: the model for {agent} must be a name or null")
-            settings["models"][agent] = model
-    if "max_running" in given:
-        n = given["max_running"]
-        if isinstance(n, bool) or not isinstance(n, int) or n < 1:
-            raise SettingsError(f"{path}: max_running must be a whole number, 1 or more")
-        settings["max_running"] = n
-    if "auto_investigate" in given:
-        if not isinstance(given["auto_investigate"], bool):
-            raise SettingsError(f"{path}: auto_investigate must be true or false")
-        settings["auto_investigate"] = given["auto_investigate"]
-    if "max_investigations_per_day" in given:
-        n = given["max_investigations_per_day"]
-        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
-            raise SettingsError(f"{path}: max_investigations_per_day must be a whole number, 0 or more")
-        settings["max_investigations_per_day"] = n
-    if "watch_interval_seconds" in given:
-        n = given["watch_interval_seconds"]
-        if isinstance(n, bool) or not isinstance(n, int) or n < MIN_WATCH_INTERVAL:
-            raise SettingsError(f"{path}: watch_interval_seconds must be a whole number, "
-                                f"{MIN_WATCH_INTERVAL} or more")
-        settings["watch_interval_seconds"] = n
-    if "max_launches_per_day" in given:
-        n = given["max_launches_per_day"]
-        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
-            raise SettingsError(f"{path}: max_launches_per_day must be a whole number, 0 or more")
-        settings["max_launches_per_day"] = n
-    for key in ("projects_dir", "research_dir", "herdr_workspace"):
-        if key in given:
-            if not isinstance(given[key], str) or not given[key].strip():
-                raise SettingsError(f"{path}: {key} must be a non-empty string")
-            settings[key] = given[key]
 
 
 # --- git helpers (read-only) -------------------------------------------------

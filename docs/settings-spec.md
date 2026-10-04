@@ -1,0 +1,52 @@
+# Settings, the tracker interface and `fleet doctor`
+
+## One settings file
+
+`$FLEET_HOME/settings.json` holds every personal value. It is optional; a
+missing key uses its default. The older `$FLEET_HOME/dispatch.json` is still
+read, and `settings.json` wins over it. Unknown keys or bad values are an error
+with a plain message.
+**No secrets here**: the Kaneo API key stays in `$FLEET_HOME/kaneo.json`
+(mode 600).
+
+| key | default | meaning |
+|---|---|---|
+| `builder` | `claude` | agent that builds new work (`claude` or `codex`) |
+| `models` | `{"claude": "sonnet", "codex": null}` | model per agent; null = tool default |
+| `max_running` | `1` | tickets claimed or in review at once |
+| `auto_investigate` | `true` | start proposed investigations without approval |
+| `max_investigations_per_day` | `3` | |
+| `watch_interval_seconds` | `120` | at least 30 |
+| `max_launches_per_day` | `10` | |
+| `projects_dir` | `~/projects` | a ticket's repo is `<projects_dir>/<repo>` |
+| `research_dir` | `~/fleet-research` | folder for read-only research agents |
+| `herdr_workspace` | `fleet` | herdr workspace agents are launched in |
+| `tracker` | `local` | backend holding the tickets (see below) |
+| `id_prefixes` | `build BD, fix FX, review RV, question QN, investigate ID` | two capital letters per ticket type |
+| `emergency_prefix` | `EM` | prefix for any urgent ticket |
+| `kaneo.workspace_id` | `null` | used when `kaneo.json` lacks it (the url stays in `kaneo.json`: it decides where the key is sent) |
+| `kaneo.project_icon` | `Layout` | icon of projects the mirror creates |
+
+## The tracker interface (`fleet/tracker.py`)
+
+`Tracker` operations: `list_tickets`, `list_eligible(settings)`, `show`,
+`create`, `approve`, `claim`, `set_status`, `add_note`, `set_risk`, `close`,
+and `check` (health rows for `fleet doctor`). The `ticket` command, the
+`idea`/`alert` shortcuts and the dispatcher's claim/reopen steps go through it.
+
+`LocalTracker` is the first backend: the JSON store under
+`$FLEET_HOME/tickets` (source of truth) plus the one-way Kaneo mirror,
+unchanged. A Kaneo problem is a warning, never a failed operation. A new
+backend implements `Tracker` and is added to both `tracker.BACKENDS` and
+`settings.TRACKERS` (a test keeps them in step). Id prefixes must all differ.
+
+Kaneo columns: an urgent ticket sits in **Urgent** only while it is open.
+Claiming it moves it to **In Progress**, then **In Review**, so Urgent shows
+only emergencies nobody has picked up.
+
+## `fleet doctor`
+
+Read-only. Checks the settings, the tools on PATH (git and gitleaks are
+required; herdr, claude, codex, kubeconform are optional) and that the tracker
+backend works (ticket store readable, Kaneo reachable). Prints names, paths and
+reasons, never a secret. Exits 1 if anything fails.

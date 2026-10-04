@@ -39,6 +39,7 @@ from pathlib import Path
 
 from . import dispatch as dp
 from . import risk as rk
+from . import settings as st
 from . import ticket as tk
 
 TIMEOUT = 10  # seconds per request
@@ -104,6 +105,14 @@ def load_config() -> dict:
         raise KaneoError(f"{path} is not readable JSON") from None
     if not isinstance(data, dict):
         raise KaneoError(f"{path} must contain a JSON object")
+    # workspace_id may instead come from settings.json. The url may not: it
+    # decides where the API key goes, and only kaneo.json (mode 600) is trusted.
+    try:
+        shared = st.load_settings()["kaneo"]
+    except st.SettingsError as exc:
+        raise KaneoError(str(exc)) from None
+    if not data.get("workspace_id") and shared.get("workspace_id"):
+        data["workspace_id"] = shared["workspace_id"]
     for name in ("url", "workspace_id", "api_key"):
         if not isinstance(data.get(name), str) or not data[name]:
             raise KaneoError(f"{path} needs a non-empty '{name}'")
@@ -133,6 +142,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 class Client:
     def __init__(self, cfg: dict):
         self._base = cfg["url"]
+        self.base_url = cfg["url"]
         self._key = cfg["api_key"]
         self.workspace_id = cfg["workspace_id"]
         self._opener = urllib.request.build_opener(_NoRedirect)
@@ -252,6 +262,10 @@ class _Board:
     def __init__(self, client: Client, create: bool):
         self.c = client
         self.create = create
+        try:
+            self.icon = st.load_settings()["kaneo"]["project_icon"]
+        except st.SettingsError:
+            self.icon = st.DEFAULTS["kaneo"]["project_icon"]
         self._projects: dict[str, str | None] = {}
         self._columns: dict[str, dict[str, dict]] = {}
 
@@ -267,7 +281,7 @@ class _Board:
         if found is None and self.create:
             made = self.c.request("POST", "/project", body={
                 "name": repo, "workspaceId": self.c.workspace_id,
-                "icon": "Layout", "slug": _slug_for(repo)})
+                "icon": self.icon, "slug": _slug_for(repo)})
             found = made["id"]
         self._projects[repo] = found
         return found
