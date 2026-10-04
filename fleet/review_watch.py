@@ -24,6 +24,7 @@ was sent is remembered in $FLEET_HOME/review-watch.json. Plain Python.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import subprocess
@@ -47,6 +48,8 @@ LOG_TAIL = 256 * 1024
 # DECISION lines repeat every cycle and say nothing about the agent.)
 ACTIVITY_LOG_KINDS = ("LAUNCHED", "RELAUNCHED", "REVIEW_READY", "REVIEW_BACK")
 FAILURE_EVENTS = ("oncall", "needs_human")
+LAUNCH_FAILED_NOTE = "Launch attempt failed:"   # written by launch.launch_oncall
+LAUNCH_ATTEMPTS = 3       # failed launches of one on-call ticket before it is given up
 FAILURE_KEYS_KEPT = 500   # sent-keys of closed tickets' failure pings; the oldest go first
 LEFTOVERS_PREFIX = "SHOULD FIX leftovers from"  # saved by `ticket review-result`, not a summary
 
@@ -160,18 +163,20 @@ def _ping(t: dict, event: str, key: str, state: dict, warn, detail: str | None =
     return False
 
 
-def _notify_failure(ticket: dict, event: str, state: dict, warn, detail: str | None = None) -> None:
-    """The one ping of a failure (event oncall or needs_human), once per ticket and
-    event. The ticket is closed by now, so the watch cycle no longer visits it: a
-    send that failed is kept in state["pending"] and retried every cycle until it
+def _queue_ping(ticket_id: str, event: str, state: dict, warn, detail: str | None = None) -> None:
+    """Queue the one ping of a failure (event oncall or needs_human), once per ticket
+    and event, and save it to disk at once: it is queued BEFORE the ticket is closed,
+    so an interruption cannot lose it. `_retry_pending` sends it, and keeps trying
+    every cycle (even though the closed ticket is no longer visited) until it
     goes through."""
-    key = f"{ticket['id']}:{event}"
-    if key in state["sent"] or any(p["id"] == ticket["id"] and p["event"] == event for p in state["pending"]):
+    if f"{ticket_id}:{event}" in state["sent"] or any(
+            p["id"] == ticket_id and p["event"] == event for p in state["pending"]):
         return
-    if notify.notify_quietly(ticket, event, warn, detail):
-        state["sent"].append(key)
-    else:
-        state["pending"].append({"id": ticket["id"], "event": event, "detail": detail})
+    state["pending"].append({"id": ticket_id, "event": event, "detail": detail})
+    try:
+        _save_state(state)
+    except OSError as exc:
+        warn(f"cannot save {state_path()} ({exc}); a failure ping could be lost if this stops now")
 
 
 def _retry_pending(state: dict, warn) -> None:
@@ -311,7 +316,8 @@ def _oncall_body(t: dict, detail: str, tip: str, repo: Path) -> str:
              f"WHY IT FAILED: {detail}",
              f"FAILED BRANCH: {t['branch']} at {tip}. Your new branch starts from that commit. "
              "The failed agent's herdr tab may still be open: do not rely on that branch staying put.",
-             "FAILED TICKET SPEC:\n" + _clip(t["body"], 1200)]
+             "FAILED TICKET SPEC (cut at 1200 characters; run `ticket show " + t["id"] + "` for all of it):\n"
+             + _clip(t["body"], 1200)]
     notes = [f"- {n['by']} {n['at']}: {_clip(n['text'], 250)}" for n in t.get("notes", [])[-4:]]
     if notes:
         parts.append("FAILED TICKET NOTES (latest):\n" + "\n".join(notes))
@@ -363,62 +369,74 @@ def _file_oncall(t: dict, detail: str, tip: str, repo: Path, warn) -> dict | Non
 
 
 def _fail_ticket(t: dict, reason: str, repo: Path, tip: str, settings: dict, state: dict,
-                 emit, warn) -> None:
-    """A ticket has truly failed: close it as failed (its card moves to Failed),
-    then file ONE on-call ticket, which the dispatch cycle launches at once in
-    the on-call slot. If it is the on-call ticket that failed, or an on-call
-    attempt was already made, or the daily on-call limit is reached, nothing
-    more is launched: the ticket gets a diagnosis note and one "needs a human"
-    ping. Never pings for a mid-loop FAIL."""
+                 now: datetime, emit, warn) -> None:
+    """A ticket has truly failed. File ONE on-call ticket (which the dispatch cycle
+    launches at once in the on-call slot), queue the one low ping, then close the
+    ticket as failed (its card moves to Failed). Recovery and ping are saved before
+    the close, so an interruption leaves the ticket claimed and the next cycle
+    simply tries again. If it is the on-call ticket that failed, or an on-call
+    attempt was already made, or the daily limit is reached, nothing more is
+    launched: the ticket gets a diagnosis note and one "needs a human" ping.
+    Never pings for a mid-loop FAIL."""
     tid = t["id"]
     detail = f"{reason}; failed by: {_failed_reviewers(t)}; FAIL rounds: {fail_rounds(t)}"
     if tk.check_secrets("close note", detail):   # the reviewer name is free text: scan it like any note
         detail = f"{reason}; FAIL rounds: {fail_rounds(t)} (reviewer name withheld)"
+    oc, why = None, None
+    if not t.get("oncall"):
+        tickets = tk.list_tickets()
+        mine = [x for x in tickets if x.get("oncall") and x["parent"] == tid]
+        cap = settings["max_oncall_per_day"]
+        if len(mine) == 1 and mine[0]["status"] == "open":
+            oc = mine[0]   # filed by an earlier pass that was interrupted before the close
+        elif mine:
+            why = "an on-call attempt was already made for it"
+        elif dp.oncall_today(tickets, now) >= cap:
+            why = f"the daily on-call limit ({cap}) is reached"
+        else:
+            oc = _file_oncall(t, detail, tip, repo, warn)   # an OSError leaves the ticket claimed: retried
+            if oc is None:
+                why = "the on-call ticket could not be filed"
+    if t.get("oncall"):
+        ping = (t["parent"], "needs_human", None)
+    else:
+        ping = (tid, "oncall", oc["id"]) if oc else (tid, "needs_human", None)
+    _queue_ping(*ping[:2], state, warn, ping[2])
     try:
         failed = tk.set_status(tid, "failed", allowed_from=("claimed",),
                                close_note=_clip(f"Failed: {detail}", tk.CLOSE_NOTE_MAX))
     except tk.TicketError as exc:
         lc._safe_log("FAIL_SKIP", f"{tid} {exc}")
         warn(f"{tid}: could not close as failed: {exc}")
+        state["pending"] = [p for p in state["pending"] if (p["id"], p["event"]) != ping[:2]]
+        if oc is not None:
+            with contextlib.suppress(tk.TicketError):
+                tk.set_status(oc["id"], "cancelled", allowed_from=("open",))   # nothing failed after all
         return
     kaneo.mirror_quietly(failed, warn)
     emit(f"{tid}  failed: {detail}; its agent's herdr tab is left open (close it by hand if it is still there)")
     lc._safe_log("FAILED", f"{tid} {_clip(detail, 200)}")
-    tickets = tk.list_tickets()
     if t.get("oncall"):
-        original = t["parent"]
-        diagnosis = (f"Diagnosis: on-call {tid} could not fix {original}. {detail}. Its branch "
+        diagnosis = (f"Diagnosis: on-call {tid} could not fix {t['parent']}. {detail}. Its branch "
                      f"{t['branch']} ends at {tip}. Nothing more will be launched for it.")
         _note(tid, diagnosis, warn)
-        _human(original, diagnosis, state, warn)
-        return
-    cap = settings["max_oncall_per_day"]
-    if any(x.get("oncall") and x["parent"] == tid for x in tickets):
-        why = "an on-call attempt was already made for it"
-    elif dp.oncall_today(tickets) >= cap:
-        why = f"the daily on-call limit ({cap}) is reached"
+        _human(t["parent"], diagnosis, state, warn)
+    elif oc is None:
+        _human(tid, f"Needs a human: {why}. {detail}.", state, warn)
     else:
-        oc = _file_oncall(failed, detail, tip, repo, warn)
-        if oc is not None:
-            kaneo.mirror_quietly(oc, warn)
-            _note(tid, f"On-call ticket {oc['id']} was filed to fix this. {detail}.", warn)
-            lc._safe_log("ONCALL_FILED", f"{oc['id']} for {tid}")
-            _notify_failure(failed, "oncall", state, warn, oc["id"])
-            return
-        why = "the on-call ticket could not be filed"
-    _human(tid, f"Needs a human: {why}. {detail}.", state, warn)
+        kaneo.mirror_quietly(oc, warn)
+        _note(tid, f"On-call ticket {oc['id']} was filed to fix this. {detail}.", warn)
+        lc._safe_log("ONCALL_FILED", f"{oc['id']} for {tid}")
+        _retry_pending(state, warn)
 
 
 def _human(ticket_id: str, note: str, state: dict, warn) -> None:
-    """Note why a human must look at a failed ticket and send the one low ping."""
+    """Note why a human must look at a failed ticket and send the one low ping
+    (queued by the caller before it closed the ticket)."""
     _note(ticket_id, note, warn)
-    try:
-        ticket = tk.load_ticket(ticket_id)
-    except (tk.TicketError, tk.TicketInvalid) as exc:
-        warn(f"{ticket_id}: {exc}")
-        return
     lc._safe_log("NEEDS_HUMAN", f"{ticket_id}")
-    _notify_failure(ticket, "needs_human", state, warn)
+    _queue_ping(ticket_id, "needs_human", state, warn)   # a no-op when already queued
+    _retry_pending(state, warn)
 
 
 # --- the cycle -----------------------------------------------------------------
@@ -474,32 +492,42 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
     _unrecorded_pings(t, repo, tip, state, now, emit, warn)
     reason = _failure_reason(t, repo, tip, agent, state, now)
     if reason:
-        _fail_ticket(t, reason, repo, tip, settings, state, emit, warn)
+        _fail_ticket(t, reason, repo, tip, settings, state, now, emit, warn)
 
 
 def _escalate_stuck_oncall(settings: dict, state: dict, emit, warn) -> None:
-    """An on-call ticket that is open although its branch already exists is one
-    whose launch failed and left its folder or branch behind (they may hold
-    work), so it can never be launched. Close it as failed and tell a human."""
-    for oc in tk.list_tickets():
+    """An open on-call ticket that can never be launched (its repo or start commit
+    is gone, its branch or task folder already exists, or its launch failed
+    LAUNCH_ATTEMPTS times) would sit in the queue for ever. Close it as failed with
+    a diagnosis note and send one "needs a human" ping."""
+    tickets = tk.list_tickets()
+    blocked = {d.ticket["id"]: d.skip for d in dp.decide_oncall(tickets, settings)
+               if d.skip and not d.skip.startswith(dp.QUEUE_SKIPS)}
+    for oc in tickets:
         if not oc.get("oncall") or oc["status"] != "open":
             continue
+        reason = blocked.get(oc["id"])
+        failures = sum(1 for n in oc.get("notes", []) if n["text"].startswith(LAUNCH_FAILED_NOTE))
         repo = settings["projects_dir"] / oc["repo"]
-        if repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir():
-            continue
         folder = repo / ".worktrees" / oc["branch"].removeprefix("task/")
-        if not dp.branch_exists(repo, oc["branch"]) and not (folder.exists() or folder.is_symlink()):
+        if reason is None and failures >= LAUNCH_ATTEMPTS:
+            reason = f"its launch failed {failures} times"
+        elif reason is None and repo.is_dir() and (folder.exists() or folder.is_symlink()):
+            reason = f"its task folder {folder.name} already exists"
+        if reason is None:
             continue
-        diagnosis = (f"Diagnosis: the on-call ticket for {oc['parent']} cannot be launched: {oc['branch']} "
-                     "or its task folder already exists (a failed launch left it, or someone made it). Nothing more will be launched for it.")
+        diagnosis = (f"Diagnosis: the on-call ticket for {oc['parent']} cannot be launched: {reason}. "
+                     "Nothing more will be launched for it.")
+        _queue_ping(oc["parent"], "needs_human", state, warn)   # on disk before the close
         try:
             closed = tk.set_status(oc["id"], "failed", allowed_from=("open",),
                                    close_note=_clip(f"Failed: {diagnosis}", tk.CLOSE_NOTE_MAX))
         except tk.TicketError:
+            state["pending"] = [p for p in state["pending"] if (p["id"], p["event"]) != (oc["parent"], "needs_human")]
             continue
         kaneo.mirror_quietly(closed, warn)
-        emit(f"{oc['id']}  failed: on-call launch left {oc['branch']} behind")
-        lc._safe_log("FAILED", f"{oc['id']} on-call launch left {oc['branch']} behind")
+        emit(f"{oc['id']}  failed: on-call ticket cannot be launched: {reason}")
+        lc._safe_log("FAILED", f"{oc['id']} on-call cannot be launched: {_clip(reason, 150)}")
         _note(oc["id"], diagnosis, warn)
         _human(oc["parent"], diagnosis, state, warn)
 

@@ -284,11 +284,19 @@ It uses the `builder` agent. The slot stays taken while the agent of an on-call
 ticket that has failed is still running in herdr. A failed ticket's own agent tab
 is left open (the line says so); close it by hand. A closed ticket no longer
 counts against `max_running`, so a still-running old agent can briefly make one
-more agent than `max_running` run. A launch that fails after the
-folder was made is cleaned up (only while the folder and branch are untouched)
-and retried; if they cannot be removed the on-call ticket is closed as failed
-with a diagnosis note and one "needs a human" ping. The two failure pings are
-kept in `review-watch.json` (`pending`) and retried every cycle until sent.
+more agent than `max_running` run.
+
+The order is safe against interruption: the on-call ticket is filed and the ping
+is queued (saved in `review-watch.json`, `pending`) BEFORE the ticket is closed,
+so a crash leaves the ticket `claimed` and the next cycle adopts the ticket
+already filed. The ping is retried every cycle until it is sent. A launch that
+fails after the folder was made is cleaned up (only while the folder and branch
+are untouched) and retried, each failure leaving a "Launch attempt failed" note;
+after 3 the on-call ticket is given up. An on-call ticket that can never launch
+(its repo or start commit is gone, its branch or folder already exists, or it
+was given up) is closed as failed with a diagnosis note and one "needs a human"
+ping. The on-call branch starts from the commit saved on the ticket when it
+failed (`oncall_base`), however long it waited for the slot.
 
 Loop guard: at most one on-call attempt per original ticket and at most
 `max_oncall_per_day` (3) a day (an on-call ticket counts from the moment it is

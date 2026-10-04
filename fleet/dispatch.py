@@ -24,6 +24,7 @@ from .settings import (  # noqa: F401  (re-exported: callers use dp.load_setting
 
 LAUNCH_TYPES = ("build", "fix")
 MAIN_BRANCHES = ("main", "master")
+QUEUE_SKIPS = ("the on-call agent is busy", "waiting its turn")   # on-call skips that are just the queue
 TASK_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{1,40}")  # what scripts/new-task.sh accepts
 
 
@@ -397,9 +398,9 @@ def decide_oncall(tickets: list[dict], settings: dict, running: frozenset | set 
                 d.base = base
         if d.skip is None:
             if busy:
-                d.skip = "the on-call agent is busy"
+                d.skip = QUEUE_SKIPS[0]
             elif picked:
-                d.skip = "waiting its turn behind an earlier on-call ticket"
+                d.skip = QUEUE_SKIPS[1] + " behind an earlier on-call ticket"
             else:
                 picked = True
         decisions.append(d)

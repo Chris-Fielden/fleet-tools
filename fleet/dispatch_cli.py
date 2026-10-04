@@ -118,7 +118,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
             asked = False   # whether the on-call slot is free is unknown: try again next cycle
             warn(f"on-call launch deferred: cannot ask herdr which agents are running ({exc})")
     for d in dp.decide_oncall(tickets, settings, running) if asked else []:
-        if d.skip and not d.skip.startswith(("the on-call agent is busy", "waiting its turn")):
+        if d.skip and not d.skip.startswith(dp.QUEUE_SKIPS):
             emit(f"{d.ticket['id']}  on-call not launched: {d.skip}")   # a blocker, not just a queue
             dp.log("DECISION", f"{d.ticket['id']} skip: {d.skip}")
         if d.eligible:

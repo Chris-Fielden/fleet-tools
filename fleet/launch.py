@@ -476,8 +476,13 @@ def launch_oncall(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
                             "(the on-call ticket will be closed as failed)")
             except (LaunchError, OSError, subprocess.TimeoutExpired):
                 kept = "; cleanup failed, so a human must look"
-        tracker.set_status(t["id"], "open", allowed_from=("claimed",), assignee=None)
         _safe_log("LAUNCH_FAILED", f"{t['id']} {exc}")
+        try:
+            tracker.set_status(t["id"], "open", allowed_from=("claimed",), assignee=None)
+            # Counted by review_watch: after a few of these the ticket is given up, not retried for ever.
+            tracker.add_note(t["id"], f"Launch attempt failed: {str(exc)[:200]}")
+        except (tk.TicketError, tk.TicketInvalid, OSError) as exc2:
+            return 1, f"{t['id']}  on-call launch failed: {exc}; and the ticket could not be put back ({exc2}){kept}"
         return 1, f"{t['id']}  on-call launch failed: {exc}; ticket put back to open{kept}"
     _safe_log("LAUNCHED", f"{t['id']} {d.agent} ({d.model or 'default'}) tab {tab} in {d.worktree} (on-call)")
     return 0, f"{t['id']}  launched on-call {d.agent} ({d.model or 'default'}) in tab {tab}"

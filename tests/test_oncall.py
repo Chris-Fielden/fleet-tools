@@ -440,7 +440,7 @@ def test_an_on_call_launch_that_leaves_its_branch_behind_ends_with_a_needs_a_hum
     world(rig, {"name": rig.id.lower(), "agent_status": "idle"})
     go(rig, 3, 6)
     (oc,) = oncall_tickets()
-    assert oc["status"] == "failed" and "left task/oc-" in oc["close_note"]
+    assert oc["status"] == "failed" and "already exists" in oc["close_note"]
     assert [t[0] for t in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it",
                                           f"{rig.id} needs a human, see notes"]
 
@@ -540,7 +540,7 @@ def test_the_on_call_branch_starts_from_the_commit_that_failed_even_if_the_old_b
     assert git(rig.repo, "rev-parse", oc["branch"]).strip() == failed_at
 
 
-def test_a_blocker_that_keeps_an_on_call_ticket_from_launching_is_reported(rig, ntfy, capsys, monkeypatch):
+def test_a_blocker_that_keeps_an_on_call_ticket_from_launching_is_escalated(rig, ntfy, capsys, monkeypatch):
     stop_after_fail(rig)
     rig.cycle(0)
     rig.cycle(6)
@@ -551,8 +551,11 @@ def test_a_blocker_that_keeps_an_on_call_ticket_from_launching_is_reported(rig, 
     path.write_text(json.dumps(data))
     world(rig, {"name": rig.id.lower(), "agent_status": "idle"})
     go(rig, 3, 2)
-    assert "on-call not launched: commit to start from not found" in capsys.readouterr().out
-    assert tk.load_ticket(oc["id"])["status"] == "open"
+    out = capsys.readouterr().out
+    assert "on-call ticket cannot be launched: commit to start from not found" in out
+    assert tk.load_ticket(oc["id"])["status"] == "failed"      # a blocker that never clears: escalated
+    assert [x[0] for x in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it",
+                                          f"{rig.id} needs a human, see notes"]
 
 
 def test_oncall_base_needs_an_on_call_ticket_and_a_full_commit(rig):
@@ -650,3 +653,80 @@ def test_a_normal_fix_ticket_cannot_launch_into_the_on_call_folder_in_the_same_c
     assert tk.load_ticket(oc["id"])["status"] == "claimed"
     assert tk.load_ticket(clash["id"])["status"] == "open"
     assert agent_starts(herdr_log) == [oc["id"].lower()]
+
+
+# --- interruptions and endless retries -----------------------------------------------------
+
+def test_a_ticket_write_that_fails_while_filing_recovery_leaves_the_ticket_claimed_and_retried(rig, ntfy, monkeypatch):
+    real = tk.create_ticket
+    calls_made = []
+
+    def flaky(*args, **kwargs):
+        calls_made.append(1)
+        if len(calls_made) == 1:
+            raise OSError("disk full")
+        return real(*args, **kwargs)
+    monkeypatch.setattr(tk, "create_ticket", flaky)
+    stop_after_fail(rig)
+    rig.cycle(0)
+    rig.cycle(6)                                   # the OC ticket could not be saved
+    assert rig.get()["status"] == "claimed" and oncall_tickets() == [] and ntfy.requests == []
+    assert any("disk full" in w for w in rig.warnings)
+    rig.cycle(7)                                   # next cycle: filed, closed, one ping
+    assert rig.get()["status"] == "failed" and len(oncall_tickets()) == 1
+    assert [t[0] for t in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it"]
+
+
+def test_an_interrupted_close_adopts_the_on_call_ticket_already_filed(rig, ntfy, monkeypatch):
+    stop_after_fail(rig)
+    real_set_status = tk.set_status
+
+    def no_close(ticket_id, status, **kw):
+        if ticket_id == rig.id and status == "failed":
+            raise OSError("killed")
+        return real_set_status(ticket_id, status, **kw)
+    monkeypatch.setattr(tk, "set_status", no_close)
+    rig.cycle(0)
+    try:
+        rig.cycle(6)                               # filed OC-1, then dies before closing
+    except OSError:
+        pass
+    assert rig.get()["status"] == "claimed" and len(oncall_tickets()) == 1
+    assert [p["event"] for p in json.loads(rw.state_path().read_text())["pending"]] == ["oncall"]
+    monkeypatch.setattr(tk, "set_status", real_set_status)
+    rig.cycle(7)                                   # adopts OC-1: no second ticket, no refusal
+    assert rig.get()["status"] == "failed" and len(oncall_tickets()) == 1
+    assert [t[0] for t in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it"]
+
+
+def test_a_failed_close_cancels_the_on_call_ticket_it_just_filed(rig, ntfy, monkeypatch):
+    stop_after_fail(rig)
+    rig.cycle(0)
+    real = tk.set_status
+
+    def refuse(ticket_id, status, **kw):
+        if ticket_id == rig.id and status == "failed":
+            raise tk.TicketError("changed under us")
+        return real(ticket_id, status, **kw)
+    monkeypatch.setattr(tk, "set_status", refuse)
+    rig.cycle(6)
+    (oc,) = oncall_tickets()
+    assert oc["status"] == "cancelled" and ntfy.requests == []
+    assert json.loads(rw.state_path().read_text())["pending"] == []
+
+
+def test_an_on_call_ticket_whose_launch_keeps_failing_is_given_up_after_three_tries(rig, ntfy, herdr_log, monkeypatch):
+    from fleet import launch as lc
+
+    def broken(*args, **kwargs):
+        raise lc.LaunchError("workspace error")
+    monkeypatch.setattr(lc, "start_agent", broken)
+    stop_after_fail(rig)
+    world(rig, {"name": rig.id.lower(), "agent_status": "idle"})
+    go(rig, 3, 12)
+    (oc,) = oncall_tickets()
+    notes = [n["text"] for n in tk.load_ticket(oc["id"])["notes"]]
+    assert len([n for n in notes if n.startswith(rw.LAUNCH_FAILED_NOTE)]) == rw.LAUNCH_ATTEMPTS
+    assert oc["status"] == "failed" and "launch failed 3 times" in oc["close_note"]
+    assert [t[0] for t in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it",
+                                          f"{rig.id} needs a human, see notes"]
