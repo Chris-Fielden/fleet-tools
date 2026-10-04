@@ -100,9 +100,23 @@ If something about your own environment stops you checking a point, mention
 it under SHOULD FIX as a note. MUST FIX is only for real problems in the
 changes themselves.
 
+The MUST FIX bar. Put an item under MUST FIX only if it is one of these four:
+  (1) SECURITY: a security hole, or a bypass of the guard or the merge gate.
+  (2) DATA LOSS: loss or corruption of tickets, state or user data in
+      realistic conditions.
+  (3) WRONG BEHAVIOR: wrong behavior in normal operation.
+  (4) TESTS: failing or weakened tests.
+Everything else is SHOULD FIX, including robustness against rare or
+simultaneous failures (crash-path corner cases, unlikely races, and the like).
+SHOULD FIX items are saved as leftovers, so they are not lost. If you are
+unsure whether something meets the bar, it is SHOULD FIX. Do not FAIL a branch
+for SHOULD FIX items alone.
+
 Reply in this format:
 VERDICT: PASS or FAIL
-MUST FIX: numbered list (empty if none). Each item: file, line, problem, fix.
+MUST FIX: numbered list (empty if none). Each item: file, line, problem, fix,
+  and which of the four reasons applies: SECURITY, DATA LOSS, WRONG BEHAVIOR or
+  TESTS. An item that fits none of the four belongs under SHOULD FIX.
 SHOULD FIX: numbered list of smaller suggestions.
 SUMMARY: two or three sentences."
 

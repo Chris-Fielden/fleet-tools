@@ -801,3 +801,43 @@ def test_fake_kaneo_rejects_the_old_label_paths(kaneo):
     with pytest.raises(HTTPError) as err:
         urlopen(req)
     assert err.value.code == 404
+
+
+# --- the written MUST FIX bar --------------------------------------------------
+
+def prompt_recorder(bindir, name, log):
+    """A fake reviewer that saves every argument it was given (the prompt)."""
+    bindir.mkdir(exist_ok=True)
+    p = bindir / name
+    p.write_text("#!/bin/sh\n"
+                 'if [ "$1" = "login" ]; then exit 0; fi\n'
+                 f'for a in "$@"; do printf "%s\\n" "$a"; done >> {log}\n'
+                 'echo "VERDICT: PASS"\necho "SUMMARY: fake"\n')
+    p.chmod(p.stat().st_mode | stat.S_IEXEC)
+
+
+@pytest.mark.parametrize("kind", ["codex", "claude"])
+def test_review_prompt_has_the_must_fix_bar(task, env, kind):
+    commit_in(task, "fleet/x.py")
+    log = env / f"{kind}-prompt.txt"
+    prompt_recorder(env / "bin", kind, log)
+    r = run_review(task, env / "bin", REVIEWER=kind)
+    assert r.returncode == 0, r.stdout + r.stderr
+    text = log.read_text()
+    assert "MUST FIX bar" in text
+    for reason in ("SECURITY", "DATA LOSS", "WRONG BEHAVIOR", "TESTS"):
+        assert reason in text
+    assert "guard or the merge gate" in text
+    assert "failing or weakened tests" in text
+    assert "rare or\nsimultaneous failures" in text and "SHOULD FIX" in text
+    assert "which of the four reasons applies" in text
+
+
+def test_both_reviewers_get_the_same_bar(task, env):
+    commit_in(task, "fleet/x.py")
+    logs = {k: env / f"{k}-p.txt" for k in ("codex", "claude")}
+    for k, log in logs.items():
+        prompt_recorder(env / "bin", k, log)
+    assert run_review(task, env / "bin", REVIEWER="both").returncode == 0
+    bar = lambda t: t[t.index("The MUST FIX bar"):t.index("SUMMARY: two")]
+    assert bar(logs["codex"].read_text()) == bar(logs["claude"].read_text())
