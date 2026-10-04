@@ -51,9 +51,12 @@ class ServiceError(Exception):
 
 def _command(env_var: str, default: str) -> list[str]:
     try:
-        return shlex.split(os.environ.get(env_var) or default)
+        words = shlex.split(os.environ.get(env_var) or default)
     except ValueError:
-        raise ServiceError(f"${env_var} is not a valid command line") from None
+        words = []
+    if not words:
+        raise ServiceError(f"${env_var} is not a valid command line")
+    return words
 
 
 def _run(cmd: list[str], timeout: float = 15):
@@ -135,9 +138,14 @@ def _lock_path() -> Path:
 def dispatcher_running() -> bool:
     """True if some dispatch holds the dispatcher lock. Never keeps the lock."""
     path = _lock_path()
-    if not path.is_file():
-        return False
     try:
+        info = path.stat()
+    except OSError:
+        return False
+    held = _flock_held_in_proc(info)
+    if held is not None:
+        return held
+    try:   # no /proc/locks: take the lock for a moment instead
         with open(path, "a") as fh:
             try:
                 fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -147,6 +155,18 @@ def dispatcher_running() -> bool:
     except OSError:
         return False
     return False
+
+
+def _flock_held_in_proc(info) -> bool | None:
+    """Whether /proc/locks lists a flock on this file; None if it cannot be read.
+    Unlike taking the lock, this can never make a starting dispatcher lose it."""
+    try:
+        text = Path("/proc/locks").read_text()
+    except OSError:
+        return None
+    want = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}"
+    return any(len(f) > 5 and f[1] == "FLOCK" and f[5] == want
+               for f in (line.split() for line in text.splitlines()))
 
 
 def dispatcher_pid() -> int | None:
@@ -163,11 +183,13 @@ def dispatcher_pid() -> int | None:
     return None
 
 
-def start_dispatcher(workspace: str) -> bool:
-    """Start `dispatch --watch` in a tab of `workspace`. True if started."""
+def start_dispatcher() -> bool:
+    """Start `dispatch --watch` in a tab of fleet-tools. True if started."""
     if dispatcher_running():
         return False
+    workspace = lc.ensure_workspace(TOOLS_WORKSPACE)
     _close_tabs(workspace)   # a leftover tab of a dispatcher that is gone
+    workspace = lc.ensure_workspace(TOOLS_WORKSPACE)   # closing its last tab removes a workspace
     args = ["tab", "create", "--workspace", workspace, "--cwd", str(ROOT), "--label", DISPATCH_TAB, "--no-focus"]
     for name in ("FLEET_HOME", "FLEET_HERDR"):
         if os.environ.get(name):
@@ -206,8 +228,7 @@ def cmd_start(pause: bool = False) -> int:
     print("herdr: " + ("started in the background" if started else "already running"))
     for name in dict.fromkeys((settings["herdr_workspace"], TOOLS_WORKSPACE)):
         print(f"workspace {name}: {lc.ensure_workspace(name)}")
-    tools = lc.ensure_workspace(TOOLS_WORKSPACE)
-    if start_dispatcher(tools):
+    if start_dispatcher():
         print(f"dispatcher: started in tab '{DISPATCH_TAB}' of {TOOLS_WORKSPACE}")
     else:
         print("dispatcher: already running")
@@ -288,21 +309,36 @@ def _tailscale_rows() -> list[tuple[str, str, str]]:
     except ValueError:
         return [("warn", "tailscale serve", "tailscale printed something unreadable")]
     rows = []
-    for host, conf in sorted((data.get("Web") or {}).items()):
-        for path, handler in sorted(((conf or {}).get("Handlers") or {}).items()):
-            target = handler.get("Proxy") or handler.get("Path") or handler.get("Text") and "(text)" or "?"
-            if "@" in target:
+    if not isinstance(data, dict):
+        return [("warn", "tailscale serve", "tailscale printed something unexpected")]
+    web = data.get("Web") if isinstance(data.get("Web"), dict) else {}
+    tcp = data.get("TCP") if isinstance(data.get("TCP"), dict) else {}
+    for host, conf in sorted(web.items()):
+        handlers = conf.get("Handlers") if isinstance(conf, dict) else None
+        for path, handler in sorted((handlers if isinstance(handlers, dict) else {}).items()):
+            if not isinstance(handler, dict):
+                continue
+            target = handler.get("Proxy") or handler.get("Path") or (handler.get("Text") and "(text)") or "?"
+            if not isinstance(target, str) or "@" in target:
                 target = "(hidden)"
             rows.append(("ok", "tailscale serve", f"{host}{path} -> {target}"))
-    for port, conf in sorted((data.get("TCP") or {}).items()):
+    for port, conf in sorted(tcp.items()):
         if isinstance(conf, dict) and conf.get("TCPForward"):
             rows.append(("ok", "tailscale serve", f"tcp {port} -> {conf['TCPForward']}"))
     return rows or [("off", "tailscale serve", "no entries")]
 
 
 def _autostart_row() -> tuple[str, str, str]:
-    on = unit_path().is_file()
-    return ("ok" if on else "off", "autostart", "on" if on else "off (fleet autostart on)")
+    if not unit_path().is_file():
+        return ("off", "autostart", "off (fleet autostart on)")
+    try:
+        proc = _run(_command("FLEET_SYSTEMCTL", "systemctl") + ["--user", "is-enabled", UNIT_NAME])
+    except ServiceError as exc:
+        return ("warn", "autostart", f"service file installed, but systemd could not be asked ({exc})")
+    answer = proc.stdout.strip() or "unknown"
+    if proc.returncode == 0:
+        return ("ok", "autostart", f"on (service {answer})")
+    return ("warn", "autostart", f"service file installed but the service is {answer}; run fleet autostart on")
 
 
 def status_rows() -> list[tuple[str, str, str]]:
@@ -364,10 +400,12 @@ def unit_path() -> Path:
     return Path(config) / "systemd" / "user" / UNIT_NAME
 
 
-def _unit_quote(word: str) -> str:
+def _unit_quote(word: str, command: bool = False) -> str:
+    """Quote for a service file. `$` only needs doubling in ExecStart/ExecStop."""
     if any(c in word for c in "\n\r"):
         raise ServiceError("a path with a line break cannot go in a service file")
-    return '"' + word.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$") + '"'
+    word = word.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    return '"' + (word.replace("$", "$$") if command else word) + '"'
 
 
 def unit_text() -> str:
@@ -377,10 +415,12 @@ def unit_text() -> str:
             env[name] = os.environ[name]
     exe = [sys.executable, str(ROOT / "bin" / "fleet")]
     lines = ["[Unit]", "Description=Start the agent fleet (herdr and the dispatcher)",
-             "After=network-online.target", "", "[Service]", "Type=oneshot", "RemainAfterExit=yes"]
+             "Wants=network-online.target", "After=network-online.target", "",
+             # KillMode=process: stopping the unit (or logging out) must not kill herdr or the agents.
+             "[Service]", "Type=oneshot", "RemainAfterExit=yes", "KillMode=process"]
     lines += [f"Environment={_unit_quote(f'{k}={v}')}" for k, v in env.items()]
-    lines += ["ExecStart=" + " ".join(_unit_quote(w) for w in exe + ["start"]),
-              "ExecStop=" + " ".join(_unit_quote(w) for w in exe + ["stop"]),
+    lines += ["ExecStart=" + " ".join(_unit_quote(w, True) for w in exe + ["start"]),
+              "ExecStop=" + " ".join(_unit_quote(w, True) for w in exe + ["stop"]),
               "", "[Install]", "WantedBy=default.target", ""]
     return "\n".join(lines)
 
@@ -455,6 +495,9 @@ def cmd_launcher(state: str) -> int:
     if state == "on":
         text = launcher_text()
         for p in paths:
+            if p.parent.name == "Desktop" and not p.parent.is_dir():
+                print(f"no {p.parent} folder, so no desktop icon was made there")
+                continue
             _write(p, text, 0o755)
             print(f"launcher installed: {p}")
         return 0

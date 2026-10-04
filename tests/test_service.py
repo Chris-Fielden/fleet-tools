@@ -168,6 +168,7 @@ def test_autostart_on_off_uses_the_fake_systemctl_only(env, capsys):
     unit = env / "home" / ".config" / "systemd" / "user" / "fleet.service"
     text = unit.read_text()
     assert "bin/fleet" in text and "WantedBy=default.target" in text and "ExecStop=" in text
+    assert "KillMode=process" in text   # stopping the unit must not kill herdr or the agents
     assert "sudo loginctl enable-linger" in capsys.readouterr().out
     log = (env / "FLEET_SYSTEMCTL.log").read_text()
     assert "--user enable fleet.service" in log and "daemon-reload" in log
@@ -182,7 +183,14 @@ def test_autostart_off_when_never_on(env, capsys):
     assert not (env / "FLEET_SYSTEMCTL.log").exists()
 
 
+def test_launcher_skips_a_missing_desktop_folder(env, capsys):
+    assert usage_cli.main(["launcher", "on"]) == 0
+    assert "no desktop icon" in capsys.readouterr().out
+    assert sv.launcher_paths()[0].is_file() and not (env / "home" / "Desktop").exists()
+
+
 def test_launcher_installs_in_both_places(env):
+    (env / "home" / "Desktop").mkdir()
     assert usage_cli.main(["launcher", "on"]) == 0
     paths = sv.launcher_paths()
     assert len(paths) == 2 and all(p.is_file() for p in paths)
@@ -195,7 +203,7 @@ def test_launcher_installs_in_both_places(env):
 def test_restart_stops_then_starts(monkeypatch):
     order = []
     monkeypatch.setattr(sv, "stop_dispatcher", lambda: order.append("stop") or "stopped")
-    monkeypatch.setattr(sv, "start_dispatcher", lambda ws: order.append("start") or True)
+    monkeypatch.setattr(sv, "start_dispatcher", lambda: order.append("start") or True)
     monkeypatch.setattr(sv, "dispatcher_running", lambda: True)
     assert usage_cli.main(["restart"]) == 0
     assert order == ["stop", "start"]
@@ -206,3 +214,25 @@ def test_dispatch_lock_records_its_pid(env):
     with dp.single_instance():
         assert (env / "fleet" / "dispatch.lock").read_text() == str(os.getpid())
         assert sv.dispatcher_running()
+
+
+def test_a_blank_command_override_is_a_plain_error(monkeypatch, capsys):
+    monkeypatch.setenv("FLEET_HERDR", "  ")
+    assert usage_cli.main(["start"]) == 1
+    assert "FLEET_HERDR is not a valid command" in capsys.readouterr().err
+
+
+def test_status_survives_odd_tailscale_output(env, monkeypatch, capsys):
+    ts = env / "ts"
+    ts.write_text("#!/bin/sh\necho '[1,2]'\n")
+    ts.chmod(0o755)
+    monkeypatch.setenv("FLEET_TAILSCALE", str(ts))
+    usage_cli.main(["status"])
+    assert "unexpected" in capsys.readouterr().out
+
+
+def test_status_says_when_the_service_is_installed_but_not_enabled(env, capsys):
+    usage_cli.main(["autostart", "on"])
+    (env / "FLEET_SYSTEMCTL").write_text("#!/bin/sh\necho disabled\nexit 1\n")
+    usage_cli.main(["status"])
+    assert "service is disabled" in capsys.readouterr().out
