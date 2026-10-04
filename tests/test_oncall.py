@@ -7,6 +7,7 @@ agent was blocked for 20 minutes, or nothing happened for 45 minutes. It is then
 closed as failed and one on-call agent is launched at once in its own slot.
 """
 import json
+from pathlib import Path
 
 import pytest
 
@@ -180,7 +181,8 @@ def test_a_stopped_agent_closes_the_ticket_and_launches_one_on_call_at_once(rig,
     assert oc["id"] == "OC-1" and oc["type"] == "fix" and oc["parent"] == rig.id and oc["oncall"] is True
     assert oc["status"] == "claimed" and oc["assignee"] == "claude"
     assert "OC-1" in failed["notes"][-1]["text"]                  # the failed ticket points at it
-    assert "THE FULL SPEC TEXT" in oc["body"] and "a note from the agent" in oc["body"]
+    assert "THE FULL SPEC TEXT" in oc["body"]
+    assert any("a note from the agent" in n["text"] for n in oc["notes"])
     assert "boom is wrong" in oc["body"] and "tidy" not in oc["body"]   # MUST FIX only
     assert "stopped" in oc["body"] and tip in oc["body"]
     assert agent_starts(herdr_log) == ["oc-1"]
@@ -256,7 +258,7 @@ def test_a_failed_on_call_ticket_launches_nothing_more_and_sends_one_needs_a_hum
     assert [(t[0], t[2]) for t in sent(ntfy)] == [
         (f"{rig.id} failed, on-call OC-1 is on it", "low"), (f"{rig.id} needs a human, see notes", "low")]
     assert len(oncall_tickets()) == 1 and agent_starts(herdr_log) == ["oc-1"]
-    assert dp.decide_oncall(tk.list_tickets(), rig.settings) == []
+    assert dp.decide_oncall(tk.list_tickets(), rig.settings, set()) == []
 
 
 def test_a_fourth_on_call_need_in_one_day_launches_nothing(rig, ntfy, herdr_log):
@@ -305,19 +307,21 @@ def test_the_on_call_slot_is_separate_one_at_a_time_and_first_in_first_out(rig):
     second = tk.create_ticket({"type": "fix", "repo": "app", "branch": "task/oc-b", "title": "b", "body": "b",
                                "parent": rig.id}, oncall=True)
     normal = mk(branch="task/normal")
-    decisions = dp.decide_oncall(tk.list_tickets(), rig.settings)
+    decisions = dp.decide_oncall(tk.list_tickets(), rig.settings, set())
     assert [(d.ticket["id"], d.eligible) for d in decisions] == [(first["id"], True), (second["id"], False)]
     assert decisions[0].base == rig.tip() and "waiting its turn" in decisions[1].skip
     tk.set_status(first["id"], "claimed", allowed_from=("open",), assignee="claude")
-    decisions = dp.decide_oncall(tk.list_tickets(), rig.settings)
+    decisions = dp.decide_oncall(tk.list_tickets(), rig.settings, set())
     assert [(d.ticket["id"], d.eligible) for d in decisions] == [(second["id"], False)]
     assert "busy" in decisions[0].skip
     # on-call tickets neither fill nor join the normal queue
     normal_decisions = dp.decide(tk.list_tickets(), rig.settings)
     assert [(d.ticket["id"], d.eligible) for d in normal_decisions] == [(normal["id"], True)]
-    # the agent has stopped (ticket in review): the slot is free for the next one
+    # still busy while the ticket is in review (waiting to ship); free once it is done
     tk.set_status(first["id"], "review", allowed_from=("claimed",))
-    assert dp.decide_oncall(tk.list_tickets(), rig.settings)[0].eligible
+    assert not dp.decide_oncall(tk.list_tickets(), rig.settings, set())[0].eligible
+    tk.set_status(first["id"], "done", allowed_from=("review",))
+    assert dp.decide_oncall(tk.list_tickets(), rig.settings, set())[0].eligible
 
 
 def test_dry_run_lists_the_on_call_ticket(rig, capsys):
@@ -451,7 +455,7 @@ def test_discard_only_removes_an_untouched_folder_and_branch(rig, herdr_log):
     rig.cycle(0)
     rig.cycle(6)
     (oc,) = oncall_tickets()
-    d = dp.decide_oncall(tk.list_tickets(), rig.settings)[0]
+    d = dp.decide_oncall(tk.list_tickets(), rig.settings, set())[0]
     folder = rig.repo / ".worktrees" / d.name
     git(rig.repo, "worktree", "add", str(folder), "-b", oc["branch"], d.base)
     (folder / "new.txt").write_text("work")
@@ -534,7 +538,7 @@ def test_the_on_call_branch_starts_from_the_commit_that_failed_even_if_the_old_b
     assert oc["oncall_base"] == failed_at and oc["status"] == "open"
     rig.commit("the old agent kept going")
     assert rig.tip() != failed_at
-    assert dp.decide_oncall(tk.list_tickets(), rig.settings)[0].base == failed_at
+    assert dp.decide_oncall(tk.list_tickets(), rig.settings, set())[0].base == failed_at
     world(rig, {"name": rig.id.lower(), "agent_status": "idle"})
     go(rig, 3, 2)
     assert git(rig.repo, "rev-parse", oc["branch"]).strip() == failed_at
@@ -578,7 +582,8 @@ def test_the_on_call_slot_stays_taken_while_any_on_call_agent_runs_whatever_its_
     running = {first["id"].lower()}
     d = dp.decide_oncall(tk.list_tickets(), rig.settings, running)
     assert [(x.ticket["id"], x.eligible) for x in d] == [(second["id"], False)]
-    assert dp.decide_oncall(tk.list_tickets(), rig.settings, set())[0].eligible
+    if status != "review":   # a ticket in review holds the slot by itself
+        assert dp.decide_oncall(tk.list_tickets(), rig.settings, set())[0].eligible
 
 
 def test_a_log_write_that_fails_does_not_stop_recovery(rig, ntfy, monkeypatch):
@@ -657,64 +662,6 @@ def test_a_normal_fix_ticket_cannot_launch_into_the_on_call_folder_in_the_same_c
 
 # --- interruptions and endless retries -----------------------------------------------------
 
-def test_a_ticket_write_that_fails_while_filing_recovery_leaves_the_ticket_claimed_and_retried(rig, ntfy, monkeypatch):
-    real = tk.create_ticket
-    calls_made = []
-
-    def flaky(*args, **kwargs):
-        calls_made.append(1)
-        if len(calls_made) == 1:
-            raise OSError("disk full")
-        return real(*args, **kwargs)
-    monkeypatch.setattr(tk, "create_ticket", flaky)
-    stop_after_fail(rig)
-    rig.cycle(0)
-    rig.cycle(6)                                   # the OC ticket could not be saved
-    assert rig.get()["status"] == "claimed" and oncall_tickets() == [] and ntfy.requests == []
-    assert any("disk full" in w for w in rig.warnings)
-    rig.cycle(7)                                   # next cycle: filed, closed, one ping
-    assert rig.get()["status"] == "failed" and len(oncall_tickets()) == 1
-    assert [t[0] for t in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it"]
-
-
-def test_an_interrupted_close_adopts_the_on_call_ticket_already_filed(rig, ntfy, monkeypatch):
-    stop_after_fail(rig)
-    real_set_status = tk.set_status
-
-    def no_close(ticket_id, status, **kw):
-        if ticket_id == rig.id and status == "failed":
-            raise OSError("killed")
-        return real_set_status(ticket_id, status, **kw)
-    monkeypatch.setattr(tk, "set_status", no_close)
-    rig.cycle(0)
-    try:
-        rig.cycle(6)                               # filed OC-1, then dies before closing
-    except OSError:
-        pass
-    assert rig.get()["status"] == "claimed" and len(oncall_tickets()) == 1
-    assert [p["event"] for p in json.loads(rw.state_path().read_text())["pending"]] == ["oncall"]
-    monkeypatch.setattr(tk, "set_status", real_set_status)
-    rig.cycle(7)                                   # adopts OC-1: no second ticket, no refusal
-    assert rig.get()["status"] == "failed" and len(oncall_tickets()) == 1
-    assert [t[0] for t in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it"]
-
-
-def test_a_failed_close_cancels_the_on_call_ticket_it_just_filed(rig, ntfy, monkeypatch):
-    stop_after_fail(rig)
-    rig.cycle(0)
-    real = tk.set_status
-
-    def refuse(ticket_id, status, **kw):
-        if ticket_id == rig.id and status == "failed":
-            raise tk.TicketError("changed under us")
-        return real(ticket_id, status, **kw)
-    monkeypatch.setattr(tk, "set_status", refuse)
-    rig.cycle(6)
-    (oc,) = oncall_tickets()
-    assert oc["status"] == "cancelled" and ntfy.requests == []
-    assert json.loads(rw.state_path().read_text())["pending"] == []
-
-
 def test_an_on_call_ticket_whose_launch_keeps_failing_is_given_up_after_three_tries(rig, ntfy, herdr_log, monkeypatch):
     from fleet import launch as lc
 
@@ -730,3 +677,184 @@ def test_an_on_call_ticket_whose_launch_keeps_failing_is_given_up_after_three_tr
     assert oc["status"] == "failed" and "launch failed 3 times" in oc["close_note"]
     assert [t[0] for t in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it",
                                           f"{rig.id} needs a human, see notes"]
+
+
+def test_the_on_call_ticket_carries_the_whole_spec_and_all_notes(rig, ntfy):
+    spec = "SPEC-START " + "x" * 3900 + " SPEC-END"            # near the 4000 limit: never clipped
+    rig.edit(body=spec)
+    rig.summary("N1 " + "a" * 3000)
+    rig.summary("N2 " + "b" * 3000)
+    stop_after_fail(rig)
+    rig.cycle(0)
+    rig.cycle(6)
+    (oc,) = oncall_tickets()
+    assert spec in oc["body"] and len(oc["body"]) > tk.BODY_MAX
+    text = "\n".join(n["text"] for n in oc["notes"])
+    assert "N1 " + "a" * 3000 in text and "N2 " + "b" * 3000 in text
+
+
+def test_a_long_note_is_split_not_cut(rig, ntfy):
+    rig.edit(notes=[{"at": "2026-10-04T00:00:00Z", "by": "claude", "text": "L" * 4000}])
+    stop_after_fail(rig)
+    rig.cycle(0)
+    rig.cycle(6)
+    (oc,) = oncall_tickets()
+    assert "".join(n["text"] for n in oc["notes"]).count("L") == 4000
+
+
+
+
+# --- the recovery record: a crash between any two steps loses nothing --------------------------
+
+def records():
+    return sorted(p.name for p in (tk.fleet_home() / "pending-recovery").glob("*.json")) \
+        if (tk.fleet_home() / "pending-recovery").is_dir() else []
+
+
+def break_once(monkeypatch, obj, name, when=lambda *a, **k: True, error=OSError("crash")):
+    """Make obj.name raise once (when `when` matches), then behave normally."""
+    real = getattr(obj, name)
+    state = {"done": False}
+
+    def wrapper(*args, **kwargs):
+        if not state["done"] and when(*args, **kwargs):
+            state["done"] = True
+            raise error
+        return real(*args, **kwargs)
+    monkeypatch.setattr(obj, name, wrapper)
+
+
+CRASH_POINTS = {
+    "close": (tk, "set_status", lambda tid, status, **kw: status == "failed"),
+    "file_oncall": (tk, "create_ticket", lambda *a, **kw: kw.get("oncall") is True),
+    "notes": (tk, "add_note", lambda tid, text: text.startswith("On-call ticket")),
+    "save_ping": (rw, "_save_state", lambda state: bool(state["pending"])),
+    "delete_record": (Path, "unlink", lambda self, *a, **kw: self.parent.name == "pending-recovery"),
+}
+
+
+@pytest.mark.parametrize("point", sorted(CRASH_POINTS))
+def test_a_crash_at_any_step_of_recovery_is_finished_next_cycle_exactly_once(rig, ntfy, monkeypatch, point):
+    obj, name, when = CRASH_POINTS[point]
+    stop_after_fail(rig)
+    rig.cycle(0)
+    break_once(monkeypatch, obj, name, when)
+    rig.cycle(6)                                   # the step breaks once
+    assert any("will be retried" in w or "cannot save" in w for w in rig.warnings) or point == "notes"
+    assert records() == [f"{rig.id}.json"] or point in ("notes", "delete_record")
+    for minutes in (7, 8, 9):
+        rig.cycle(minutes)
+    assert records() == []
+    assert rig.get()["status"] == "failed"
+    assert len(oncall_tickets()) == 1                                        # never a second one
+    assert [t[0] for t in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it"]   # never two pings
+    notes = [n["text"] for n in rig.get()["notes"] if n["text"].startswith("On-call ticket")]
+    assert len(notes) == 1
+
+
+def test_the_record_is_written_before_anything_else_is_done(rig, ntfy, monkeypatch):
+    stop_after_fail(rig)
+    rig.cycle(0)
+    seen = []
+    real = tk.set_status
+
+    def spy(ticket_id, status, **kw):
+        if status == "failed":
+            seen.append(records())                 # what is on disk when the ticket is closed
+        return real(ticket_id, status, **kw)
+    monkeypatch.setattr(tk, "set_status", spy)
+    rig.cycle(6)
+    assert seen == [[f"{rig.id}.json"]]
+    assert records() == []                         # and it is gone once everything is done
+
+
+def test_a_record_holds_the_facts_it_is_driven_from(rig, ntfy, monkeypatch):
+    stop_after_fail(rig, "Codex")
+    rig.cycle(0)
+    break_once(monkeypatch, tk, "set_status", lambda tid, status, **kw: status == "failed")
+    rig.cycle(6)
+    rec = json.loads((tk.fleet_home() / "pending-recovery" / f"{rig.id}.json").read_text())
+    assert rec["id"] == rig.id and rec["commit"] == rig.tip() and rec["reviewer"] == "Codex"
+    assert rec["rounds"] == 1 and "stopped" in rec["reason"]
+
+
+def test_a_ticket_with_a_record_is_not_checked_or_moved_meanwhile(rig, ntfy, monkeypatch):
+    stop_after_fail(rig)
+    rig.cycle(0)
+    break_once(monkeypatch, tk, "set_status", lambda tid, status, **kw: status == "failed")
+    rig.cycle(6)
+    rig.finish()                                   # the agent "recovers": PASS, summary, idle
+    rig.cycle(7)                                   # the record wins: closed as failed, not moved to review
+    assert rig.get()["status"] == "failed" and len(oncall_tickets()) == 1
+
+
+def test_a_record_for_a_ticket_that_went_another_way_is_dropped(rig, ntfy):
+    stop_after_fail(rig)
+    rig.cycle(0)
+    rw.write_recovery(rig.get(), "test", rig.tip())
+    tk.set_status(rig.id, "cancelled", allowed_from=("claimed",))
+    rig.cycle(1)
+    assert records() == [] and oncall_tickets() == [] and ntfy.requests == []
+
+
+def test_an_unusable_record_is_reported_not_trusted(rig):
+    d = tk.fleet_home() / "pending-recovery"
+    d.mkdir(parents=True)
+    (d / "BD-1.json").write_text("{nope")
+    rig.cycle(0)
+    assert any("not a usable recovery record" in w for w in rig.warnings)
+
+
+def test_a_failed_on_call_ticket_also_goes_through_a_record(rig, ntfy, monkeypatch):
+    stop_after_fail(rig)
+    world(rig, {"name": rig.id.lower(), "agent_status": "idle"})
+    go(rig, 3, 4)
+    (oc,) = oncall_tickets()
+    tk.record_verdict(oc["branch"], "app", "FAIL", git(rig.repo, "rev-parse", oc["branch"]).strip(), "Codex")
+    world(rig, {"name": oc["id"].lower(), "agent_status": "idle"})
+    rig.cycle(20)
+    break_once(monkeypatch, tk, "add_note", lambda tid, text: text.startswith("Diagnosis:") and tid == rig.id)
+    rig.cycle(26)                                  # fails; the note on the original breaks once
+    assert records() == [f"{oc['id']}.json"]
+    rig.cycle(27)
+    assert records() == [] and len(oncall_tickets()) == 1
+    assert [t[0] for t in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it",
+                                          f"{rig.id} needs a human, see notes"]
+
+
+# --- one source of truth for occupancy ---------------------------------------------------------
+
+def test_a_failed_herdr_query_counts_as_busy_and_nothing_launches(rig, ntfy, herdr_log, monkeypatch, capsys):
+    stop_after_fail(rig)
+    rig.cycle(0)
+    rig.cycle(6)                                   # failed; OC-1 is open
+    (oc,) = oncall_tickets()
+    assert oc["status"] == "open"
+    monkeypatch.setenv("FLEET_HERDR", str(rig.env / "no-such-herdr"))
+    go(rig, 3, 2)
+    assert tk.load_ticket(oc["id"])["status"] == "open" and "on-call launch deferred" in capsys.readouterr().out
+    assert dp.decide_oncall(tk.list_tickets(), rig.settings, None)[0].skip.startswith(dp.QUEUE_SKIPS[0])
+
+
+def test_the_slot_is_busy_for_every_way_an_on_call_ticket_can_hold_it(rig):
+    oc = tk.create_ticket({"type": "fix", "repo": "app", "branch": "task/oc-a", "title": "a", "body": "b",
+                           "parent": rig.id}, oncall=True)
+    assert dp.oncall_slot_busy(tk.list_tickets(), set()) is None
+    assert dp.oncall_slot_busy(tk.list_tickets(), None)                       # herdr unknown: busy
+    assert dp.oncall_slot_busy(tk.list_tickets(), {oc["id"].lower()})        # an agent of it is running
+    for status in ("claimed", "review"):
+        tk.set_status(oc["id"], status, allowed_from=("open", "claimed"))
+        assert dp.oncall_slot_busy(tk.list_tickets(), set())
+
+
+def test_on_call_tickets_own_their_branch_in_every_check(rig):
+    tk.set_status(rig.id, "failed", allowed_from=("claimed",))
+    oc = tk.create_ticket({"type": "fix", "repo": "app", "branch": "task/oc-a", "title": "a", "body": "b",
+                           "parent": rig.id}, oncall=True)
+    tk.set_status(oc["id"], "claimed", allowed_from=("open",), assignee="claude")
+    assert oc["id"] in [t["id"] for t in dp.branch_holders(tk.list_tickets())]
+    assert oc["id"] not in [t["id"] for t in dp.capacity_holders(tk.list_tickets())]
+    other = tk.create_ticket({"type": "fix", "repo": "app", "branch": "task/oc-a", "title": "o", "body": "b",
+                              "parent": rig.id}, oncall=True)
+    (d,) = dp.decide_oncall(tk.list_tickets(), rig.settings, set())
+    assert d.ticket["id"] == other["id"] and "held by another ticket" in d.skip

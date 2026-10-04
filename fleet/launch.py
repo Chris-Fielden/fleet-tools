@@ -443,7 +443,10 @@ def launch_oncall(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
     t = d.ticket
     main = main_tip(d.repo_path)
     if main is None or d.base is None:
-        return 1, f"{t['id']}  on-call not launched: cannot read the current commit of {d.repo_path}"
+        reason = f"cannot read the current commit of {d.repo_path}"
+        with contextlib.suppress(tk.TicketError, tk.TicketInvalid, OSError):
+            tk.add_note(t["id"], f"Launch attempt failed: {reason}")   # counted: it is given up after a few
+        return 1, f"{t['id']}  on-call not launched: {reason}"
     tracker = tr.get_tracker(warn, settings)
     tracker.claim(t["id"], d.agent, allowed_from=("open",), base_commit=main)
     folder = d.repo_path / ".worktrees" / d.name

@@ -15,6 +15,14 @@
   not be recorded; failures ping once, low ("on-call is on it" or "needs a
   human").
 
+A true failure is made durable first: before anything else is done, a recovery
+record (`$FLEET_HOME/pending-recovery/<ID>.json`: ticket id, failed commit, reason,
+reviewer, rounds) is written atomically. Every cycle processes the records
+idempotently: close the ticket if it is not closed, file the on-call ticket if none
+exists for that parent, add the notes, queue the ping. The record is deleted only
+when all of that is done, and a ticket with a record is never skipped. A step that
+fails just leaves the record for the next cycle.
+
 Every state is decided from the stored ticket (verdict, notes), the git branch,
 the review files in the task folder, herdr and the dispatcher log. The agent's
 own words are never parsed: only that a note exists, and when it was saved.
@@ -175,8 +183,9 @@ def _queue_ping(ticket_id: str, event: str, state: dict, warn, detail: str | Non
     state["pending"].append({"id": ticket_id, "event": event, "detail": detail})
     try:
         _save_state(state)
-    except OSError as exc:
-        warn(f"cannot save {state_path()} ({exc}); a failure ping could be lost if this stops now")
+    except OSError:
+        state["pending"].pop()
+        raise   # nothing is closed until the ping is safely on disk
 
 
 def _retry_pending(state: dict, warn) -> None:
@@ -307,20 +316,17 @@ def _log_tail(tid: str, lines: int = 12) -> str:
 
 
 def _oncall_body(t: dict, detail: str, tip: str, repo: Path) -> str:
-    """What the on-call agent needs, in one ticket body (4000 characters at most):
-    the failed ticket's spec and notes, the latest reviews' MUST FIX sections,
-    why it failed and the log tail."""
+    """What the on-call agent needs, in the ticket body: the failed ticket's WHOLE
+    spec (agents can read only their own ticket), the latest reviews' MUST FIX
+    sections, why it failed and the log tail. The failed ticket's notes are copied
+    as notes on the on-call ticket (_copy_notes)."""
     v = t["verdict"]
     reviewed = v["commit"] if v is not None and v["result"] == "FAIL" else tip
     parts = [f"On-call fix for {t['id']} ({t['type']}): {_clip(t['title'], 100)}",
              f"WHY IT FAILED: {detail}",
              f"FAILED BRANCH: {t['branch']} at {tip}. Your new branch starts from that commit. "
              "The failed agent's herdr tab may still be open: do not rely on that branch staying put.",
-             "FAILED TICKET SPEC (cut at 1200 characters; run `ticket show " + t["id"] + "` for all of it):\n"
-             + _clip(t["body"], 1200)]
-    notes = [f"- {n['by']} {n['at']}: {_clip(n['text'], 250)}" for n in t.get("notes", [])[-4:]]
-    if notes:
-        parts.append("FAILED TICKET NOTES (latest):\n" + "\n".join(notes))
+             "The failed ticket's notes are in this ticket's notes."]
     wt = repo / ".worktrees" / t["branch"].removeprefix("task/")
     reviews = wt / ".reviews"
     # The failed agent can write in its folder: never follow a link (to the folder
@@ -339,104 +345,180 @@ def _oncall_body(t: dict, detail: str, tip: str, repo: Path) -> str:
     tail = _log_tail(t["id"])
     if tail:
         parts.append("DISPATCHER LOG TAIL:\n" + _clip(tail, 600))
-    return _clip("\n\n".join(parts), tk.BODY_MAX)
+    parts.append(f"FAILED TICKET SPEC (whole):\n{t['body']}")
+    return _clip("\n\n".join(parts), tk.ONCALL_BODY_MAX)
+
+
+def _copy_notes(oc_id: str, t: dict, warn) -> None:
+    """Copy all of the failed ticket's notes onto the on-call ticket, in order, cut
+    into pieces that fit a note. Pieces already there are skipped, so a retry after
+    an interruption finishes the job. The store holds NOTES_LIMIT notes a ticket;
+    room is kept for the dispatcher's own, and anything over says so."""
+    room = tk.NOTES_LIMIT - 6
+    pieces = []
+    for n in t.get("notes", []):
+        text = f"Note on {t['id']} by {n['by']} at {n['at']}:\n{n['text']}"
+        pieces += [text[i:i + tk.NOTE_MAX] for i in range(0, len(text), tk.NOTE_MAX)]
+    have = {n["text"] for n in tk.load_ticket(oc_id).get("notes", [])}
+    for piece in pieces[:room]:
+        if piece not in have:
+            _note(oc_id, piece, warn)
+    over = f"{len(pieces) - room} more pieces of {t['id']}'s notes are not copied: a ticket holds {tk.NOTES_LIMIT} notes."
+    if len(pieces) > room and over not in have:
+        _note(oc_id, over, warn)
 
 
 def _note(ticket_id: str, text: str, warn) -> None:
+    """Add a note; a note the store refuses for good (a secret scan hit) is only a warning."""
     try:
         tk.add_note(ticket_id, _clip(text, tk.NOTE_MAX))
-    except (tk.TicketError, tk.TicketInvalid) as exc:
+    except tk.TicketInvalid as exc:
         warn(f"{ticket_id}: could not save a note ({exc})")
 
 
+def _note_once(ticket_id: str, marker: str, text: str, warn) -> None:
+    """Add the note unless one starting with `marker` is already there (a retry)."""
+    if not any(n["text"].startswith(marker) for n in tk.load_ticket(ticket_id).get("notes", [])):
+        _note(ticket_id, text, warn)
+
+
 def _file_oncall(t: dict, detail: str, tip: str, repo: Path, warn) -> dict | None:
-    """File the on-call fix ticket for a failed ticket; None if it cannot be made."""
+    """File the on-call fix ticket for a failed ticket, carrying its whole spec and
+    notes (an agent can read only its own ticket). None if it cannot be made for
+    good (the secret scan refused the copied text): a human must look. An OSError
+    is not caught: the recovery record stays and the next cycle tries again."""
     fields = {"type": "fix", "repo": t["repo"], "branch": f"task/oc-{t['id'].lower()}",
               "title": _clip(f"On-call: fix {t['id']}: {t['title']}", 100), "parent": t["id"],
               "body": _oncall_body(t, detail, tip, repo)}
     try:
-        try:
-            return tk.create_ticket(fields, oncall=True, oncall_base=tip)
-        except tk.TicketInvalid:
-            # The copied text tripped the secret scan or a limit: point at the ticket instead.
-            fields["body"] = (f"On-call fix for {t['id']}. Why it failed: {_clip(detail, 300)}. "
-                              f"Failed branch {t['branch']} at {tip}. Run `ticket show {t['id']}` "
-                              "for its spec and notes.")
-            return tk.create_ticket(fields, oncall=True, oncall_base=tip)
+        oc = tk.create_ticket(fields, oncall=True, oncall_base=tip)
     except (tk.TicketError, tk.TicketInvalid) as exc:
         warn(f"{t['id']}: could not file the on-call ticket: {exc}")
         return None
+    return oc
 
 
-def _fail_ticket(t: dict, reason: str, repo: Path, tip: str, settings: dict, state: dict,
-                 now: datetime, emit, warn) -> None:
-    """A ticket has truly failed. File ONE on-call ticket (which the dispatch cycle
-    launches at once in the on-call slot), queue the one low ping, then close the
-    ticket as failed (its card moves to Failed). Recovery and ping are saved before
-    the close, so an interruption leaves the ticket claimed and the next cycle
-    simply tries again. If it is the on-call ticket that failed, or an on-call
-    attempt was already made, or the daily limit is reached, nothing more is
-    launched: the ticket gets a diagnosis note and one "needs a human" ping.
-    Never pings for a mid-loop FAIL."""
-    tid = t["id"]
-    detail = f"{reason}; failed by: {_failed_reviewers(t)}; FAIL rounds: {fail_rounds(t)}"
-    if tk.check_secrets("close note", detail):   # the reviewer name is free text: scan it like any note
-        detail = f"{reason}; FAIL rounds: {fail_rounds(t)} (reviewer name withheld)"
-    oc, why = None, None
-    if not t.get("oncall"):
-        tickets = tk.list_tickets()
-        mine = [x for x in tickets if x.get("oncall") and x["parent"] == tid]
-        cap = settings["max_oncall_per_day"]
-        if len(mine) == 1 and mine[0]["status"] == "open":
-            oc = mine[0]   # filed by an earlier pass that was interrupted before the close
-        elif mine:
-            why = "an on-call attempt was already made for it"
-        elif dp.oncall_today(tickets, now) >= cap:
-            why = f"the daily on-call limit ({cap}) is reached"
-        else:
-            oc = _file_oncall(t, detail, tip, repo, warn)   # an OSError leaves the ticket claimed: retried
-            if oc is None:
-                why = "the on-call ticket could not be filed"
-    if t.get("oncall"):
-        ping = (t["parent"], "needs_human", None)
-    else:
-        ping = (tid, "oncall", oc["id"]) if oc else (tid, "needs_human", None)
-    _queue_ping(*ping[:2], state, warn, ping[2])
-    try:
-        failed = tk.set_status(tid, "failed", allowed_from=("claimed",),
-                               close_note=_clip(f"Failed: {detail}", tk.CLOSE_NOTE_MAX))
-    except tk.TicketError as exc:
-        lc._safe_log("FAIL_SKIP", f"{tid} {exc}")
-        warn(f"{tid}: could not close as failed: {exc}")
-        state["pending"] = [p for p in state["pending"] if (p["id"], p["event"]) != ping[:2]]
-        if oc is not None:
-            with contextlib.suppress(tk.TicketError):
-                tk.set_status(oc["id"], "cancelled", allowed_from=("open",))   # nothing failed after all
+# --- the recovery record ---------------------------------------------------------
+
+def recovery_dir() -> Path:
+    return tk.fleet_home() / "pending-recovery"
+
+
+def _record_path(ticket_id: str) -> Path:
+    return recovery_dir() / f"{ticket_id}.json"
+
+
+def write_recovery(t: dict, reason: str, commit: str) -> None:
+    """Record, atomically, that this ticket has truly failed. This is the FIRST thing
+    done; everything else (close, on-call ticket, notes, ping) is driven from the
+    record by `process_recoveries`. One record per ticket; raises OSError."""
+    path = _record_path(t["id"])
+    tk.refuse_real_store_in_tests(path)
+    if path.exists():
         return
-    kaneo.mirror_quietly(failed, warn)
-    emit(f"{tid}  failed: {detail}; its agent's herdr tab is left open (close it by hand if it is still there)")
-    lc._safe_log("FAILED", f"{tid} {_clip(detail, 200)}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tk._write_atomic(path, {"id": t["id"], "commit": commit, "reason": reason, "reviewer": _failed_reviewers(t),
+                            "rounds": fail_rounds(t), "at": _stamp(datetime.now(timezone.utc))})
+
+
+def pending_recoveries(warn) -> list[dict]:
+    d = recovery_dir()
+    found = []
+    for path in sorted(d.glob("*.json")) if d.is_dir() else []:
+        if path.name.startswith("."):
+            continue
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+            ok = (isinstance(rec, dict) and isinstance(rec.get("id"), str) and path.stem == rec["id"]
+                  and tk.ID_RE.fullmatch(rec["id"]) and all(isinstance(rec.get(k), str)
+                                                          for k in ("commit", "reason", "reviewer", "at"))
+                  and isinstance(rec.get("rounds"), int))
+        except (OSError, ValueError):
+            ok = False
+        if ok:
+            found.append(rec)
+        else:
+            warn(f"{path} is not a usable recovery record; fix or delete it")
+    return sorted(found, key=lambda r: (r["at"], r["id"]))
+
+
+def _oncall_for(t: dict, rec: dict, detail: str, repo: Path, settings: dict, now: datetime,
+                warn) -> tuple[dict | None, str | None]:
+    """The on-call ticket for a failed ticket, or why there is none. One already
+    on the expected branch is this recovery's own, filed before an interruption."""
+    tickets = tk.list_tickets()
+    mine = [x for x in tickets if x.get("oncall") and x["parent"] == t["id"]]
+    for x in mine:
+        if x["branch"] == f"task/oc-{t['id'].lower()}":
+            _copy_notes(x["id"], t, warn)   # finish an interrupted copy
+            return x, None
+    if mine:
+        return None, "an on-call attempt was already made for it"
+    cap = settings["max_oncall_per_day"]
+    if dp.oncall_today(tickets, now) >= cap:
+        return None, f"the daily on-call limit ({cap}) is reached"
+    oc = _file_oncall(t, detail, rec["commit"], repo, warn)
+    if oc is None:
+        return None, "the on-call ticket could not be filed"
+    _copy_notes(oc["id"], t, warn)
+    return oc, None
+
+
+def _recover(rec: dict, settings: dict, state: dict, now: datetime, emit, warn) -> None:
+    """Carry one recovery record as far as it will go; it is deleted only when every
+    step is done. Every step is safe to repeat."""
+    tid = rec["id"]
+    path = _record_path(tid)
+    if not tk._ticket_path(tid).exists():
+        path.unlink(missing_ok=True)
+        return
+    t = tk.load_ticket(tid)
+    detail = f"{rec['reason']}; failed by: {rec['reviewer']}; FAIL rounds: {rec['rounds']}"
+    if tk.check_secrets("close note", detail):   # the reviewer name is free text: scan it like any note
+        detail = f"{rec['reason']}; FAIL rounds: {rec['rounds']} (reviewer name withheld)"
+    # 1. close it as failed (its card moves to Failed)
+    if t["status"] in ("claimed", "open"):
+        t = tk.set_status(tid, "failed", allowed_from=("claimed", "open"),
+                          close_note=_clip(f"Failed: {detail}", tk.CLOSE_NOTE_MAX))
+        kaneo.mirror_quietly(t, warn)
+        emit(f"{tid}  failed: {detail}; its agent's herdr tab is left open (close it by hand if it is still there)")
+        lc._safe_log("FAILED", f"{tid} {_clip(detail, 200)}")
+    elif t["status"] != "failed":
+        path.unlink(missing_ok=True)   # it went another way (done, cancelled, in review): nothing failed
+        return
+    repo = settings["projects_dir"] / t["repo"]
+    # 2. the on-call ticket, or the reason there is none, as notes
     if t.get("oncall"):
-        diagnosis = (f"Diagnosis: on-call {tid} could not fix {t['parent']}. {detail}. Its branch "
-                     f"{t['branch']} ends at {tip}. Nothing more will be launched for it.")
-        _note(tid, diagnosis, warn)
-        _human(t["parent"], diagnosis, state, warn)
-    elif oc is None:
-        _human(tid, f"Needs a human: {why}. {detail}.", state, warn)
+        original = t["parent"]
+        diagnosis = (f"Diagnosis: on-call {tid} could not fix {original}. {detail}. Its branch "
+                     f"{t['branch']} ends at {rec['commit']}. Nothing more will be launched for it.")
+        _note_once(tid, "Diagnosis:", diagnosis, warn)
+        _note_once(original, "Diagnosis:", diagnosis, warn)
+        ping = (original, "needs_human", None)
     else:
-        kaneo.mirror_quietly(oc, warn)
-        _note(tid, f"On-call ticket {oc['id']} was filed to fix this. {detail}.", warn)
-        lc._safe_log("ONCALL_FILED", f"{oc['id']} for {tid}")
-        _retry_pending(state, warn)
-
-
-def _human(ticket_id: str, note: str, state: dict, warn) -> None:
-    """Note why a human must look at a failed ticket and send the one low ping
-    (queued by the caller before it closed the ticket)."""
-    _note(ticket_id, note, warn)
-    lc._safe_log("NEEDS_HUMAN", f"{ticket_id}")
-    _queue_ping(ticket_id, "needs_human", state, warn)   # a no-op when already queued
+        oc, why = _oncall_for(t, rec, detail, repo, settings, now, warn)
+        if oc is not None:
+            kaneo.mirror_quietly(oc, warn)
+            _note_once(tid, f"On-call ticket {oc['id']} was filed",
+                       f"On-call ticket {oc['id']} was filed to fix this. {detail}.", warn)
+            lc._safe_log("ONCALL_FILED", f"{oc['id']} for {tid}")
+            ping = (tid, "oncall", oc["id"])
+        else:
+            _note_once(tid, "Needs a human:", f"Needs a human: {why}. {detail}.", warn)
+            lc._safe_log("NEEDS_HUMAN", tid)
+            ping = (tid, "needs_human", None)
+    # 3. queue the one ping (saved to disk; a send that fails is retried every cycle)
+    _queue_ping(ping[0], ping[1], state, warn, ping[2])
+    path.unlink(missing_ok=True)
     _retry_pending(state, warn)
+
+
+def process_recoveries(settings: dict, state: dict, now: datetime, emit, warn) -> None:
+    for rec in pending_recoveries(warn):
+        try:
+            _recover(rec, settings, state, now, emit, warn)
+        except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
+            warn(f"{rec['id']}: recovery is not finished and will be retried next cycle ({exc})")
 
 
 # --- the cycle -----------------------------------------------------------------
@@ -492,53 +574,41 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
     _unrecorded_pings(t, repo, tip, state, now, emit, warn)
     reason = _failure_reason(t, repo, tip, agent, state, now)
     if reason:
-        _fail_ticket(t, reason, repo, tip, settings, state, now, emit, warn)
+        write_recovery(t, reason, tip)   # first: everything else is driven from the record
 
 
-def _escalate_stuck_oncall(settings: dict, state: dict, emit, warn) -> None:
-    """An open on-call ticket that can never be launched (its repo or start commit
-    is gone, its branch or task folder already exists, or its launch failed
-    LAUNCH_ATTEMPTS times) would sit in the queue for ever. Close it as failed with
-    a diagnosis note and send one "needs a human" ping."""
+def _flag_stuck_oncall(settings: dict, warn) -> None:
+    """An open on-call ticket that can never be launched (its repo or start commit is
+    gone, its branch or task folder already exists, or its launch failed
+    LAUNCH_ATTEMPTS times) would sit in the queue for ever: give it a recovery
+    record, which closes it as failed and sends one "needs a human" ping."""
     tickets = tk.list_tickets()
-    blocked = {d.ticket["id"]: d.skip for d in dp.decide_oncall(tickets, settings)
+    blocked = {d.ticket["id"]: d.skip for d in dp.decide_oncall(tickets, settings, frozenset())
                if d.skip and not d.skip.startswith(dp.QUEUE_SKIPS)}
     for oc in tickets:
         if not oc.get("oncall") or oc["status"] != "open":
             continue
         reason = blocked.get(oc["id"])
-        failures = sum(1 for n in oc.get("notes", []) if n["text"].startswith(LAUNCH_FAILED_NOTE))
+        failures = sum(1 for n in oc.get("notes", []) if n["by"] == "human" and n["text"].startswith(LAUNCH_FAILED_NOTE))
         repo = settings["projects_dir"] / oc["repo"]
         folder = repo / ".worktrees" / oc["branch"].removeprefix("task/")
         if reason is None and failures >= LAUNCH_ATTEMPTS:
             reason = f"its launch failed {failures} times"
         elif reason is None and repo.is_dir() and (folder.exists() or folder.is_symlink()):
             reason = f"its task folder {folder.name} already exists"
-        if reason is None:
-            continue
-        diagnosis = (f"Diagnosis: the on-call ticket for {oc['parent']} cannot be launched: {reason}. "
-                     "Nothing more will be launched for it.")
-        _queue_ping(oc["parent"], "needs_human", state, warn)   # on disk before the close
-        try:
-            closed = tk.set_status(oc["id"], "failed", allowed_from=("open",),
-                                   close_note=_clip(f"Failed: {diagnosis}", tk.CLOSE_NOTE_MAX))
-        except tk.TicketError:
-            state["pending"] = [p for p in state["pending"] if (p["id"], p["event"]) != (oc["parent"], "needs_human")]
-            continue
-        kaneo.mirror_quietly(closed, warn)
-        emit(f"{oc['id']}  failed: on-call ticket cannot be launched: {reason}")
-        lc._safe_log("FAILED", f"{oc['id']} on-call cannot be launched: {_clip(reason, 150)}")
-        _note(oc["id"], diagnosis, warn)
-        _human(oc["parent"], diagnosis, state, warn)
+        if reason is not None:
+            write_recovery(oc, f"the on-call ticket cannot be launched: {reason}", oc.get("oncall_base") or "0" * 40)
 
 
 def check(settings: dict, now: datetime, emit, warn) -> None:
     """One watch cycle's pass over every claimed (or in-review) build or fix ticket."""
     state = _load_state(warn)
     _retry_pending(state, warn)
+    process_recoveries(settings, state, now, emit, warn)
+    recovering = {r["id"] for r in pending_recoveries(warn)}   # a ticket with a record is never checked again
     tickets = sorted((t for t in tk.list_tickets()
                       if t["status"] in ("claimed", "review") and t["type"] in dp.LAUNCH_TYPES
-                      and t.get("assignee") in tk.AGENTS), key=tk.oldest_first_key)
+                      and t.get("assignee") in tk.AGENTS and t["id"] not in recovering), key=tk.oldest_first_key)
     try:
         agents = {a.get("name"): a for a in lc.list_agents() if a.get("name")} if tickets else {}
         known = True
@@ -553,9 +623,10 @@ def check(settings: dict, now: datetime, emit, warn) -> None:
         except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
             warn(f"{t['id']}: {exc}")
     try:
-        _escalate_stuck_oncall(settings, state, emit, warn)
+        _flag_stuck_oncall(settings, warn)
     except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
         warn(f"on-call check: {exc}")
+    process_recoveries(settings, state, now, emit, warn)
     live = {t["id"] for t in tickets}
     for name in ("blocked_since", "stopped_since", "seen"):
         state[name] = {k: v for k, v in state[name].items() if k in live}

@@ -34,7 +34,8 @@ failed is tried again on the next cycle.
 Each message carries its ntfy priority in the JSON body and in a `Priority`
 header. Defaults: `urgent`, `failed`, `blocked`, `review_failed`,
 `review_unrecorded` = `high`; `ready`, `ship`, `stalled` = `default`;
-`proposed`, `investigated`, `oncall`, `needs_human` = `low`. Override any of them in `notify.json`:
+`proposed`, `investigated`, `oncall`, `needs_human` = `low`. (`blocked`, `stalled` and
+`review_failed` are no longer sent; their defaults only matter if you set them.) Override any of them in `notify.json`:
 `"priorities": {"stalled": "low", "ship": "high"}` (values: `min`, `low`,
 `default`, `high`, `max`). An unknown event or value makes the file unusable.
 

@@ -45,6 +45,7 @@ VERDICT_RESULTS = ("PASS", "FAIL")
 REVIEWER_MAX = 80
 NOTES_LIMIT = 50  # notes per ticket
 BODY_MAX = 4000
+ONCALL_BODY_MAX = 12000  # an on-call ticket carries the failed ticket's whole spec (up to BODY_MAX) plus context
 AGENTS = ("claude", "codex")
 CLOSE_OUTCOMES = {"done": "done", "failed": "failed", "cancelled": "cancelled"}
 # Fields a caller may supply when creating a ticket. Everything else in
@@ -280,7 +281,8 @@ def validate_stored(data) -> list[str]:
         return errors
     if not _is_str(data["id"]) or not ID_RE.fullmatch(data["id"]):
         errors.append("id is not a valid ticket id")
-    _check_common(data, errors)
+    long_ok = data.get("oncall") is True and _is_str(data["body"]) and len(data["body"]) <= ONCALL_BODY_MAX
+    _check_common({**data, "body": data["body"][:BODY_MAX]} if long_ok else data, errors)
     if data["created_by"] not in CREATORS:
         errors.append(f"created_by must be one of: {', '.join(CREATORS)}")
     if data["status"] not in STATUSES:
@@ -490,7 +492,9 @@ def create_ticket(fields: dict, *, needs_approval: bool = False, oncall: bool = 
         raise TicketError("only the dispatcher can file an on-call fix ticket")
     if oncall_base is not None and not (oncall and re.fullmatch(r"[0-9a-f]{40}", oncall_base)):
         raise TicketError("oncall_base must be a full commit id, on an on-call ticket")
-    errors = validate_new(fields)
+    # An on-call body may be longer than BODY_MAX: every other rule still applies.
+    clipped = oncall and isinstance(fields.get("body"), str) and len(fields["body"]) <= ONCALL_BODY_MAX
+    errors = validate_new({**fields, "body": fields["body"][:BODY_MAX]} if clipped else fields)
     if not errors:
         errors += check_secrets(fields["title"], fields["body"])
     if errors:

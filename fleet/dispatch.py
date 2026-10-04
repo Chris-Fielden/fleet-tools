@@ -24,7 +24,7 @@ from .settings import (  # noqa: F401  (re-exported: callers use dp.load_setting
 
 LAUNCH_TYPES = ("build", "fix")
 MAIN_BRANCHES = ("main", "master")
-QUEUE_SKIPS = ("the on-call agent is busy", "waiting its turn")   # on-call skips that are just the queue
+QUEUE_SKIPS = ("the on-call slot is busy", "waiting its turn")   # on-call skips that are just the queue
 TASK_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{1,40}")  # what scripts/new-task.sh accepts
 
 
@@ -234,7 +234,38 @@ class Decision:
         return f"{self.ticket['id']}  would launch {self.agent} ({model}) in {self.worktree}"
 
 
-def _judge(t: dict, tickets: dict, claimed: list[dict], settings: dict, holders: list[dict] | None = None) -> Decision:
+# --- occupancy: the one place that says what is taken ------------------------
+
+def branch_holders(tickets: list[dict]) -> list[dict]:
+    """Tickets that own their branch and task folder: claimed or in review, on-call
+    ones included. Every "is this branch free" check uses this."""
+    return [t for t in tickets if t["status"] in ("claimed", "review") and t["type"] != "investigate"]
+
+
+def capacity_holders(tickets: list[dict]) -> list[dict]:
+    """Tickets that fill the normal `max_running` capacity: the branch holders except
+    on-call ones, which have their own slot."""
+    return [t for t in branch_holders(tickets) if not t.get("oncall")]
+
+
+def oncall_slot_busy(tickets: list[dict], running: frozenset | set | None) -> str | None:
+    """Why the on-call slot is taken, or None if it is free. Busy while any on-call
+    ticket is claimed or in review, or while the herdr agent of any on-call ticket is
+    still running, whatever the ticket's status. `running` is the set of lowercase
+    ids of agents that have not stopped; None means herdr could not be asked, and
+    then the slot is busy (fail closed)."""
+    if running is None:
+        return "herdr could not be asked which agents are running"
+    for t in tickets:
+        if t.get("oncall"):
+            if t["status"] in ("claimed", "review"):
+                return f"{t['id']} is {t['status']}"
+            if t["id"].lower() in running:
+                return f"the agent of {t['id']} is still running"
+    return None
+
+
+def _judge(t: dict, tickets: dict, claimed: list[dict], settings: dict, holders: list[dict]) -> Decision:
     d = Decision(ticket=t, name=t["branch"].removeprefix("task/"))
 
     # 1. Type
@@ -259,7 +290,7 @@ def _judge(t: dict, tickets: dict, claimed: list[dict], settings: dict, holders:
                   "task/ must be 2 to 41 lowercase letters, numbers or dashes, "
                   "starting with a letter or number)")
         return d
-    for other in (claimed if holders is None else holders):   # on-call tickets hold branches, not capacity
+    for other in holders:
         if other["branch"] == t["branch"]:
             d.skip = f"branch {t['branch']} is in use by claimed ticket {other['id']}"
             return d
@@ -293,8 +324,7 @@ def decide(tickets: list[dict], settings: dict) -> list[Decision]:
     # A ticket in review still holds its branch and its place in the capacity.
     # On-call fix tickets have their own slot (decide_oncall): they neither fill
     # the normal capacity nor wait in the normal queue, but they still hold their branch.
-    holders = [t for t in tickets if t["status"] in ("claimed", "review") and t["type"] != "investigate"]
-    claimed = [t for t in holders if not t.get("oncall")]
+    holders, claimed = branch_holders(tickets), capacity_holders(tickets)
     decisions = []
     picked = False
     open_tickets = sorted((t for t in tickets if t["status"] == "open" and t["type"] != "investigate"
@@ -356,16 +386,15 @@ def oncall_today(tickets: list[dict], now: datetime | None = None) -> int:
     return sum(1 for t in tickets if t.get("oncall") and t["created_at"].startswith(today))
 
 
-def decide_oncall(tickets: list[dict], settings: dict, running: frozenset | set = frozenset()) -> list[Decision]:
-    """One Decision per open on-call ticket, first in, first out. The on-call
-    slot is separate from the normal capacity and holds one agent at a time: it
-    is busy while an on-call ticket is claimed (one waiting in review has an
-    agent that has stopped), and also while the agent of any on-call ticket, in
-    whatever status (failed, cancelled, back in review...), is still running in
-    herdr (`running`: the lowercase ids of agents that have not stopped). Only the first eligible one stays eligible."""
+def decide_oncall(tickets: list[dict], settings: dict, running: frozenset | set | None) -> list[Decision]:
+    """One Decision per open on-call ticket, first in, first out. The on-call slot is
+    separate from the normal capacity and holds one agent at a time; whether it is
+    taken is decided only by oncall_slot_busy (`running`: see there; None = herdr
+    could not be asked, which counts as busy). Only the first eligible one stays
+    eligible."""
     by_id = {t["id"]: t for t in tickets}
-    busy = any(t.get("oncall") and (t["status"] == "claimed" or t["id"].lower() in running)
-               for t in tickets)
+    busy = oncall_slot_busy(tickets, running)
+    holders = branch_holders(tickets)
     waiting = sorted((t for t in tickets if t.get("oncall") and t["status"] == "open"),
                      key=tk.oldest_first_key)
     projects_dir = settings["projects_dir"]
@@ -385,6 +414,8 @@ def decide_oncall(tickets: list[dict], settings: dict, running: frozenset | set 
             d.skip = f"branch {t['branch']} already exists in {t['repo']}"
         elif parent is None:
             d.skip = f"failed ticket {t['parent']} not found"
+        elif any(h["branch"] == t["branch"] and h["id"] != t["id"] for h in holders):
+            d.skip = f"branch {t['branch']} is held by another ticket"
         else:
             # The commit the failed ticket stopped at, saved when it failed; the
             # parent's branch may have moved on while this waited for the slot.
@@ -398,7 +429,7 @@ def decide_oncall(tickets: list[dict], settings: dict, running: frozenset | set 
                 d.base = base
         if d.skip is None:
             if busy:
-                d.skip = QUEUE_SKIPS[0]
+                d.skip = f"{QUEUE_SKIPS[0]}: {busy}"
             elif picked:
                 d.skip = QUEUE_SKIPS[1] + " behind an earlier on-call ticket"
             else:

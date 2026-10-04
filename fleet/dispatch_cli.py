@@ -44,7 +44,7 @@ def _warn(message: str) -> None:
 def _cmd_dry_run(settings: dict) -> int:
     tickets = tk.list_tickets()
     for d in (dp.decide(tickets, settings) + dp.decide_investigations(tickets, settings)
-              + dp.decide_oncall(tickets, settings)):
+              + dp.decide_oncall(tickets, settings, running_agents(tickets, _warn))):
         print(d.line())
         if d.skip:
             dp.log("DECISION", f"{d.ticket['id']} skip: {d.skip}")
@@ -76,6 +76,19 @@ def _ask_yes_no(question: str) -> bool:
         return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
     except EOFError:
         return False
+
+
+def running_agents(tickets: list[dict], warn) -> frozenset | None:
+    """The lowercase ids of herdr agents that have not stopped, for the on-call slot;
+    None if herdr cannot be asked (the slot is then busy: fail closed). Herdr is
+    only asked when an on-call ticket is waiting."""
+    if not any(t.get("oncall") and t["status"] == "open" for t in tickets):
+        return frozenset()
+    try:
+        return frozenset(a.get("name") for a in lc.list_agents() if a.get("agent_status") not in ("idle", "done"))
+    except lc.LaunchError as exc:
+        warn(f"on-call launch deferred: cannot ask herdr which agents are running ({exc})")
+        return None
 
 
 def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None, checks=None) -> int:
@@ -110,19 +123,16 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     tickets = tk.list_tickets()
     # The on-call agent has its own slot: it starts at once, whatever the normal
     # queue is doing, and never counts against the daily launch limit.
-    running, asked = set(), True
-    if any(t.get("oncall") and t["status"] == "open" for t in tickets):   # nothing to ask herdr otherwise
-        try:
-            running = {a.get("name") for a in lc.list_agents() if a.get("agent_status") not in ("idle", "done")}
-        except lc.LaunchError as exc:
-            asked = False   # whether the on-call slot is free is unknown: try again next cycle
-            warn(f"on-call launch deferred: cannot ask herdr which agents are running ({exc})")
-    for d in dp.decide_oncall(tickets, settings, running) if asked else []:
+    running = running_agents(tickets, warn)
+    for d in dp.decide_oncall(tickets, settings, running):
         if d.skip and not d.skip.startswith(dp.QUEUE_SKIPS):
             emit(f"{d.ticket['id']}  on-call not launched: {d.skip}")   # a blocker, not just a queue
             dp.log("DECISION", f"{d.ticket['id']} skip: {d.skip}")
         if d.eligible:
-            oncall_code, message = lc.launch_oncall(d, settings, warn)
+            try:
+                oncall_code, message = lc.launch_oncall(d, settings, warn)
+            except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+                oncall_code, message = 1, f"{d.ticket['id']}  on-call launch failed: {exc}"
             code = code or oncall_code
             emit(message)
             tickets = tk.list_tickets()   # the on-call ticket is claimed now: it holds its branch

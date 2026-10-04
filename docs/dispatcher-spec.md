@@ -276,7 +276,7 @@ ticket's spec and latest notes, the MUST FIX sections of the latest review
 files, the reason and the log tail. The failed ticket gets a note pointing to it.
 
 The same cycle launches it at once in the **on-call slot**: separate from
-`max_running`, one agent at a time (a second waits, first in first out), not
+`max_running`, one agent at a time (a second waits, first in first out; see occupancy below), not
 counted against `max_launches_per_day`. Nothing runs when nothing has failed.
 The agent works in a new task folder on branch `task/oc-<failed id>` that starts
 from the failed branch's tip, and then follows the normal ready-to-ship flow.
@@ -286,17 +286,32 @@ is left open (the line says so); close it by hand. A closed ticket no longer
 counts against `max_running`, so a still-running old agent can briefly make one
 more agent than `max_running` run.
 
-The order is safe against interruption: the on-call ticket is filed and the ping
-is queued (saved in `review-watch.json`, `pending`) BEFORE the ticket is closed,
-so a crash leaves the ticket `claimed` and the next cycle adopts the ticket
-already filed. The ping is retried every cycle until it is sent. A launch that
-fails after the folder was made is cleaned up (only while the folder and branch
-are untouched) and retried, each failure leaving a "Launch attempt failed" note;
-after 3 the on-call ticket is given up. An on-call ticket that can never launch
-(its repo or start commit is gone, its branch or folder already exists, or it
-was given up) is closed as failed with a diagnosis note and one "needs a human"
-ping. The on-call branch starts from the commit saved on the ticket when it
-failed (`oncall_base`), however long it waited for the slot.
+Recovery is driven by a **recovery record**. The first thing done on a true
+failure is to write `$FLEET_HOME/pending-recovery/<ID>.json` atomically (ticket id,
+failed commit, reason, reviewer, FAIL rounds). Every watch cycle processes the
+records, each step safe to repeat: close the ticket if it is not closed; file the
+on-call ticket if none exists for that parent (one already on the expected branch
+`task/oc-<id>` is this record's own and is adopted); add the notes; queue the ping
+(saved in `review-watch.json`, `pending`, and retried every cycle until sent). The
+record is deleted only when all of that is done; a step that fails leaves it for the
+next cycle, and a ticket with a record is never checked or moved in the meantime.
+
+**Occupancy** has one source of truth (`oncall_slot_busy`, `branch_holders`,
+`capacity_holders` in `fleet/dispatch.py`). The on-call slot is busy while any
+on-call ticket is `claimed` or in `review`, or while the herdr agent of any on-call
+ticket is still running, whatever its status; if herdr cannot be asked the slot is
+busy (fail closed). On-call tickets own their branch in every check (`_judge`
+included) but do not fill `max_running`.
+
+The on-call ticket carries the failed ticket's whole spec in its body (up to 12,000
+characters) and all its notes as notes (agents can read only their own ticket). A
+launch that fails after the folder was made is cleaned up (only while the folder and
+branch are untouched) and retried, each failure leaving a "Launch attempt failed"
+note; after 3 the on-call ticket is given up. An on-call ticket that can never launch
+(its repo or start commit is gone, its branch or folder already exists or is held by
+another ticket, or it was given up) gets a recovery record too: it is closed as
+failed with a diagnosis note and one "needs a human" ping. The on-call branch starts
+from the commit saved on the ticket when it failed (`oncall_base`).
 
 Loop guard: at most one on-call attempt per original ticket and at most
 `max_oncall_per_day` (3) a day (an on-call ticket counts from the moment it is

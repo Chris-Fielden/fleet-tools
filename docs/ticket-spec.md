@@ -38,7 +38,7 @@ launching, no hooks in this phase.
 | commit | string or null | Required for review, otherwise null. 7 to 40 lowercase hex characters. |
 | parent | string or null | Required for review and fix; must be the id of an existing ticket. Optional for question; for build, null, or the id of an investigate ticket (a follow-up). |
 | title | string | 1 to 100 characters, a single line. |
-| body | string | 1 to 4,000 characters. |
+| body | string | 1 to 4,000 characters (an on-call ticket may hold up to 12,000: it carries the failed ticket's whole spec). |
 | created_by | string | human, claude or codex. Set by the tool, never by the caller (see below). |
 | assignee | string or null | null until the dispatcher claims the ticket; then claude or codex. |
 | status | string | One of: proposed, open, claimed, review, done, failed, cancelled. `review` (Kaneo: In Review) is set and cleared only by `dispatch --watch`, never by an agent: see "In review" in dispatcher-spec.md. |
