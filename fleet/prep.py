@@ -402,10 +402,12 @@ def validate(t: dict, settings: dict) -> str | None:
     # soft guard, not containment: the identity is only an environment variable, so a script from
     # the branch could unset it. Checked for real (2026-10-04): `claude -p` starts fine with
     # CLAUDECODE=1 (there is no nested-session refusal), so review.sh works at high risk.
+    # The identity is the one of the agent that changed the branch (`builder`), so review.sh's auto
+    # mode picks the OTHER company's model: Claude wrote it -> Codex reviews, and the reverse.
     env = dict(os.environ)
-    env.pop("CODEX_SANDBOX", None)
-    env.pop("CODEX_SANDBOX_NETWORK_DISABLED", None)
-    env["CLAUDECODE"] = "1"
+    for var in ("CLAUDECODE", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED", "REVIEWER"):
+        env.pop(var, None)
+    env["CODEX_SANDBOX" if settings.get("builder") == "codex" else "CLAUDECODE"] = "1"
     if _run(["bash", "scripts/check.sh"], wt, CHECK_TIMEOUT, env) != 0:
         return "scripts/check.sh failed"
     env.setdefault("FLEET_TICKET", str(Path(__file__).resolve().parent.parent / "bin" / "ticket"))
@@ -456,8 +458,12 @@ def _checked(job: dict, tickets: list[dict], settings: dict) -> dict[str, tuple]
             raise _Pending()
         if entry["thread"].is_alive():
             raise _Pending()
-        del _CHECKS[job["name"]]
-        return entry["results"]
+        return entry["results"]   # kept until the job is gone (_forget_checks): a retry must not redo hours of checks
+
+
+def _forget_checks(name: str) -> None:
+    with _CHECKS_LOCK:
+        _CHECKS.pop(name, None)
 
 
 def wait_checks() -> None:
@@ -476,6 +482,7 @@ def _bounce(t: dict, problem: str, settings: dict, emit, warn) -> None:
         kaneo.mirror_quietly(new, warn)
     except (tk.TicketError, tk.TicketInvalid) as exc:
         warn(f"{t['id']}: could not move back to claimed: {exc}")
+        return
     emit(f"{t['id']}  prep pass: {problem}; back to In Progress, left off the ship list")
     dp.log("PREP_FAILED", f"{t['id']} {_clip(problem, 200)}")
     relaunch_sent_back(dict(t, status="claimed"), settings, emit, warn)
@@ -759,11 +766,13 @@ def finish(settings: dict, now: datetime, emit, warn) -> None:
                 gave_up = [j for j in st["jobs"] if j.get("tries", 0) >= MAX_TRIES]
                 st["jobs"] = [j for j in st["jobs"] if j.get("tries", 0) < MAX_TRIES]
             for j in gave_up:
+                _forget_checks(j["name"])
                 msg = (f"the {j['name']} job failed to finish {MAX_TRIES} times and was given up; "
                        f"its tickets ({', '.join(j['ids'])}) are unlocked and were not re-checked")
                 warn(msg)
                 dp.log("PREP_FAILED", msg)
             continue
+        _forget_checks(job["name"])   # the job is gone from the state: its cached results are done with
         if agent is not None:
             closed, reason = lc.close_finished_tab(job["label"], settings)
             emit(f"{job['label']}  tab {'closed' if closed else 'kept'}: {reason}")

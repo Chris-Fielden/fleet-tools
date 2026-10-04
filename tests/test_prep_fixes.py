@@ -311,3 +311,24 @@ def test_claude_p_starts_with_claudecode_set():
     done = subprocess.run(["claude", "-p", "reply with the single word ok"], env=env,
                           capture_output=True, text=True, timeout=120, cwd="/tmp", stdin=subprocess.DEVNULL)
     assert done.returncode == 0 and "ok" in done.stdout.lower()
+
+
+def test_the_recheck_runs_as_the_agent_that_built_it_so_the_other_model_reviews(q, herdr_log, env, monkeypatch):
+    a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
+    settings, _, _ = start_prep()
+    settings["builder"] = "codex"
+    commit(a_wt, {"more.txt": "changed by a codex prep agent"})
+    seen = []
+    real = prep._run
+
+    def spy(cmd, cwd, timeout, env=None):
+        seen.append(dict(env or {}))
+        return real(cmd, cwd, timeout, env)
+
+    monkeypatch.setattr(prep, "_run", spy)
+    monkeypatch.setenv("CLAUDECODE", "1")   # the dispatcher itself may run under either identity
+    monkeypatch.setenv("REVIEWER", "codex")
+    set_agent_status(env, "prep", "idle")
+    finish_prep(settings)
+    assert len(seen) == 2
+    assert all("CLAUDECODE" not in e and e.get("CODEX_SANDBOX") == "1" and "REVIEWER" not in e for e in seen)
