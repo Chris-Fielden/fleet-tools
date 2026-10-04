@@ -23,6 +23,9 @@
 # "Commit:" header holding the full id of the commit reviewed. The merge script
 # only accepts a review of the exact commit it is merging. The verdict is also
 # recorded on the branch's ticket (`ticket review-result`) for the Kaneo card.
+# After a PASS, the review's SHOULD FIX items are also added to that ticket as a
+# note, so they are not lost; REVIEW_PROPOSE_LEFTOVERS=1 also proposes one
+# grouped fix ticket for them.
 set -euo pipefail
 
 root="$(git rev-parse --show-toplevel)"
@@ -109,7 +112,12 @@ record_on_ticket() {
     echo "note: no ticket command found, so the verdict was not recorded on the ticket."
     return 0
   fi
-  "$ticket_cmd" review-result --branch "$branch" --repo "$repo" --file "$1" \
+  # --leftovers also saves a PASS review's SHOULD FIX items as a ticket note
+  # (and, with REVIEW_PROPOSE_LEFTOVERS=1, proposes one grouped fix ticket). It
+  # never changes the verdict or the saved review the merge gate reads.
+  local extra=(--leftovers)
+  [[ "${REVIEW_PROPOSE_LEFTOVERS:-}" == "1" ]] && extra+=(--propose-leftovers)
+  "$ticket_cmd" review-result --branch "$branch" --repo "$repo" --file "$1" "${extra[@]}" \
     || echo "note: the verdict could not be recorded on the ticket (the saved review is unaffected)."
 }
 

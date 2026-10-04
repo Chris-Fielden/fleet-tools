@@ -66,6 +66,11 @@ def _build_parser() -> argparse.ArgumentParser:
     rr.add_argument("--branch", required=True)
     rr.add_argument("--repo", required=True)
     rr.add_argument("--file", required=True, help="a review saved in .reviews/")
+    rr.add_argument("--leftovers", action="store_true",
+                    help="after a PASS, save the review's SHOULD FIX items as a note on the ticket")
+    rr.add_argument("--propose-leftovers", action="store_true",
+                    help="with --leftovers, also propose one fix ticket (parent: the reviewed ticket) "
+                         "holding those items")
 
     risk = sub.add_parser("risk", help="show a ticket's risk level, judge a diff, or raise a level")
     risk.add_argument("id", nargs="?")
@@ -187,7 +192,46 @@ def _cmd_review_result(args) -> int:
     for t in changed:
         print(f"{t['id']} verdict {t['verdict']['result']} recorded")
         kaneo.mirror_quietly(t, _warn)
+    if args.leftovers and info["verdict"] == "PASS" and changed:
+        _save_leftovers(args, info, changed)
     return 0
+
+
+def _save_leftovers(args, info: dict, changed: list) -> None:
+    """Keep a PASS review's SHOULD FIX items where they will not be lost.
+    Never changes the verdict or the exit status: a problem here is a warning."""
+    items = rk.should_fix_items(Path(args.file).read_text(encoding="utf-8"))
+    if not items:
+        return
+    label = f"SHOULD FIX leftovers from the {info['reviewer']} review of {info['commit'][:7]} (PASS):\n"
+    text = label + items
+    if len(text) > tk.NOTE_MAX:
+        text = text[:tk.NOTE_MAX - 15].rstrip() + "\n[...truncated]"
+    for t in changed:
+        try:
+            if any(n["text"] == text for n in t.get("notes", [])):
+                continue  # the same review was recorded twice
+            noted = tk.add_note(t["id"], text)
+            print(f"{t['id']} SHOULD FIX leftovers saved as a note")
+            kaneo.mirror_quietly(noted, _warn)
+        except (tk.TicketError, tk.TicketInvalid) as exc:
+            _warn(f"could not save the SHOULD FIX leftovers on {t['id']}: {exc}")
+    if not args.propose_leftovers:
+        return
+    parent = changed[0]
+    branch = f"task/leftovers-{parent['id'].lower()}"
+    try:
+        if any(o["parent"] == parent["id"] and o["branch"] == branch for o in tk.list_tickets()):
+            return  # one grouped ticket per reviewed ticket
+        body = (f"Smaller review suggestions left over from {parent['id']} "
+                f"({parent['title']}), kept out of that branch so its tip review stays valid.\n\n{items}")
+        new = tk.create_ticket({
+            "type": "fix", "repo": parent["repo"], "branch": branch, "parent": parent["id"],
+            "title": f"Leftover review items from {parent['id']}", "body": body[:tk.BODY_MAX]})
+        print(f"{new['id']} proposed for the leftover SHOULD FIX items")
+        kaneo.mirror_quietly(new, _warn)
+    except (tk.TicketError, tk.TicketInvalid) as exc:
+        _warn(f"could not propose a leftovers ticket for {parent['id']}: {exc}")
 
 
 def _cmd_risk(args) -> int:
