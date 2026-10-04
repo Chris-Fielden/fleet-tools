@@ -616,3 +616,24 @@ def test_a_pending_ping_with_a_bad_detail_is_dropped_on_load(rig):
                     {"id": "BD-1", "event": "oncall", "detail": "OC-1"}]}))
     state = rw._load_state(lambda m: None)
     assert state["pending"] == [{"id": "BD-1", "event": "oncall", "detail": "OC-1"}]
+
+
+@pytest.mark.parametrize("status", ["claimed", "review"])
+def test_a_normal_ticket_cannot_take_the_branch_of_a_running_on_call_ticket(rig, status):
+    tk.set_status(rig.id, "failed", allowed_from=("claimed",))
+    oc = tk.create_ticket({"type": "fix", "repo": "app", "branch": "task/oc-a", "title": "a", "body": "b",
+                           "parent": rig.id}, oncall=True)
+    tk.set_status(oc["id"], "claimed", allowed_from=("open",), assignee="claude")
+    if status == "review":
+        tk.set_status(oc["id"], "review", allowed_from=("claimed",))
+    clash = mk(type="fix", branch="task/oc-a", parent=rig.id)    # a normal fix ticket on the same branch
+    (d,) = dp.decide(tk.list_tickets(), rig.settings)
+    assert d.ticket["id"] == clash["id"] and not d.eligible and f"in use by claimed ticket {oc['id']}" in d.skip
+
+
+def test_a_close_note_that_trips_the_secret_scan_drops_the_reviewer_name(rig, ntfy, leaky_gitleaks):
+    stop_after_fail(rig, reviewer="Codex")
+    rig.cycle(0)
+    rig.cycle(6)
+    t = rig.get()
+    assert t["status"] == "failed" and "Codex" not in t["close_note"] and "withheld" in t["close_note"]

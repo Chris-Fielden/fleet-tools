@@ -372,6 +372,8 @@ def _fail_ticket(t: dict, reason: str, repo: Path, tip: str, settings: dict, sta
     ping. Never pings for a mid-loop FAIL."""
     tid = t["id"]
     detail = f"{reason}; failed by: {_failed_reviewers(t)}; FAIL rounds: {fail_rounds(t)}"
+    if tk.check_secrets("close note", detail):   # the reviewer name is free text: scan it like any note
+        detail = f"{reason}; FAIL rounds: {fail_rounds(t)} (reviewer name withheld)"
     try:
         failed = tk.set_status(tid, "failed", allowed_from=("claimed",),
                                close_note=_clip(f"Failed: {detail}", tk.CLOSE_NOTE_MAX))

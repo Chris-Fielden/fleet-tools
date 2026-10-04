@@ -233,7 +233,7 @@ class Decision:
         return f"{self.ticket['id']}  would launch {self.agent} ({model}) in {self.worktree}"
 
 
-def _judge(t: dict, tickets: dict, claimed: list[dict], settings: dict) -> Decision:
+def _judge(t: dict, tickets: dict, claimed: list[dict], settings: dict, holders: list[dict] | None = None) -> Decision:
     d = Decision(ticket=t, name=t["branch"].removeprefix("task/"))
 
     # 1. Type
@@ -258,7 +258,7 @@ def _judge(t: dict, tickets: dict, claimed: list[dict], settings: dict) -> Decis
                   "task/ must be 2 to 41 lowercase letters, numbers or dashes, "
                   "starting with a letter or number)")
         return d
-    for other in claimed:
+    for other in (claimed if holders is None else holders):   # on-call tickets hold branches, not capacity
         if other["branch"] == t["branch"]:
             d.skip = f"branch {t['branch']} is in use by claimed ticket {other['id']}"
             return d
@@ -291,16 +291,16 @@ def decide(tickets: list[dict], settings: dict) -> list[Decision]:
     # branch. They have their own rules (decide_investigations).
     # A ticket in review still holds its branch and its place in the capacity.
     # On-call fix tickets have their own slot (decide_oncall): they neither fill
-    # the normal capacity nor wait in the normal queue.
-    claimed = [t for t in tickets if t["status"] in ("claimed", "review") and t["type"] != "investigate"
-               and not t.get("oncall")]
+    # the normal capacity nor wait in the normal queue, but they still hold their branch.
+    holders = [t for t in tickets if t["status"] in ("claimed", "review") and t["type"] != "investigate"]
+    claimed = [t for t in holders if not t.get("oncall")]
     decisions = []
     picked = False
     open_tickets = sorted((t for t in tickets if t["status"] == "open" and t["type"] != "investigate"
                            and not t.get("oncall")),
                           key=lambda t: (t.get("priority") != "urgent", *tk.oldest_first_key(t)))
     for t in open_tickets:
-        d = _judge(t, by_id, claimed, settings)
+        d = _judge(t, by_id, claimed, settings, holders)
         if d.eligible:
             if picked:
                 d.skip = "only one ticket is started per run"
