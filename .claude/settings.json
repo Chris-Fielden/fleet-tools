@@ -56,5 +56,9 @@
         ]
       }
     ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "python3 \"$(git rev-parse --show-toplevel)/bin/fleet-statusline\""
   }
 }

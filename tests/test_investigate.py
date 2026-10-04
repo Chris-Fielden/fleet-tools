@@ -473,6 +473,7 @@ def test_research_folder_wires_the_guard_hooks(projects, herdr_log, env):
         assert Path(a).is_absolute() and Path(a).parent == repo / ".claude" / "hooks" and Path(a).is_file()
     assert "CLAUDE_PROJECT_DIR" not in path.read_text()
     assert "Stop" not in got["hooks"]
+    assert str(repo / "bin" / "fleet-statusline") in got["statusLine"]["command"]
 
 
 def test_missing_guard_hooks_stop_the_launch(projects, herdr_log, monkeypatch, env):
