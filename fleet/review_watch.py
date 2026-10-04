@@ -372,7 +372,9 @@ def _note(ticket_id: str, text: str, warn) -> None:
     """Add a note; a note the store refuses for good (a secret scan hit) is only a warning."""
     try:
         tk.add_note(ticket_id, _clip(text, tk.NOTE_MAX))
-    except tk.TicketInvalid as exc:
+    except (tk.TicketInvalid, tk.TicketError) as exc:
+        # Refused (a secret scan hit, or the ticket is at its notes limit): skip the
+        # note so recovery still queues its ping and completes.
         warn(f"{ticket_id}: could not save a note ({exc})")
 
 

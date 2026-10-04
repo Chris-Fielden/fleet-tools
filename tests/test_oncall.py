@@ -858,3 +858,13 @@ def test_on_call_tickets_own_their_branch_in_every_check(rig):
                               "parent": rig.id}, oncall=True)
     (d,) = dp.decide_oncall(tk.list_tickets(), rig.settings, set())
     assert d.ticket["id"] == other["id"] and "held by another ticket" in d.skip
+
+
+def test_a_failed_ticket_at_the_notes_limit_still_finishes_recovery(rig, ntfy):
+    rig.edit(notes=[{"at": "2026-10-04T00:00:00Z", "by": "claude", "text": f"n{i}"} for i in range(tk.NOTES_LIMIT)])
+    stop_after_fail(rig)
+    rig.cycle(0)
+    rig.cycle(6)
+    assert rig.get()["status"] == "failed" and records() == [] and len(oncall_tickets()) == 1
+    assert [t[0] for t in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it"]
+    assert any("could not save a note" in w for w in rig.warnings)
