@@ -396,9 +396,14 @@ def validate(t: dict, settings: dict) -> str | None:
         return "the task folder has uncommitted changes"
     if not (wt / "scripts" / "check.sh").is_file() or not (wt / "scripts" / "review.sh").is_file():
         return "scripts/check.sh or scripts/review.sh is missing"
-    if _run(["bash", "scripts/check.sh"], wt, CHECK_TIMEOUT) != 0:
-        return "scripts/check.sh failed"
+    # The branch was just changed by an agent: its scripts and tests run with an agent's identity,
+    # never the human's, so the ticket store and the hooks refuse human-only actions to them.
     env = dict(os.environ)
+    env.pop("CODEX_SANDBOX", None)
+    env.pop("CODEX_SANDBOX_NETWORK_DISABLED", None)
+    env["CLAUDECODE"] = "1"
+    if _run(["bash", "scripts/check.sh"], wt, CHECK_TIMEOUT, env) != 0:
+        return "scripts/check.sh failed"
     env.setdefault("FLEET_TICKET", str(Path(__file__).resolve().parent.parent / "bin" / "ticket"))
     if _run(["bash", "scripts/review.sh"], wt, REVIEW_TIMEOUT, env) != 0:
         return "the review did not pass"

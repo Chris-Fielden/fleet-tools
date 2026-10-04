@@ -223,3 +223,22 @@ def test_giving_up_on_a_job_is_a_loud_warning(q, herdr_log, env, monkeypatch):
         warns += finish_prep(settings)[1]
     assert prep.locked_ids() == set()
     assert any("given up" in w and a["id"] in w for w in warns)
+
+
+def test_the_recheck_runs_the_branch_scripts_with_an_agent_identity(q, herdr_log, env, monkeypatch):
+    a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
+    settings, _, _ = start_prep()
+    commit(a_wt, {"more.txt": "changed by the prep agent"})
+    seen = []
+    real = prep._run
+
+    def spy(cmd, cwd, timeout, env=None):
+        seen.append(dict(env or {}))
+        return real(cmd, cwd, timeout, env)
+
+    monkeypatch.setattr(prep, "_run", spy)
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.setenv("CODEX_SANDBOX", "1")
+    set_agent_status(env, "prep", "idle")
+    finish_prep(settings)
+    assert len(seen) == 2 and all(e.get("CLAUDECODE") == "1" and "CODEX_SANDBOX" not in e for e in seen)
