@@ -121,7 +121,7 @@ def has_summary_after_review(t: dict) -> bool:
     # The prep pass (the dispatcher, so a human) re-checks a branch it changed and says so
     # in a note; that stands in for the agent's summary of the new tip.
     return any(n["at"] >= v["at"] and not n["text"].startswith(LEFTOVERS_PREFIX)
-               and (n["by"] == t.get("assignee") or (n["by"] == "human" and n["text"].startswith(prep.NOTE_PREFIX)))
+               and (n["by"] == t.get("assignee") or (n["by"] == "human" and n["text"].startswith(prep.PASS_NOTE_PREFIX)))
                for n in t.get("notes", []))
 
 

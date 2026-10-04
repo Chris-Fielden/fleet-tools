@@ -38,7 +38,10 @@ from . import notify
 from . import ticket as tk
 
 PREP_TZ = ZoneInfo("America/Los_Angeles")
-NOTE_PREFIX = "Prep pass:"      # a note by the dispatcher; review_watch counts it as a summary
+NOTE_PREFIX = "Prep pass:"      # a note by the dispatcher
+# Only this one counts for review_watch as the summary of a changed tip; bounce and duplicate notes
+# share NOTE_PREFIX but must never stand in for an agent's summary.
+PASS_NOTE_PREFIX = f"{NOTE_PREFIX} re-checked at"
 FOLDER_ID = "PREP"              # the agent folder under research_dir, and the tab label of the prep agent
 JOB_MAX = timedelta(hours=4)    # after this long a still-working agent is reported (its tickets stay locked)
 MAX_ATTEMPTS_PER_DAY = 3        # launch attempts of the prep agent per UTC day
@@ -383,7 +386,7 @@ def _run(cmd: list[str], cwd: Path, timeout: int, env=None) -> int:
 def validate(t: dict, settings: dict) -> str | None:
     """Re-check a branch the agent changed: a clean task folder, scripts/check.sh, and the
     reviews its risk level needs (scripts/review.sh decides how many and records the verdict
-    on the ticket). On success a "Prep pass:" note is saved after the new verdict. Returns a
+    on the ticket). On success a "Prep pass: re-checked at" note is saved after the new verdict. Returns a
     one-line problem, or None."""
     repo, wt = _repo(t, settings), _worktree(t, settings)
     if not wt.is_dir():
@@ -404,7 +407,7 @@ def validate(t: dict, settings: dict) -> str | None:
     v = fresh["verdict"]
     if not (v and v["result"] == "PASS" and v["commit"] == tip and kaneo.ready_to_ship(fresh)):
         return "no passing review of the new tip is recorded on the ticket"
-    tk.add_note(t["id"], f"{NOTE_PREFIX} the branch was changed and re-checked at {tip[:8]}: "
+    tk.add_note(t["id"], f"{PASS_NOTE_PREFIX} {tip[:8]}: the branch was changed; "
                          "scripts/check.sh and the required reviews passed.")
     return None
 

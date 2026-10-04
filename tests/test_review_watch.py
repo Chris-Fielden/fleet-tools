@@ -10,6 +10,7 @@ from conftest import run
 from fake_kaneo import FakeKaneo
 from fleet import dispatch as dp
 from fleet import notify
+from fleet import prep
 from fleet import review_watch as rw
 from fleet import ticket as tk
 from test_dispatch import calls, claim, git, herdr_log, make_repo, mk, projects  # noqa: F401
@@ -659,3 +660,15 @@ def test_investigation_done_pings_low(projects, herdr_log, ntfy, monkeypatch, en
     dispatch_cli._cycle(dp.load_settings(), print, lambda m: None)
     assert tk.load_ticket(t["id"])["status"] == "done"
     assert [r["priority"] for r in ntfy.requests] == ["low"]
+
+
+def test_only_the_prep_pass_success_note_counts_as_a_summary(rig, ntfy):
+    rig.verdict()
+    tk.add_note(rig.id, f"{prep.NOTE_PREFIX} left off the ship list: the task folder has uncommitted changes.")
+    tk.add_note(rig.id, f"{prep.NOTE_PREFIX} TICKET-2 was a duplicate and is cancelled; its work is folded in.")
+    rig.set_agent("idle")
+    rig.cycle()
+    assert rig.get()["status"] == "claimed"
+    tk.add_note(rig.id, f"{prep.PASS_NOTE_PREFIX} abc12345: the branch was changed; checks passed.")
+    rig.cycle(5)
+    assert rig.get()["status"] == "review"
