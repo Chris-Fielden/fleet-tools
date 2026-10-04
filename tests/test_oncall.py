@@ -2,7 +2,7 @@
 fake ntfy, temp FLEET_HOME, real git).
 
 A mid-loop FAIL never pings. A ticket truly fails when its agent sat idle on the
-failed commit for 5 minutes, it has 3 FAIL verdicts on different commits, its
+failed commit for 5 minutes, it has 8 FAIL verdicts on different commits, its
 agent was blocked for 20 minutes, or nothing happened for 45 minutes. It is then
 closed as failed and one on-call agent is launched at once in its own slot.
 """
@@ -120,22 +120,46 @@ def test_a_working_agent_after_a_fail_is_never_failed_for_stopping(rig, ntfy):
     assert rig.get()["status"] == "claimed" and ntfy.requests == []
 
 
-def test_three_fails_on_different_commits_is_going_in_circles(rig, ntfy):
-    rig.verdict("FAIL")
-    rig.commit("a")
-    rig.verdict("FAIL")
-    rig.cycle(0)           # two rounds, agent still working: nothing happens
+def fail_rounds_on_new_commits(rig, n):
+    for i in range(n):
+        if i:
+            rig.commit(f"c{i}")
+        rig.verdict("FAIL")
+
+
+def test_eight_fails_on_different_commits_is_going_in_circles(rig, ntfy):
+    fail_rounds_on_new_commits(rig, 7)
+    rig.cycle(0)           # seven rounds, agent still working: nothing happens
     assert rig.get()["status"] == "claimed" and ntfy.requests == []
-    rig.commit("b")
+    rig.commit("last")
     rig.verdict("FAIL")
     rig.cycle(1)
     t = rig.get()
     assert t["status"] == "failed" and "going in circles" in t["close_note"]
-    assert "FAIL rounds: 3" in t["close_note"] and len(t["fail_commits"]) == 3
+    assert "FAIL rounds: 8" in t["close_note"] and len(t["fail_commits"]) == 8
     assert [x[0] for x in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it"]
 
 
+def test_the_threshold_is_a_setting(rig, ntfy):
+    rig.settings["fail_rounds_threshold"] = 2
+    fail_rounds_on_new_commits(rig, 2)
+    rig.cycle(0)
+    assert rig.get()["status"] == "failed" and "FAIL rounds: 2" in rig.get()["close_note"]
+
+
+def test_fail_rounds_threshold_setting_is_validated(env):
+    assert st.load_settings()["fail_rounds_threshold"] == 8
+    tk.fleet_home().mkdir(parents=True, exist_ok=True)
+    (tk.fleet_home() / "settings.json").write_text(json.dumps({"fail_rounds_threshold": 3}))
+    assert st.load_settings()["fail_rounds_threshold"] == 3
+    for bad in (0, -1, True, "8"):
+        (tk.fleet_home() / "settings.json").write_text(json.dumps({"fail_rounds_threshold": bad}))
+        with pytest.raises(st.SettingsError):
+            st.load_settings()
+
+
 def test_two_reviewers_failing_one_commit_is_one_round(rig, ntfy):
+    rig.settings["fail_rounds_threshold"] = 3
     for _ in range(2):
         rig.verdict("FAIL", "Codex")
         rig.verdict("FAIL", "Claude (opus)")

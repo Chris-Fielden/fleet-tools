@@ -7,7 +7,7 @@
   If that stops being true (the tip moved, the agent is busy again) it goes
   back to claimed.
 * A claimed ticket TRULY FAILS when its agent sat idle on a failed commit for
-  5 minutes, it has 3 FAIL verdicts on different commits, its agent was blocked
+  5 minutes, it has `fail_rounds_threshold` (default 8) FAIL verdicts on different commits, its agent was blocked
   for 20 minutes, or it had no activity for 45 minutes. It is then closed as
   failed and an on-call fix ticket is filed (launched by the dispatch cycle in
   its own slot); see _fail_ticket. A mid-loop FAIL verdict never pings.
@@ -49,7 +49,6 @@ from . import ticket as tk
 BLOCKED_AFTER = 20 * 60   # seconds an agent waits for input before the ticket fails
 STALL_AFTER = 45 * 60     # seconds with no commit, note or log output before the ticket fails
 STOPPED_AFTER = 5 * 60    # seconds an agent sits idle on a failed tip before the ticket fails
-FAIL_ROUNDS = 3           # FAIL verdicts on different commits before the ticket fails
 UNRECORDED_GRACE = 2 * 60  # seconds review.sh gets to record a review it just saved
 LOG_TAIL = 256 * 1024
 # Dispatcher log kinds that show a ticket's work moving. (RECONCILE_SKIP and
@@ -228,7 +227,7 @@ def _unrecorded_pings(t: dict, repo: Path, tip: str, state: dict, now: datetime,
 # what an agent says):
 #   * its agent stopped (idle or done) with the branch tip still the commit
 #     that got a FAIL, for STOPPED_AFTER seconds in a row; or
-#   * it has FAIL_ROUNDS or more FAIL verdicts on different commits, the latest
+#   * it has `fail_rounds_threshold` or more FAIL verdicts on different commits, the latest
 #     verdict still being a FAIL (going in circles); or
 #   * its agent has waited for input for BLOCKED_AFTER seconds (permission
 #     prompts are never answered); or
@@ -259,7 +258,7 @@ def _end_spells(ticket_id: str, state: dict) -> None:
 
 
 def _failure_reason(t: dict, repo: Path, tip: str, agent: dict | None, state: dict,
-                    now: datetime) -> str | None:
+                    now: datetime, fail_rounds_threshold: int) -> str | None:
     """Why this claimed ticket has truly failed, or None. Keeps the clocks for
     the stopped and blocked spells in `state`."""
     tid, v = t["id"], t["verdict"]
@@ -268,7 +267,7 @@ def _failure_reason(t: dict, repo: Path, tip: str, agent: dict | None, state: di
     reason = None
     # 1. Going in circles.
     rounds = fail_rounds(t)
-    if failed_now and rounds >= FAIL_ROUNDS:
+    if failed_now and rounds >= fail_rounds_threshold:
         reason = f"going in circles: {rounds} FAIL verdicts on different commits"
     # 2. The agent stopped without fixing the failed commit.
     if failed_now and v["commit"] == tip and agent_state in ("idle", "done"):
@@ -574,7 +573,7 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             _unrecorded_pings(new, repo, tip, state, now, emit, warn)
         return
     _unrecorded_pings(t, repo, tip, state, now, emit, warn)
-    reason = _failure_reason(t, repo, tip, agent, state, now)
+    reason = _failure_reason(t, repo, tip, agent, state, now, settings["fail_rounds_threshold"])
     if reason:
         write_recovery(t, reason, tip)   # first: everything else is driven from the record
 

@@ -26,6 +26,7 @@ with a plain message.
 | `emergency_prefix` | `EM` | prefix for any urgent ticket |
 | `oncall_prefix` | `OC` | prefix for the on-call fix tickets filed after a true failure |
 | `max_oncall_per_day` | `3` | on-call attempts a day (UTC); they do not count against `max_launches_per_day` |
+| `fail_rounds_threshold` | `8` | FAIL verdicts on different commits (latest still FAIL) after which a claimed ticket is "going in circles" and truly fails; 1 or more |
 | `kaneo.workspace_id` | `null` | used when `kaneo.json` lacks it (the url stays in `kaneo.json`: it decides where the key is sent) |
 | `kaneo.project_icon` | `Layout` | icon of projects the mirror creates |
 
