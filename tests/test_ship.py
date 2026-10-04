@@ -11,6 +11,7 @@ import pytest
 from conftest import ROOT
 from fleet import dispatch as dp
 from fleet import ticket as tk
+from fleet import ship_cli
 from fleet.ship_cli import main as ship_main
 
 from fleet import risk as rk
@@ -188,9 +189,19 @@ def test_ship_runs_both_reviewers_when_the_gate_needs_them(real_task, capsys):
 
 
 def answer(monkeypatch, text):
-    """Pretend a terminal is attached and the human types `text`."""
+    """Pretend a terminal is attached and the human types `text` (an exception
+    class is raised instead). Returns the list of prompts shown."""
+    asked = []
+
+    def fake_input(prompt=""):
+        asked.append(prompt)
+        if isinstance(text, type):
+            raise text
+        return text
+
     monkeypatch.setattr("fleet.ship_cli.sys.stdin", type("TTY", (), {"isatty": lambda self: True})())
-    monkeypatch.setattr("builtins.input", lambda prompt="": text)
+    monkeypatch.setattr("builtins.input", fake_input)
+    return asked
 
 
 def test_ship_without_a_terminal_does_not_offer_a_review(real_task, capsys):
@@ -236,9 +247,7 @@ def test_ship_does_not_offer_when_a_review_exists_but_failed(real_task, env, mon
     commit_in(wt, "fleet/x.py")
     fake_tool(env / "bin", "codex", verdict="FAIL")
     run_review(wt, env / "bin")
-    asked = []
-    answer(monkeypatch, "y")
-    monkeypatch.setattr("builtins.input", lambda prompt="": asked.append(prompt) or "y")
+    asked = answer(monkeypatch, "y")
     assert ship_main([t["id"]]) == 0
     assert asked == []
 
@@ -282,3 +291,40 @@ def test_bin_ship_runs_as_a_command(shipping, monkeypatch):
                        capture_output=True, text=True, env=dict(os.environ))
     assert r.returncode == 0, r.stderr
     assert tk.load_ticket(t["id"])["status"] == "done"
+
+
+def test_ship_ctrl_c_at_the_offer_declines_without_a_traceback(real_task, monkeypatch, capsys):
+    wt, t = real_task
+    full = commit_in(wt, "fleet/x.py")
+    answer(monkeypatch, KeyboardInterrupt)
+    assert ship_main([t["id"]]) == 0  # same as a no: the merge script decides
+    assert reviewers(wt, full) == set()
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_ship_high_risk_never_prompts(real_task, monkeypatch, capsys):
+    wt, t = real_task
+    full = commit_in(wt, "k8s/app.yaml")
+    asked = answer(monkeypatch, "n")  # a terminal is attached, and "no" must not matter
+    assert ship_main([t["id"]]) == 0
+    assert asked == []
+    assert reviewers(wt, full) == {"codex", "claude"}
+    assert "running both reviewers" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("code, stderr", [(3, ""), (1, "boom\n")])
+def test_ship_stops_when_the_gate_is_broken(real_task, env, monkeypatch, capsys, code, stderr):
+    wt, t = real_task
+    commit_in(wt, "fleet/x.py")
+    answer(monkeypatch, "y")
+    real = ship_cli._gate
+
+    def broken(repo, wt, branch, *fields):
+        if fields[-1] == "reviews":
+            return subprocess.CompletedProcess([], code, "", stderr)
+        return real(repo, wt, branch, *fields)
+
+    monkeypatch.setattr(ship_cli, "_gate", broken)
+    assert ship_main([t["id"]]) == 1
+    assert "ticket gate --field reviews failed" in capsys.readouterr().err
+    assert not (env / "finish.log").exists()
