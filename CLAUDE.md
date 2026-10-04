@@ -28,6 +28,8 @@ read its message, fix the cause, and try again. Never try to get around a hook.
   work, and Claude reviews Codex's.
 - Fix anything it marks **MUST FIX**, commit, and run the checks again.
 - You never approve or merge your own work.
+- How many reviewers depends on the risk level (see below). On a high-risk
+  branch `scripts/review.sh` runs both reviewers by default.
 - For a second opinion mid-task (a hard design choice, a stubborn bug,
   anything security-related), Claude uses `scripts/ask-codex.sh` (the
   ask-codex skill) and Codex uses `scripts/ask-claude.sh`. Both are
@@ -36,12 +38,34 @@ read its message, fix the cause, and try again. Never try to get around a hook.
 This file is the rulebook for every agent in this repo, Codex included
 (see `AGENTS.md`).
 
+### Risk levels and reviewers
+
+Every change has a risk level: **low**, **medium** or **high**. It comes from
+`risk-rules.json`: each file gets the highest level of any rule it matches, a
+change gets the highest level of its files, and unmatched files get the
+default (`medium`). The rules are read from the base branch, so a branch can't
+weaken its own rules.
+
+- **low** (for example `docs/**`, `tests/**`) and **medium**: one review by
+  the other model. As Claude, you get Codex: just run `scripts/review.sh`.
+- **high** (for example `k8s/**`, `.claude/**`, `.codex/**`, `CLAUDE.md`,
+  `AGENTS.md`, the core scripts, anything touching secrets or auth,
+  dependency files, and the ticket/risk code): **both reviewers**, Codex and
+  Claude, must PASS before the human can merge. `scripts/review.sh` with the
+  default `REVIEWER=auto` runs both on a high-risk branch; `REVIEWER=both`
+  forces it.
+
 ## 4. Only the human merges to main
 
-- Merging is done by the human with `scripts/finish-task.sh <task-name>`.
-  Do not run that script, and do not push to `main` or `master`.
+- Merging is done by the human with `ship` (or `scripts/finish-task.sh
+  <task-name>`). Do not run either, and do not push to `main` or `master`.
 - When you are done, say so, and list: what changed, how you verified it,
   and what the reviewer said.
+- Record that as a final SUMMARY with `ticket note <ID> "SUMMARY"` (what
+  changed, how you verified it, the review verdict; at most 4000 characters,
+  no secrets), then repeat it in your reply. Don't stop until the note is
+  saved. Use `ticket` only for your own ticket (`ticket show`, `ticket note`)
+  unless the human says otherwise.
 
 ## 5. GitOps: git is how things get deployed
 
