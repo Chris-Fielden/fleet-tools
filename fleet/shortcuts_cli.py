@@ -5,9 +5,10 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone
 
-from . import kaneo
 from . import notify
+from . import settings as st
 from . import ticket as tk
+from . import tracker as tr
 
 IDEAS_REPO = "ideas"
 
@@ -18,16 +19,15 @@ def _warn(message: str) -> None:
 
 def _file(prog: str, fields: dict) -> int:
     try:
-        ticket = tk.create_ticket(fields)
+        ticket = tr.get_tracker(_warn).create(fields)
     except tk.TicketInvalid as exc:
         for line in exc.errors:
             print(f"{prog}: {line}", file=sys.stderr)
         return 2
-    except (tk.TicketError, OSError) as exc:
+    except (tk.TicketError, st.SettingsError, OSError) as exc:
         print(f"{prog}: {exc}", file=sys.stderr)
         return 1
     print(ticket["id"])
-    kaneo.mirror_quietly(ticket, _warn)
     notify.notify_quietly(ticket, notify.event_for_new(ticket), _warn)
     return 0
 

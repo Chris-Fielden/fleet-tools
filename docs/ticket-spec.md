@@ -70,7 +70,8 @@ with no padding: `BD-1`, `BD-2`, `FX-1`, `EM-1`.
 | EM | any ticket whose `priority` is `urgent` (wins over the type prefix) |
 
 - The prefix comes from one lookup table (`TYPE_PREFIX`, plus
-  `EMERGENCY_PREFIX`) in `fleet/ticket.py`.
+  `EMERGENCY_PREFIX`) in `fleet/ticket.py`; those are the defaults, and
+  `id_prefixes` / `emergency_prefix` in settings.json override them.
 - The prefix is fixed when the ticket is created and never changes, even if
   its priority changes later.
 - Existing `T-YYYYMMDD-NNN` tickets keep their ids and work everywhere (show,

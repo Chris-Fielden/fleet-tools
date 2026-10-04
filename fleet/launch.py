@@ -20,6 +20,7 @@ from pathlib import Path
 from . import dispatch as dp
 from . import kaneo
 from . import ticket as tk
+from . import tracker as tr
 
 START_TIMEOUT = 60.0   # seconds to wait for the agent to be working
 POLL_INTERVAL = 1.0
@@ -356,9 +357,8 @@ def launch(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
     base = main_tip(d.repo_path)
     if base is None:
         return 1, f"cannot read the current commit of {d.repo_path}"
-    claimed = tk.set_status(t["id"], "claimed", allowed_from=("open",),
-                            assignee=d.agent, base_commit=base)
-    kaneo.mirror_quietly(claimed, warn)
+    tracker = tr.get_tracker(warn, settings)
+    tracker.claim(t["id"], d.agent, allowed_from=("open",), base_commit=base)
     folder, made, initial = None, "nothing", None
     try:
         dp.log("CLAIMED", f"{t['id']} {d.agent} {t['branch']} base {base[:12]}")
@@ -382,8 +382,7 @@ def launch(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
                             "so a human must look before this can be retried")
             except (LaunchError, OSError, subprocess.TimeoutExpired):
                 kept = "; cleanup failed, so a human must look before this can be retried"
-        reopened = tk.set_status(t["id"], "open", allowed_from=("claimed",), assignee=None)
-        kaneo.mirror_quietly(reopened, warn)
+        tracker.set_status(t["id"], "open", allowed_from=("claimed",), assignee=None)
         _safe_log("LAUNCH_FAILED", f"{t['id']} {exc}")
         return 1, f"{t['id']}  launch failed: {exc}; ticket put back to open{kept}"
     _safe_log("LAUNCHED", f"{t['id']} {d.agent} ({d.model or 'default'}) tab {tab} in {d.worktree}")
@@ -459,9 +458,8 @@ def launch_research(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
         return 1, f"{t['id']}  not launched: {problem}"
     # started_at is saved with the claim, so a start can never go uncounted;
     # a failed launch clears it again.
-    claimed = tk.set_status(t["id"], "claimed", allowed_from=("proposed", "open"), assignee=d.agent,
-                            started_at=tk._now())
-    kaneo.mirror_quietly(claimed, warn)
+    tracker = tr.get_tracker(warn, settings)
+    tracker.claim(t["id"], d.agent, allowed_from=("proposed", "open"), started_at=tk._now())
     try:
         dp.log("CLAIMED", f"{t['id']} {d.agent} investigation")
         tab = start_agent(d, research_folder(t["id"], settings),
@@ -472,9 +470,7 @@ def launch_research(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
         return 1, (f"{t['id']}  launch failed: {exc}. The agent may still be running, so the "
                    "ticket stays claimed; close the tab by hand, then close the ticket")
     except (LaunchError, OSError, subprocess.TimeoutExpired) as exc:
-        reopened = tk.set_status(t["id"], before, allowed_from=("claimed",), assignee=None,
-                                 started_at="")
-        kaneo.mirror_quietly(reopened, warn)
+        tracker.set_status(t["id"], before, allowed_from=("claimed",), assignee=None, started_at="")
         _safe_log("LAUNCH_FAILED", f"{t['id']} {exc}")
         return 1, f"{t['id']}  launch failed: {exc}; ticket put back to {before}"
     _safe_log("LAUNCHED", f"{t['id']} {d.agent} ({d.model or 'default'}) tab {tab} investigating")

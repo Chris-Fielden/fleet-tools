@@ -12,7 +12,9 @@ from pathlib import Path
 from . import kaneo
 from . import notify
 from . import risk as rk
+from . import settings as st
 from . import ticket as tk
+from . import tracker as tr
 
 
 class _Parser(argparse.ArgumentParser):
@@ -99,6 +101,10 @@ def _warn(message: str) -> None:
     print(f"ticket: {message}", file=sys.stderr)
 
 
+def _tracker() -> tr.Tracker:
+    return tr.get_tracker(_warn)
+
+
 def _cmd_new(args) -> int:
     if args.body_file is not None:
         try:
@@ -118,15 +124,14 @@ def _cmd_new(args) -> int:
         "title": args.title, "body": body,
         "commit": args.commit, "parent": args.parent, "priority": args.priority,
     }
-    ticket = tk.create_ticket(fields)
+    ticket = _tracker().create(fields)
     print(ticket["id"])
-    kaneo.mirror_quietly(ticket, _warn)
     notify.notify_quietly(ticket, notify.event_for_new(ticket), _warn)
     return 0
 
 
 def _cmd_list(args) -> int:
-    tickets = tk.list_tickets()
+    tickets = _tracker().list_tickets()
     if args.status:
         tickets = [t for t in tickets if t["status"] == args.status]
         if args.status == "review":
@@ -142,7 +147,7 @@ def _cmd_list(args) -> int:
 
 
 def _cmd_show(args) -> int:
-    t = tk.load_ticket(args.id)
+    t = _tracker().show(args.id)
     if args.json:
         print(json.dumps(t, indent=2))
         return 0
@@ -160,24 +165,21 @@ def _cmd_show(args) -> int:
 
 
 def _cmd_approve(args) -> int:
-    t = tk.approve_ticket(args.id)
+    t = _tracker().approve(args.id)
     print(f"{t['id']} approved (now {t['status']})")
-    kaneo.mirror_quietly(t, _warn)
     return 0
 
 
 def _cmd_close(args) -> int:
-    t = tk.close_ticket(args.id, args.outcome, args.note)
+    t = _tracker().close(args.id, args.outcome, args.note)
     print(f"{t['id']} closed (now {t['status']})")
-    kaneo.mirror_quietly(t, _warn)
     notify.notify_quietly(t, "failed" if t["status"] == "failed" else None, _warn)
     return 0
 
 
 def _cmd_note(args) -> int:
-    t = tk.add_note(args.id, args.text)
+    t = _tracker().add_note(args.id, args.text)
     print(f"{t['id']} note added ({len(t['notes'])} so far)")
-    kaneo.mirror_quietly(t, _warn)
     return 0
 
 
@@ -214,9 +216,8 @@ def _save_leftovers(args, info: dict, changed: list, review_text: str) -> None:
         try:
             if any(n["text"] == text for n in t.get("notes", [])):
                 continue  # the same review was recorded twice
-            noted = tk.add_note(t["id"], text)
+            _tracker().add_note(t["id"], text)
             print(f"{t['id']} SHOULD FIX leftovers saved as a note")
-            kaneo.mirror_quietly(noted, _warn)
         except (tk.TicketError, tk.TicketInvalid, OSError, UnicodeDecodeError) as exc:
             _warn(f"could not save the SHOULD FIX leftovers on {t['id']}: {exc}")
     if not args.propose_leftovers:
@@ -241,11 +242,10 @@ def _save_leftovers(args, info: dict, changed: list, review_text: str) -> None:
             body = body[:tk.BODY_MAX - 15].rstrip() + "\n[...truncated]"
         # Proposed, not open: its branch would start from main before the
         # reviewed branch is merged, so a human approves it after the merge.
-        new = tk.create_ticket({
+        new = _tracker().create({
             "type": "fix", "repo": parent["repo"], "branch": branch, "parent": parent["id"],
             "title": f"Leftover review items from {parent['id']}", "body": body}, needs_approval=True)
         print(f"{new['id']} proposed for the leftover SHOULD FIX items")
-        kaneo.mirror_quietly(new, _warn)
     except (tk.TicketError, tk.TicketInvalid, OSError, UnicodeDecodeError) as exc:
         _warn(f"could not propose a leftovers ticket for {parent['id']}: {exc}")
 
@@ -254,9 +254,8 @@ def _cmd_risk(args) -> int:
     if args.raise_to:
         if not args.id or args.diff:
             raise tk.TicketInvalid(["--raise needs a ticket id and cannot be combined with --diff"])
-        t = tk.raise_risk(args.id, args.raise_to)
+        t = _tracker().set_risk(args.id, args.raise_to)
         print(f"{t['id']} risk raised to {t['risk']}")
-        kaneo.mirror_quietly(t, _warn)
         return 0
     if not args.id and not args.diff:
         raise tk.TicketInvalid(["give a ticket id, --diff BASE...BRANCH, or both"])
@@ -345,7 +344,7 @@ def main(argv=None) -> int:
                "sync": _cmd_sync}
     try:
         return handler[args.command](args)
-    except rk.RiskError as exc:
+    except (rk.RiskError, st.SettingsError) as exc:
         print(f"ticket: {exc}", file=sys.stderr)
         return 1
     except kaneo.KaneoError as exc:

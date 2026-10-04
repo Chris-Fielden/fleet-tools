@@ -34,7 +34,9 @@ Build only the part your task names.
 
 ## Settings
 
-Optional `$FLEET_HOME/dispatch.json`. Defaults when it's missing:
+Optional `$FLEET_HOME/settings.json` (the older `dispatch.json` name still
+works); every key is documented in `docs/settings-spec.md`. Defaults when it's
+missing:
 
 ```json
 {
