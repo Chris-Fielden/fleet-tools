@@ -767,7 +767,7 @@ def relaunch(t: dict, settings: dict, warn) -> tuple[int, str]:
     repo = settings["projects_dir"] / t["repo"]
     name = t["branch"].removeprefix("task/")
     d = dp.Decision(ticket=t, name=name, repo_path=repo, agent=t["assignee"],
-                    model=settings["models"].get(t["assignee"]))
+                    model=settings["models"].get(t["assignee"]), oncall=bool(t.get("oncall")))
     folder = repo / ".worktrees" / name
     try:
         if repo.resolve().parent != settings["projects_dir"].resolve():

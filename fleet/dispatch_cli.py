@@ -110,13 +110,14 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     tickets = tk.list_tickets()
     # The on-call agent has its own slot: it starts at once, whatever the normal
     # queue is doing, and never counts against the daily launch limit.
-    running = set()
+    running, asked = set(), True
     if any(t.get("oncall") and t["status"] == "open" for t in tickets):   # nothing to ask herdr otherwise
         try:
             running = {a.get("name") for a in lc.list_agents() if a.get("agent_status") not in ("idle", "done")}
-        except lc.LaunchError:
-            pass   # launching asks herdr anyway, and says why it cannot
-    for d in dp.decide_oncall(tickets, settings, running):
+        except lc.LaunchError as exc:
+            asked = False   # whether the on-call slot is free is unknown: try again next cycle
+            warn(f"on-call launch deferred: cannot ask herdr which agents are running ({exc})")
+    for d in dp.decide_oncall(tickets, settings, running) if asked else []:
         if d.eligible:
             oncall_code, message = lc.launch_oncall(d, settings, warn)
             code = code or oncall_code

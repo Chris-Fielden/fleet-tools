@@ -307,16 +307,21 @@ def _oncall_body(t: dict, detail: str, tip: str, repo: Path) -> str:
     reviewed = v["commit"] if v is not None and v["result"] == "FAIL" else tip
     parts = [f"On-call fix for {t['id']} ({t['type']}): {_clip(t['title'], 100)}",
              f"WHY IT FAILED: {detail}",
-             f"FAILED BRANCH: {t['branch']} at {tip}. Your new branch starts from that commit.",
+             f"FAILED BRANCH: {t['branch']} at {tip}. Your new branch starts from that commit. "
+             "The failed agent's herdr tab may still be open: do not rely on that branch staying put.",
              "FAILED TICKET SPEC:\n" + _clip(t["body"], 1200)]
     notes = [f"- {n['by']} {n['at']}: {_clip(n['text'], 250)}" for n in t.get("notes", [])[-4:]]
     if notes:
         parts.append("FAILED TICKET NOTES (latest):\n" + "\n".join(notes))
     wt = repo / ".worktrees" / t["branch"].removeprefix("task/")
-    for kind, info in sorted(rk.latest_reviews(wt / ".reviews", reviewed).items()):
+    reviews = wt / ".reviews"
+    # The failed agent can write in its folder: never follow a link (to the folder
+    # or to a file) out of it into the on-call ticket, which may be mirrored.
+    safe = not wt.is_symlink() and not reviews.is_symlink() and reviews.resolve().parent == wt.resolve()
+    for kind, info in sorted(rk.latest_reviews(reviews, reviewed).items() if safe else []):
         try:
             if Path(info["file"]).is_symlink():
-                continue   # the failed agent can write there: never follow a link out of the folder
+                continue
             must = rk.review_items(Path(info["file"]).read_text(encoding="utf-8"), "MUST FIX")
         except (OSError, UnicodeDecodeError):
             continue
@@ -478,10 +483,11 @@ def _escalate_stuck_oncall(settings: dict, state: dict, emit, warn) -> None:
         repo = settings["projects_dir"] / oc["repo"]
         if repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir():
             continue
-        if not dp.branch_exists(repo, oc["branch"]):
+        folder = repo / ".worktrees" / oc["branch"].removeprefix("task/")
+        if not dp.branch_exists(repo, oc["branch"]) and not (folder.exists() or folder.is_symlink()):
             continue
         diagnosis = (f"Diagnosis: the on-call launch for {oc['parent']} failed and left {oc['branch']} "
-                     "behind, so it cannot be retried. Nothing more will be launched for it.")
+                     "or its task folder behind, so it cannot be retried. Nothing more will be launched for it.")
         try:
             tk.set_status(oc["id"], "failed", allowed_from=("open",),
                           close_note=_clip(f"Failed: {diagnosis}", tk.CLOSE_NOTE_MAX))
@@ -521,7 +527,9 @@ def check(settings: dict, now: datetime, emit, warn) -> None:
     live = {t["id"] for t in tickets}
     for name in ("blocked_since", "stopped_since", "seen"):
         state[name] = {k: v for k, v in state[name].items() if k in live}
-    state["sent"] = [k for k in state["sent"] if k.split(":", 1)[0] in live]
+    # Keys of the failure pings stay: their ticket is closed, and the key is the record that it was sent.
+    state["sent"] = [k for k in state["sent"]
+                     if k.split(":", 1)[0] in live or k.rsplit(":", 1)[-1] in FAILURE_EVENTS]
     try:
         _save_state(state)
     except OSError as exc:

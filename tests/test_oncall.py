@@ -485,3 +485,40 @@ def test_a_review_file_that_is_a_symlink_is_not_copied_into_the_ticket(rig, ntfy
     rig.cycle(6)
     (oc,) = oncall_tickets()
     assert "LEAKED TEXT" not in oc["body"]
+
+
+def test_a_review_folder_that_is_a_symlink_is_not_copied_into_the_ticket(rig, ntfy, env):
+    outside = env / "outside-reviews"
+    outside.mkdir()
+    (outside / "codex.md").write_text(
+        f"Reviewer: Codex\nCommit: {rig.tip()}\n\nVERDICT: FAIL\nMUST FIX:\n1. LEAKED TEXT\n")
+    (rig.wt / ".reviews").symlink_to(outside)
+    stop_after_fail(rig)
+    rig.cycle(0)
+    rig.cycle(6)
+    (oc,) = oncall_tickets()
+    assert "LEAKED TEXT" not in oc["body"]
+
+
+def test_on_call_launch_waits_when_herdr_cannot_say_whether_the_slot_is_free(rig, ntfy, herdr_log, monkeypatch, capsys):
+    oc = failed_ticket_with_oncall(rig, herdr_log)
+    tk.set_status(oc["id"], "failed", allowed_from=("claimed",))     # its agent is still running, though
+    second = tk.create_ticket({"type": "fix", "repo": "app", "branch": "task/oc-next", "title": "n", "body": "b",
+                               "parent": rig.id}, oncall=True)
+    world(rig, {"name": oc["id"].lower(), "agent_status": "working"})
+    monkeypatch.setenv("FLEET_HERDR", str(rig.env / "no-such-herdr"))
+    go(rig, 3, 2)
+    assert tk.load_ticket(second["id"])["status"] == "open"
+    assert "on-call launch deferred" in capsys.readouterr().out
+
+
+def test_an_open_on_call_ticket_with_a_leftover_task_folder_is_escalated(rig, ntfy):
+    stop_after_fail(rig)
+    rig.cycle(0)
+    rig.cycle(6)
+    (oc,) = oncall_tickets()
+    (rig.repo / ".worktrees" / oc["branch"].removeprefix("task/")).mkdir()   # a folder, no branch
+    rig.cycle(7)
+    assert tk.load_ticket(oc["id"])["status"] == "failed"
+    assert [t[0] for t in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it",
+                                          f"{rig.id} needs a human, see notes"]
