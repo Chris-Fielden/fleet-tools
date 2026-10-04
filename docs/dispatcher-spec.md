@@ -280,7 +280,13 @@ The same cycle launches it at once in the **on-call slot**: separate from
 counted against `max_launches_per_day`. Nothing runs when nothing has failed.
 The agent works in a new task folder on branch `task/oc-<failed id>` that starts
 from the failed branch's tip, and then follows the normal ready-to-ship flow.
-It uses the `builder` agent.
+It uses the `builder` agent. The slot stays taken while the agent of an on-call
+ticket that has failed is still running in herdr. A failed ticket's own agent tab
+is left open (the line says so); close it by hand. A launch that fails after the
+folder was made is cleaned up (only while the folder and branch are untouched)
+and retried; if they cannot be removed the on-call ticket is closed as failed
+with a diagnosis note and one "needs a human" ping. The two failure pings are
+kept in `review-watch.json` (`pending`) and retried every cycle until sent.
 
 Loop guard: at most one on-call attempt per original ticket and at most
 `max_oncall_per_day` (3) a day (an on-call ticket counts from the moment it is

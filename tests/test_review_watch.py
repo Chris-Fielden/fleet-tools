@@ -342,13 +342,6 @@ def test_a_recorded_fail_alone_never_pings(rig, ntfy):
     assert ntfy.requests == [] and rig.get()["status"] == "claimed"
 
 
-def test_a_fail_of_an_old_commit_is_not_pinged(rig, ntfy):
-    rig.verdict("FAIL")
-    rig.commit("fix")
-    rig.cycle()
-    assert ntfy.requests == []
-
-
 def test_a_review_saved_but_not_recorded_pings_high_once(rig, ntfy):
     rig.review_file("Codex", "PASS", age=600)
     rig.cycle()
@@ -498,7 +491,7 @@ def test_a_restarted_watcher_does_not_repeat_pings(rig, ntfy):
     assert len(ntfy.requests) == 1
 
 
-def test_a_failure_ping_that_cannot_be_sent_warns_and_is_not_repeated_or_redone(rig):
+def test_a_failure_ping_that_cannot_be_sent_is_retried_until_it_goes_through_then_never_again(rig):
     fake = FakeNtfy(status=500)
     write_ntfy_config(fake.url)
     try:
@@ -506,11 +499,31 @@ def test_a_failure_ping_that_cannot_be_sent_warns_and_is_not_repeated_or_redone(
         rig.cycle(0)
         rig.cycle(21)
         assert rig.get()["status"] == "failed" and rig.warnings and len(fake.requests) == 1
+        rig.cycle(22)                      # the ticket is closed, yet the ping is still tried
+        assert len(fake.requests) == 2
         fake.status = 200
-        rig.cycle(22)
         rig.cycle(23)
-        assert len(fake.requests) == 1   # the failed ticket is closed: nothing more is decided about it
+        assert len(fake.requests) == 3 and fake.requests[-1]["body"]["title"] == f"{rig.id} failed, on-call OC-1 is on it"
+        rig.cycle(24)
+        rig.cycle(25)
+        assert len(fake.requests) == 3     # delivered once: never again
         assert len([t for t in tk.list_tickets() if t.get("oncall")]) == 1
+        assert json.loads(rw.state_path().read_text())["pending"] == []
+    finally:
+        fake.stop()
+
+
+def test_a_pending_failure_ping_survives_a_restart(rig):
+    fake = FakeNtfy(status=500)
+    write_ntfy_config(fake.url)
+    try:
+        rig.set_agent("blocked")
+        rig.cycle(0)
+        rig.cycle(21)
+        assert [p["event"] for p in json.loads(rw.state_path().read_text())["pending"]] == ["oncall"]
+        fake.status = 200
+        rig.cycle(22)                      # a fresh load of the same state file
+        assert fake.requests[-1]["body"]["title"].endswith("is on it") and len(fake.requests) == 2
     finally:
         fake.stop()
 

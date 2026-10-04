@@ -46,6 +46,7 @@ LOG_TAIL = 256 * 1024
 # Dispatcher log kinds that show a ticket's work moving. (RECONCILE_SKIP and
 # DECISION lines repeat every cycle and say nothing about the agent.)
 ACTIVITY_LOG_KINDS = ("LAUNCHED", "RELAUNCHED", "REVIEW_READY", "REVIEW_BACK")
+FAILURE_EVENTS = ("oncall", "needs_human")
 LEFTOVERS_PREFIX = "SHOULD FIX leftovers from"  # saved by `ticket review-result`, not a summary
 
 
@@ -54,15 +55,18 @@ def state_path() -> Path:
 
 
 def _load_state(warn) -> dict:
-    state = {"sent": [], "blocked_since": {}, "stopped_since": {}, "seen": {}}
+    state = {"sent": [], "blocked_since": {}, "stopped_since": {}, "seen": {}, "pending": []}
     try:
         data = json.loads(state_path().read_text(encoding="utf-8"))
         if (isinstance(data, dict) and isinstance(data.get("sent"), list)
                 and isinstance(data.get("blocked_since"), dict) and isinstance(data.get("seen"), dict)
-                and isinstance(data.get("stopped_since", {}), dict)):
+                and isinstance(data.get("stopped_since", {}), dict)
+                and isinstance(data.get("pending", []), list)):
             state.update(sent=[k for k in data["sent"] if isinstance(k, str)],
                          blocked_since=data["blocked_since"], seen=data["seen"],
-                         stopped_since=data.get("stopped_since", {}))
+                         stopped_since=data.get("stopped_since", {}),
+                         pending=[p for p in data.get("pending", []) if isinstance(p, dict)
+                                  and isinstance(p.get("id"), str) and p.get("event") in FAILURE_EVENTS])
         else:
             warn(f"{state_path()} has an unexpected shape; starting with an empty one")
     except FileNotFoundError:
@@ -152,6 +156,34 @@ def _ping(t: dict, event: str, key: str, state: dict, warn, detail: str | None =
         state["sent"].append(key)
         return True
     return False
+
+
+def _notify_failure(ticket: dict, event: str, state: dict, warn, detail: str | None = None) -> None:
+    """The one ping of a failure (event oncall or needs_human), once per ticket and
+    event. The ticket is closed by now, so the watch cycle no longer visits it: a
+    send that failed is kept in state["pending"] and retried every cycle until it
+    goes through."""
+    key = f"{ticket['id']}:{event}"
+    if key in state["sent"] or any(p["id"] == ticket["id"] and p["event"] == event for p in state["pending"]):
+        return
+    if notify.notify_quietly(ticket, event, warn, detail):
+        state["sent"].append(key)
+    else:
+        state["pending"].append({"id": ticket["id"], "event": event, "detail": detail})
+
+
+def _retry_pending(state: dict, warn) -> None:
+    keep = []
+    for p in state["pending"]:
+        try:
+            ticket = tk.load_ticket(p["id"])
+        except (tk.TicketError, tk.TicketInvalid):
+            continue   # gone: nothing to tell anyone about
+        if notify.notify_quietly(ticket, p["event"], warn, p.get("detail")):
+            state["sent"].append(f"{p['id']}:{p['event']}")
+        else:
+            keep.append(p)
+    state["pending"] = keep
 
 
 def _unrecorded_pings(t: dict, repo: Path, tip: str, state: dict, now: datetime, emit, warn) -> None:
@@ -283,6 +315,8 @@ def _oncall_body(t: dict, detail: str, tip: str, repo: Path) -> str:
     wt = repo / ".worktrees" / t["branch"].removeprefix("task/")
     for kind, info in sorted(rk.latest_reviews(wt / ".reviews", reviewed).items()):
         try:
+            if Path(info["file"]).is_symlink():
+                continue   # the failed agent can write there: never follow a link out of the folder
             must = rk.review_items(Path(info["file"]).read_text(encoding="utf-8"), "MUST FIX")
         except (OSError, UnicodeDecodeError):
             continue
@@ -339,7 +373,7 @@ def _fail_ticket(t: dict, reason: str, repo: Path, tip: str, settings: dict, sta
         warn(f"{tid}: could not close as failed: {exc}")
         return
     kaneo.mirror_quietly(failed, warn)
-    emit(f"{tid}  failed: {detail}")
+    emit(f"{tid}  failed: {detail}; its agent's herdr tab is left open (close it by hand if it is still there)")
     dp.log("FAILED", f"{tid} {_clip(detail, 200)}")
     tickets = tk.list_tickets()
     if t.get("oncall"):
@@ -360,7 +394,7 @@ def _fail_ticket(t: dict, reason: str, repo: Path, tip: str, settings: dict, sta
             kaneo.mirror_quietly(oc, warn)
             _note(tid, f"On-call ticket {oc['id']} was filed to fix this. {detail}.", warn)
             dp.log("ONCALL_FILED", f"{oc['id']} for {tid}")
-            _ping(failed, "oncall", f"{tid}:oncall", state, warn, oc["id"])
+            _notify_failure(failed, "oncall", state, warn, oc["id"])
             return
         why = "the on-call ticket could not be filed"
     _human(tid, f"Needs a human: {why}. {detail}.", state, warn)
@@ -375,7 +409,7 @@ def _human(ticket_id: str, note: str, state: dict, warn) -> None:
         warn(f"{ticket_id}: {exc}")
         return
     dp.log("NEEDS_HUMAN", f"{ticket_id}")
-    _ping(ticket, "needs_human", f"{ticket_id}:needs_human", state, warn)
+    _notify_failure(ticket, "needs_human", state, warn)
 
 
 # --- the cycle -----------------------------------------------------------------
@@ -434,9 +468,36 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
         _fail_ticket(t, reason, repo, tip, settings, state, emit, warn)
 
 
+def _escalate_stuck_oncall(settings: dict, state: dict, emit, warn) -> None:
+    """An on-call ticket that is open although its branch already exists is one
+    whose launch failed and left its folder or branch behind (they may hold
+    work), so it can never be launched. Close it as failed and tell a human."""
+    for oc in tk.list_tickets():
+        if not oc.get("oncall") or oc["status"] != "open":
+            continue
+        repo = settings["projects_dir"] / oc["repo"]
+        if repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir():
+            continue
+        if not dp.branch_exists(repo, oc["branch"]):
+            continue
+        diagnosis = (f"Diagnosis: the on-call launch for {oc['parent']} failed and left {oc['branch']} "
+                     "behind, so it cannot be retried. Nothing more will be launched for it.")
+        try:
+            tk.set_status(oc["id"], "failed", allowed_from=("open",),
+                          close_note=_clip(f"Failed: {diagnosis}", tk.CLOSE_NOTE_MAX))
+        except tk.TicketError:
+            continue
+        kaneo.mirror_quietly(tk.load_ticket(oc["id"]), warn)
+        emit(f"{oc['id']}  failed: on-call launch left {oc['branch']} behind")
+        dp.log("FAILED", f"{oc['id']} on-call launch left {oc['branch']} behind")
+        _note(oc["id"], diagnosis, warn)
+        _human(oc["parent"], diagnosis, state, warn)
+
+
 def check(settings: dict, now: datetime, emit, warn) -> None:
     """One watch cycle's pass over every claimed (or in-review) build or fix ticket."""
     state = _load_state(warn)
+    _retry_pending(state, warn)
     tickets = sorted((t for t in tk.list_tickets()
                       if t["status"] in ("claimed", "review") and t["type"] in dp.LAUNCH_TYPES
                       and t.get("assignee") in tk.AGENTS), key=tk.oldest_first_key)
@@ -453,6 +514,10 @@ def check(settings: dict, now: datetime, emit, warn) -> None:
             _check_one(t, agents.get(t["id"].lower()), known, settings, now, state, emit, warn)
         except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
             warn(f"{t['id']}: {exc}")
+    try:
+        _escalate_stuck_oncall(settings, state, emit, warn)
+    except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
+        warn(f"on-call check: {exc}")
     live = {t["id"] for t in tickets}
     for name in ("blocked_since", "stopped_since", "seen"):
         state[name] = {k: v for k, v in state[name].items() if k in live}

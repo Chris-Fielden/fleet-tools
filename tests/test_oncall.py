@@ -220,7 +220,7 @@ def test_no_event_pings_twice_for_the_same_ticket(rig, ntfy, herdr_log):
     assert len(ntfy.requests) == 1 and len(oncall_tickets()) == 1
     assert agent_starts(herdr_log) == ["oc-1"]
     state = json.loads((tk.fleet_home() / "review-watch.json").read_text())
-    assert state["sent"].count(f"{rig.id}:oncall") <= 1
+    assert state["pending"] == []   # delivered, nothing left to retry
 
 
 def test_the_card_moves_to_failed_and_the_on_call_card_exists(rig, ntfy):
@@ -251,8 +251,7 @@ def test_a_failed_on_call_ticket_launches_nothing_more_and_sends_one_needs_a_hum
         rig.cycle(minutes)
     oc_after = tk.load_ticket(oc["id"])
     assert oc_after["status"] == "failed" and "Diagnosis" in oc_after["notes"][-1]["text"]
-    assert "needs a human" in tk.load_ticket(rig.id)["notes"][-1]["text"].lower() or \
-        "Diagnosis" in tk.load_ticket(rig.id)["notes"][-1]["text"]
+    assert tk.load_ticket(rig.id)["notes"][-1]["text"].startswith(f"Diagnosis: on-call {oc['id']} could not fix {rig.id}.")
     assert [(t[0], t[2]) for t in sent(ntfy)] == [
         (f"{rig.id} failed, on-call OC-1 is on it", "low"), (f"{rig.id} needs a human, see notes", "low")]
     assert len(oncall_tickets()) == 1 and agent_starts(herdr_log) == ["oc-1"]
@@ -396,3 +395,93 @@ def test_the_notification_titles(rig):
 def test_a_ticket_closed_as_failed_by_a_human_still_pings_at_once(rig, ntfy):
     assert run("close", rig.id, "--failed", "--note", "bad").returncode == 0
     assert [(t[0], t[2]) for t in sent(ntfy)] == [(f"Ticket failed: {rig.id}", "high")]
+
+
+# --- launch trouble, slot ownership, hostile review files -----------------------------------
+
+def failed_ticket_with_oncall(rig, herdr_log):
+    """Fail the rig's ticket by stopping; returns the on-call ticket (launched or not)."""
+    stop_after_fail(rig)
+    world(rig, {"name": rig.id.lower(), "agent_status": "idle"})
+    go(rig, 3, 4)
+    (oc,) = oncall_tickets()
+    return oc
+
+
+def test_a_launch_that_fails_after_the_folder_exists_is_cleaned_up_and_retried(rig, ntfy, herdr_log, monkeypatch):
+    from fleet import launch as lc
+    real = lc.start_agent
+    attempts = []
+
+    def flaky(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise lc.LaunchError("herdr hiccup")
+        return real(*args, **kwargs)
+    monkeypatch.setattr(lc, "start_agent", flaky)
+    stop_after_fail(rig)
+    world(rig, {"name": rig.id.lower(), "agent_status": "idle"})
+    go(rig, 3, 5)
+    (oc,) = oncall_tickets()
+    assert len(attempts) == 2 and oc["status"] == "claimed"      # the retry worked: no stuck branch
+    assert git(rig.repo, "rev-parse", oc["branch"]).strip() == rig.tip()
+    assert [t[0] for t in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it"]
+
+
+def test_an_on_call_launch_that_leaves_its_branch_behind_ends_with_a_needs_a_human_ping(rig, ntfy, herdr_log, monkeypatch):
+    from fleet import launch as lc
+
+    def broken(*args, **kwargs):
+        raise lc.LaunchError("herdr is down")
+    monkeypatch.setattr(lc, "start_agent", broken)
+    monkeypatch.setattr(lc, "discard_oncall_worktree", lambda *a, **k: False)   # it may hold work: kept
+    stop_after_fail(rig)
+    world(rig, {"name": rig.id.lower(), "agent_status": "idle"})
+    go(rig, 3, 6)
+    (oc,) = oncall_tickets()
+    assert oc["status"] == "failed" and "left task/oc-" in oc["close_note"]
+    assert [t[0] for t in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it",
+                                          f"{rig.id} needs a human, see notes"]
+
+
+def test_discard_only_removes_an_untouched_folder_and_branch(rig, herdr_log):
+    from fleet import launch as lc
+    stop_after_fail(rig)
+    rig.cycle(0)
+    rig.cycle(6)
+    (oc,) = oncall_tickets()
+    d = dp.decide_oncall(tk.list_tickets(), rig.settings)[0]
+    folder = rig.repo / ".worktrees" / d.name
+    git(rig.repo, "worktree", "add", str(folder), "-b", oc["branch"], d.base)
+    (folder / "new.txt").write_text("work")
+    git(folder, "add", "-A")
+    git(folder, "commit", "-q", "-m", "work")
+    assert lc.discard_oncall_worktree(d, folder, d.base) is False   # has a commit of its own: kept
+    assert folder.is_dir()
+    git(folder, "reset", "-q", "--hard", d.base)
+    assert lc.discard_oncall_worktree(d, folder, d.base) is True
+    assert not folder.exists() and not dp.branch_exists(rig.repo, oc["branch"])
+    assert rig.tip() == d.base                                       # the failed branch is untouched
+
+
+def test_the_on_call_slot_stays_taken_while_a_failed_on_call_agent_still_runs(rig, ntfy, herdr_log):
+    oc = failed_ticket_with_oncall(rig, herdr_log)
+    second = tk.create_ticket({"type": "fix", "repo": "app", "branch": "task/oc-next", "title": "n", "body": "b",
+                               "parent": rig.id}, oncall=True)
+    tk.set_status(oc["id"], "failed", allowed_from=("claimed",))
+    running = {oc["id"].lower()}
+    d = dp.decide_oncall(tk.list_tickets(), rig.settings, running)
+    assert [(x.ticket["id"], x.eligible) for x in d] == [(second["id"], False)] and "busy" in d[0].skip
+    assert dp.decide_oncall(tk.list_tickets(), rig.settings, set())[0].eligible   # it has stopped: free
+
+
+def test_a_review_file_that_is_a_symlink_is_not_copied_into_the_ticket(rig, ntfy, env):
+    secret = env / "elsewhere.md"
+    secret.write_text(f"Reviewer: Codex\nCommit: {rig.tip()}\n\nVERDICT: FAIL\nMUST FIX:\n1. LEAKED TEXT\n")
+    (rig.wt / ".reviews").mkdir()
+    (rig.wt / ".reviews" / "codex.md").symlink_to(secret)
+    stop_after_fail(rig)
+    rig.cycle(0)
+    rig.cycle(6)
+    (oc,) = oncall_tickets()
+    assert "LEAKED TEXT" not in oc["body"]

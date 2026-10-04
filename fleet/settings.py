@@ -168,7 +168,7 @@ def _merge(settings: dict, given, path: Path) -> None:
         settings["max_oncall_per_day"] = _whole(path, given, "max_oncall_per_day", 0, "0 or more")
     used = list(settings["id_prefixes"].values()) + [settings["emergency_prefix"], settings["oncall_prefix"]]
     if len(set(used)) != len(used):
-        raise SettingsError(f"{path}: id prefixes must differ from each other and from emergency_prefix")
+        raise SettingsError(f"{path}: id prefixes must differ from each other and from emergency_prefix and oncall_prefix")
     if "kaneo" in given:
         k = given["kaneo"]
         if not isinstance(k, dict):

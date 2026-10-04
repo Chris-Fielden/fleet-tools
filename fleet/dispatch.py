@@ -355,13 +355,17 @@ def oncall_today(tickets: list[dict], now: datetime | None = None) -> int:
     return sum(1 for t in tickets if t.get("oncall") and t["created_at"].startswith(today))
 
 
-def decide_oncall(tickets: list[dict], settings: dict) -> list[Decision]:
+def decide_oncall(tickets: list[dict], settings: dict, running: frozenset | set = frozenset()) -> list[Decision]:
     """One Decision per open on-call ticket, first in, first out. The on-call
     slot is separate from the normal capacity and holds one agent at a time: it
     is busy while an on-call ticket is claimed (one waiting in review has an
-    agent that has stopped). Only the first eligible one stays eligible."""
+    agent that has stopped), and also while the agent of an on-call ticket that
+    has since failed is still running in herdr (`running`: the lowercase ids
+    of agents that have not stopped). Only the first eligible one stays eligible."""
     by_id = {t["id"]: t for t in tickets}
-    busy = any(t.get("oncall") and t["status"] == "claimed" for t in tickets)
+    busy = any(t.get("oncall") and (t["status"] == "claimed"
+                                    or (t["status"] == "failed" and t["id"].lower() in running))
+               for t in tickets)
     waiting = sorted((t for t in tickets if t.get("oncall") and t["status"] == "open"),
                      key=tk.oldest_first_key)
     projects_dir = settings["projects_dir"]
