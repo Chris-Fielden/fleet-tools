@@ -669,11 +669,18 @@ def finish(settings: dict, now: datetime, emit, warn) -> None:
             (_finish_prep if job["kind"] == "prep" else _finish_reconcile)(job, settings, now, emit, warn)
         except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired, lc.LaunchError) as exc:
             warn(f"{job['name']}: not finished, will retry ({exc})")
+            gave_up = []
             with _state() as st:
                 for j in st["jobs"]:
                     if j["name"] == job["name"]:
                         j["tries"] = j.get("tries", 0) + 1
+                gave_up = [j for j in st["jobs"] if j.get("tries", 0) >= MAX_TRIES]
                 st["jobs"] = [j for j in st["jobs"] if j.get("tries", 0) < MAX_TRIES]
+            for j in gave_up:
+                msg = (f"the {j['name']} job failed to finish {MAX_TRIES} times and was given up; "
+                       f"its tickets ({', '.join(j['ids'])}) are unlocked and were not re-checked")
+                warn(msg)
+                dp.log("PREP_FAILED", msg)
             continue
         if agent is not None:
             closed, reason = lc.close_finished_tab(job["label"], settings)

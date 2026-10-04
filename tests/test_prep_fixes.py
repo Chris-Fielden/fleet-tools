@@ -199,3 +199,27 @@ def test_an_unchanged_branch_whose_task_folder_is_gone_is_left_off_the_list(q, h
     finish_prep(settings)
     assert tk.load_ticket(a["id"])["status"] == "claimed"
     assert [i for i, _ in prep.read_list()] == [b["id"]]
+
+
+def test_two_ships_into_one_repo_never_run_together(q, herdr_log, env, capsys):
+    from fleet import ship_cli
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    with ship_cli._repo_lock(a["repo"]) as busy:
+        assert busy is False
+        assert ship_main([a["id"]]) == 1                  # another ship holds the repo
+        assert "already merging into" in capsys.readouterr().err
+        assert log_lines(env, "finish") == []             # the merge script never ran
+    assert prep.locked_ids() == set()                     # the refused run released its reservation
+    assert ship_main([a["id"]]) == 0
+
+
+def test_giving_up_on_a_job_is_a_loud_warning(q, herdr_log, env, monkeypatch):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    settings, _, _ = start_prep()
+    set_agent_status(env, "prep", "idle")
+    monkeypatch.setattr(prep, "_finish_prep", lambda *x: (_ for _ in ()).throw(OSError("disk full")))
+    warns = []
+    for _ in range(prep.MAX_TRIES):
+        warns += finish_prep(settings)[1]
+    assert prep.locked_ids() == set()
+    assert any("given up" in w and a["id"] in w for w in warns)

@@ -4,6 +4,8 @@ scripts/finish-task.sh, which keeps every check and prompt it has."""
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import os
 import subprocess
 import sys
@@ -144,9 +146,33 @@ def _ship_one(ticket_id: str, in_list: bool = False) -> int:
     if problem:
         return _fail(problem)
     try:
-        return _ship_reserved(t["id"], in_list)
+        with _repo_lock(t.get("repo")) as busy:
+            if busy:
+                return _fail(f"another ship is already merging into {t.get('repo')}; wait for it to finish")
+            return _ship_reserved(t["id"], in_list)
     finally:
         prep.release_shipping(t["id"])
+
+
+@contextlib.contextmanager
+def _repo_lock(repo_name):
+    """One merge at a time per repo, held across the merge-in-progress check, the merge script and
+    the conflict cleanup: otherwise one run could abort the half-done merge of another. Yields
+    True (without the lock) when another run holds it."""
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(repo_name))
+    path = tk.fleet_home() / f"ship-{safe}.lock"
+    tk.refuse_real_store_in_tests(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield True
+            return
+        try:
+            yield False
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def _ship_reserved(ticket_id: str, in_list: bool) -> int:
