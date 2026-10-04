@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -83,7 +84,7 @@ def _parse(stamp: str) -> datetime | None:
 
 def _tip(repo: Path, branch: str) -> str | None:
     out = dp._git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}")
-    return out.stdout.strip() or None if out.returncode == 0 else None
+    return (out.stdout.strip() or None) if out.returncode == 0 else None
 
 
 def has_summary_after_review(t: dict) -> bool:
@@ -157,8 +158,8 @@ def _alert_pings(t: dict, repo: Path, tip: str, agent: dict | None, state: dict,
             detail = "failed by " + ", ".join(who for _, who in fresh)
             if notify.notify_quietly(t, "review_failed", warn, detail):
                 state["sent"] += [f"{tid}:review_failed:{tip}:{k}" for k, _ in fresh]
-            emit(f"{tid}  review FAILED ({detail})")
-            dp.log("ALERT", f"{tid} review_failed {tip[:8]} {detail}")
+                emit(f"{tid}  review FAILED ({detail})")
+                dp.log("ALERT", f"{tid} review_failed {tip[:8]} {detail}")
     # 2. A review that was saved for this tip but never reached the ticket.
     wt = repo / ".worktrees" / t["branch"].removeprefix("task/")
     for kind, info in sorted(rk.latest_reviews(wt / ".reviews", tip).items()):
@@ -201,7 +202,7 @@ def _move(t: dict, status: str, allowed_from: tuple, warn):
     try:
         return tk.set_status(t["id"], status, allowed_from=allowed_from)
     except tk.TicketError as exc:
-        dp.log("RECONCILE_SKIP", f"{t['id']} {exc}")
+        dp.log("REVIEW_SKIP", f"{t['id']} {exc}")
         warn(f"{t['id']}: could not move to {status}: {exc}")
         return None
 
@@ -222,6 +223,7 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
         # Leave it alone if herdr cannot be asked; a vanished agent is not busy.
         busy = agents_known and agent is not None and not stopped
         if earned and not busy:
+            _ping(t, "ship", f"{t['id']}:ship:{tip}", state, warn)  # a send that failed is retried
             return
         new = _move(t, "claimed", ("review",), warn)
         if new:
@@ -259,11 +261,12 @@ def check(settings: dict, now: datetime, emit, warn) -> None:
             continue  # nothing here can be decided without herdr
         try:
             _check_one(t, agents.get(t["id"].lower()), known, settings, now, state, emit, warn)
-        except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+        except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
             warn(f"{t['id']}: {exc}")
     live = {t["id"] for t in tickets}
     for name in ("blocked_since", "seen"):
         state[name] = {k: v for k, v in state[name].items() if k in live}
+    state["sent"] = [k for k in state["sent"] if k.split(":", 1)[0] in live]
     try:
         _save_state(state)
     except OSError as exc:

@@ -98,7 +98,7 @@ def load_config() -> dict:
     for event, level in given.items():
         if event not in EVENTS:
             raise NotifyError(f"'priorities' in {path} has an unknown event (use: {', '.join(EVENTS)})")
-        if level not in PRIORITY_NUMBERS:
+        if not isinstance(level, str) or level not in PRIORITY_NUMBERS:
             raise NotifyError(f"the '{event}' priority in {path} must be one of: "
                               f"{', '.join(PRIORITY_NUMBERS)}")
         priorities[event] = level

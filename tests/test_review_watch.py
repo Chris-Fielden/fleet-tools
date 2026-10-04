@@ -487,6 +487,45 @@ def test_a_failed_send_is_retried_and_not_remembered(rig):
         fake.stop()
 
 
+def test_a_failed_ready_to_ship_ping_is_retried_while_in_review(rig):
+    fake = FakeNtfy(status=500)
+    write_ntfy_config(fake.url)
+    try:
+        rig.finish()
+        rig.cycle()
+        assert rig.get()["status"] == "review" and len(fake.requests) == 1
+        fake.status = 200
+        rig.cycle(1)
+        rig.cycle(2)
+        assert len(fake.requests) == 2   # one retry that worked, then never again
+    finally:
+        fake.stop()
+
+
+def test_a_git_timeout_on_one_ticket_still_saves_what_was_sent(rig, ntfy, monkeypatch):
+    rig.verdict("FAIL")
+    other = claim(mk(branch="task/other"))
+    real = rw._tip
+
+    def tip(repo, branch):
+        if branch == "task/other":
+            raise rw.subprocess.TimeoutExpired("git", 60)
+        return real(repo, branch)
+    monkeypatch.setattr(rw, "_tip", tip)
+    rig.cycle()
+    rig.cycle(1)
+    assert len(ntfy.requests) == 1 and any(other["id"] in w for w in rig.warnings)
+
+
+def test_keys_of_finished_tickets_are_dropped(rig, ntfy):
+    rig.verdict("FAIL")
+    rig.cycle()
+    tk.set_status(rig.id, "done", allowed_from=("claimed",))
+    rig.cycle(1)
+    state = json.loads(rw.state_path().read_text())
+    assert state["sent"] == []
+
+
 def test_nothing_happens_without_notify_config(rig):
     rig.verdict("FAIL")
     rig.cycle()
@@ -538,7 +577,8 @@ def test_priorities_can_be_overridden(rig, ntfy):
     assert sent(ntfy)[0][2] == "max" and ntfy.requests[0]["body"]["priority"] == 5
 
 
-@pytest.mark.parametrize("bad", [{"nonsense": "high"}, {"ship": "loud"}, {"ship": 4}, ["ship"]])
+@pytest.mark.parametrize("bad", [{"nonsense": "high"}, {"ship": "loud"}, {"ship": 4}, ["ship"],
+                                  {"ship": ["high"]}, {"ship": {"a": 1}}, {"ship": None}])
 def test_bad_priorities_are_refused(env, bad):
     write_ntfy_config("http://127.0.0.1:1", priorities=bad)
     with pytest.raises(notify.NotifyError):
