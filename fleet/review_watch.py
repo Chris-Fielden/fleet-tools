@@ -348,13 +348,13 @@ def _file_oncall(t: dict, detail: str, tip: str, repo: Path, warn) -> dict | Non
               "body": _oncall_body(t, detail, tip, repo)}
     try:
         try:
-            return tk.create_ticket(fields, oncall=True)
+            return tk.create_ticket(fields, oncall=True, oncall_base=tip)
         except tk.TicketInvalid:
             # The copied text tripped the secret scan or a limit: point at the ticket instead.
             fields["body"] = (f"On-call fix for {t['id']}. Why it failed: {_clip(detail, 300)}. "
                               f"Failed branch {t['branch']} at {tip}. Run `ticket show {t['id']}` "
                               "for its spec and notes.")
-            return tk.create_ticket(fields, oncall=True)
+            return tk.create_ticket(fields, oncall=True, oncall_base=tip)
     except (tk.TicketError, tk.TicketInvalid) as exc:
         warn(f"{t['id']}: could not file the on-call ticket: {exc}")
         return None

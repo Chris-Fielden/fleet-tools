@@ -51,6 +51,7 @@ launching, no hooks in this phase.
 | base_commit | string, optional | Git commit id (7 to 40 hex characters): main's tip when the dispatcher claimed the ticket. Reconcile only counts a `Merge <branch>` commit made after it. Absent on tickets claimed before this field existed (they count any merge in main's history). |
 | seq | integer, optional | Creation sequence, 1 or more, counting up across all tickets. Set by the tool; the tie-breaker when `created_at` is equal. Absent on tickets made before short ids (they count as 0). |
 | oncall | true, optional | Set only on the fix ticket the dispatcher files for the on-call agent after a true failure (prefix `OC`). Never supplied by a caller; an agent cannot file one. |
+| oncall_base | string, optional | On an on-call ticket: the full id of the failed branch's tip when the ticket failed. The on-call branch starts from exactly that commit, however long it waits for the on-call slot. |
 | fail_commits | list, optional | Full ids of every commit that got a recorded FAIL, oldest first. Added by `ticket review-result` (a verdict keeps only the latest, so this is what counts FAIL rounds). |
 | created_at | string | UTC time, ISO 8601, set by the tool. |
 | updated_at | string | UTC time, ISO 8601, set by the tool. |

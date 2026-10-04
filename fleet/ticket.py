@@ -32,8 +32,10 @@ FIELDS = (
 )
 # Optional fields: may be absent from a stored ticket.
 OPTIONAL_FIELDS = ("close_note", "base_commit", "seq", "priority", "risk", "notes", "started_at",
-                   "oncall", "fail_commits")
+                   "oncall", "oncall_base", "fail_commits")
 # oncall: true on the fix ticket the dispatcher files for the on-call agent.
+# oncall_base: the failed branch's tip when the ticket failed; the on-call branch
+# starts from exactly that commit, however long it waits for the on-call slot.
 # fail_commits: every commit that got a recorded FAIL, oldest first (a verdict
 # only keeps the latest, and "going in circles" counts rounds).
 CLOSE_NOTE_MAX = 500
@@ -297,6 +299,10 @@ def validate_stored(data) -> list[str]:
         errors.append(f"risk must be one of: {', '.join(rk.LEVELS)}")
     if "oncall" in data and data["oncall"] is not True:
         errors.append("oncall must be true when present")
+    base_tip = data.get("oncall_base")
+    if "oncall_base" in data and not (_is_str(base_tip) and re.fullmatch(r"[0-9a-f]{40}", base_tip)
+                                      and data.get("oncall") is True):
+        errors.append("oncall_base must be a full commit id, on an on-call ticket")
     fails = data.get("fail_commits")
     if "fail_commits" in data and not (
             isinstance(fails, list) and all(_is_str(c) and re.fullmatch(r"[0-9a-f]{40}", c) for c in fails)):
@@ -475,12 +481,15 @@ def _check_agent_rate(creator: str) -> None:
             f"(the limit is {AGENT_TICKET_LIMIT}). Wait, or ask the human to create it.")
 
 
-def create_ticket(fields: dict, *, needs_approval: bool = False, oncall: bool = False) -> dict:
+def create_ticket(fields: dict, *, needs_approval: bool = False, oncall: bool = False,
+                  oncall_base: str | None = None) -> dict:
     """Validate, check for secrets, assign an id and save. Returns the ticket.
     `oncall` (the dispatcher only, a fix ticket) gives it the on-call prefix and flag."""
     creator = current_creator()
     if oncall and (creator != "human" or fields.get("type") != "fix"):
         raise TicketError("only the dispatcher can file an on-call fix ticket")
+    if oncall_base is not None and not (oncall and re.fullmatch(r"[0-9a-f]{40}", oncall_base)):
+        raise TicketError("oncall_base must be a full commit id, on an on-call ticket")
     errors = validate_new(fields)
     if not errors:
         errors += check_secrets(fields["title"], fields["body"])
@@ -533,6 +542,8 @@ def create_ticket(fields: dict, *, needs_approval: bool = False, oncall: bool = 
             ticket["priority"] = fields["priority"]
         if oncall:
             ticket["oncall"] = True
+            if oncall_base is not None:
+                ticket["oncall_base"] = oncall_base
         _write_atomic(_ticket_path(ticket["id"]), ticket)
     return ticket
 

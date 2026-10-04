@@ -522,3 +522,42 @@ def test_an_open_on_call_ticket_with_a_leftover_task_folder_is_escalated(rig, nt
     assert tk.load_ticket(oc["id"])["status"] == "failed"
     assert [t[0] for t in sent(ntfy)] == [f"{rig.id} failed, on-call OC-1 is on it",
                                           f"{rig.id} needs a human, see notes"]
+
+
+def test_the_on_call_branch_starts_from_the_commit_that_failed_even_if_the_old_branch_moves_on(rig, ntfy, herdr_log):
+    failed_at = rig.tip()
+    stop_after_fail(rig)
+    rig.cycle(0)
+    rig.cycle(6)                       # failed; the on-call ticket waits, not yet launched
+    (oc,) = oncall_tickets()
+    assert oc["oncall_base"] == failed_at and oc["status"] == "open"
+    rig.commit("the old agent kept going")
+    assert rig.tip() != failed_at
+    assert dp.decide_oncall(tk.list_tickets(), rig.settings)[0].base == failed_at
+    world(rig, {"name": rig.id.lower(), "agent_status": "idle"})
+    go(rig, 3, 2)
+    assert git(rig.repo, "rev-parse", oc["branch"]).strip() == failed_at
+
+
+def test_a_blocker_that_keeps_an_on_call_ticket_from_launching_is_reported(rig, ntfy, capsys, monkeypatch):
+    stop_after_fail(rig)
+    rig.cycle(0)
+    rig.cycle(6)
+    (oc,) = oncall_tickets()
+    path = tk.tickets_dir() / f"{oc['id']}.json"
+    data = json.loads(path.read_text())
+    data["oncall_base"] = "0" * 40                       # a commit that does not exist
+    path.write_text(json.dumps(data))
+    world(rig, {"name": rig.id.lower(), "agent_status": "idle"})
+    go(rig, 3, 2)
+    assert "on-call not launched: commit to start from not found" in capsys.readouterr().out
+    assert tk.load_ticket(oc["id"])["status"] == "open"
+
+
+def test_oncall_base_needs_an_on_call_ticket_and_a_full_commit(rig):
+    with pytest.raises(tk.TicketError, match="oncall_base"):
+        tk.create_ticket({"type": "fix", "repo": "app", "branch": "task/x", "title": "x", "body": "b",
+                          "parent": rig.id}, oncall_base="a" * 40)
+    rig.edit(oncall_base="a" * 40)                       # not an on-call ticket
+    with pytest.raises(tk.TicketError, match="oncall_base"):
+        rig.get()

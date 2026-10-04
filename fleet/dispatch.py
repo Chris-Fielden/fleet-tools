@@ -386,11 +386,16 @@ def decide_oncall(tickets: list[dict], settings: dict, running: frozenset | set 
         elif parent is None:
             d.skip = f"failed ticket {t['parent']} not found"
         else:
-            tip = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{parent['branch']}^{{commit}}")
-            if tip.returncode != 0 or not tip.stdout.strip():
-                d.skip = f"failed branch {parent['branch']} not found in {t['repo']}"
+            # The commit the failed ticket stopped at, saved when it failed; the
+            # parent's branch may have moved on while this waited for the slot.
+            base = t.get("oncall_base")
+            if base is None:
+                tip = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{parent['branch']}^{{commit}}")
+                base = tip.stdout.strip() if tip.returncode == 0 else None
+            if base is None or _git(repo, "cat-file", "-e", f"{base}^{{commit}}").returncode != 0:
+                d.skip = f"commit to start from not found in {t['repo']} (failed branch {parent['branch']})"
             else:
-                d.base = tip.stdout.strip()
+                d.base = base
         if d.skip is None:
             if busy:
                 d.skip = "the on-call agent is busy"
