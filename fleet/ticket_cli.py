@@ -38,7 +38,7 @@ def _build_parser() -> argparse.ArgumentParser:
     new.add_argument("--parent")
     new.add_argument("--priority", choices=tk.PRIORITIES)
 
-    ls = sub.add_parser("list", help="list tickets, newest first")
+    ls = sub.add_parser("list", help="list tickets, newest first (--status review: oldest first)")
     ls.add_argument("--status", choices=tk.STATUSES)
     ls.add_argument("--repo")
     ls.add_argument("--json", action="store_true")
@@ -50,7 +50,7 @@ def _build_parser() -> argparse.ArgumentParser:
     approve = sub.add_parser("approve", help="approve a proposed ticket (humans only)")
     approve.add_argument("id")
 
-    close = sub.add_parser("close", help="close an open or claimed ticket (humans only)")
+    close = sub.add_parser("close", help="close an open, claimed or in-review ticket (humans only)")
     close.add_argument("id")
     outcome = close.add_mutually_exclusive_group(required=True)
     for name in tk.CLOSE_OUTCOMES:
@@ -129,6 +129,8 @@ def _cmd_list(args) -> int:
     tickets = tk.list_tickets()
     if args.status:
         tickets = [t for t in tickets if t["status"] == args.status]
+        if args.status == "review":
+            tickets.reverse()  # the review queue: oldest first
     if args.repo:
         tickets = [t for t in tickets if t["repo"] == args.repo]
     if args.json:
@@ -189,7 +191,7 @@ def _cmd_review_result(args) -> int:
         raise tk.TicketInvalid([f"{args.file} has no VERDICT line or no Commit header"])
     changed = tk.record_verdict(args.branch, args.repo, info["verdict"], info["commit"], info["reviewer"])
     if not changed:
-        print(f"no open or claimed ticket on {args.branch} in {args.repo}; nothing recorded")
+        print(f"no open, claimed or in-review ticket on {args.branch} in {args.repo}; nothing recorded")
     for t in changed:
         print(f"{t['id']} verdict {t['verdict']['result']} recorded")
         kaneo.mirror_quietly(t, _warn)

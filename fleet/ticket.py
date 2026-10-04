@@ -21,8 +21,9 @@ from . import risk as rk
 
 TYPES = ("build", "review", "fix", "question", "investigate")
 PRIORITIES = ("normal", "urgent")
-STATUSES = ("proposed", "open", "claimed", "done", "failed", "cancelled")
-ACTIVE_STATUSES = ("proposed", "open", "claimed")  # not yet finished
+STATUSES = ("proposed", "open", "claimed", "review", "done", "failed", "cancelled")
+# "review" (Kaneo: In Review) is set only by the dispatcher, on a recorded PASS.
+ACTIVE_STATUSES = ("proposed", "open", "claimed", "review")  # not yet finished
 CREATORS = ("human", "claude", "codex")
 
 FIELDS = (
@@ -545,6 +546,9 @@ def set_status(ticket_id: str, status: str, *, allowed_from, assignee=_KEEP,
         raise TicketError(f"unknown status: {status}")
     if assignee is not _KEEP and assignee is not None and assignee not in AGENTS:
         raise TicketError(f"assignee must be one of: {', '.join(AGENTS)}")
+    if status == "review" and current_creator() != "human":
+        raise TicketError(f"only the dispatcher (a human's process) can put a ticket in review "
+                          f"(running as {current_creator()})")
     with _locked():
         ticket = load_ticket(ticket_id)
         if ticket["status"] not in allowed_from:
@@ -645,7 +649,7 @@ def verdict_line(v: dict | None) -> str:
 
 
 def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: str) -> list[dict]:
-    """Record a review's result on the open or claimed tickets of a branch.
+    """Record a review's result on the open, claimed or in-review tickets of a branch.
     Information only: the merge gate reads the saved review itself. Reviews of
     the same commit by the two reviewers are combined (FAIL wins); a review of
     a different commit replaces the old verdict. Returns the tickets changed."""
@@ -666,7 +670,7 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
     changed = []
     with _locked():
         for t in list_tickets():
-            if t["branch"] != branch or t["repo"] != repo or t["status"] not in ("open", "claimed"):
+            if t["branch"] != branch or t["repo"] != repo or t["status"] not in ("open", "claimed", "review"):
                 continue
             old = t["verdict"]
             reviews = dict(old["reviews"]) if old and old["commit"] == commit else {}
@@ -682,7 +686,7 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
 
 
 def close_ticket(ticket_id: str, outcome: str, note: str | None = None) -> dict:
-    """Close an open or claimed ticket as done, failed or cancelled. Humans only."""
+    """Close an open, claimed or in-review ticket as done, failed or cancelled. Humans only."""
     creator = current_creator()
     if creator != "human":
         raise TicketError(f"only a human can close tickets (running as {creator})")
@@ -699,7 +703,7 @@ def close_ticket(ticket_id: str, outcome: str, note: str | None = None) -> dict:
         if errors:
             raise TicketInvalid(errors)
     return set_status(ticket_id, CLOSE_OUTCOMES[outcome],
-                      allowed_from=("open", "claimed"), close_note=note)
+                      allowed_from=("open", "claimed", "review"), close_note=note)
 
 
 def raise_risk(ticket_id: str, level: str) -> dict:

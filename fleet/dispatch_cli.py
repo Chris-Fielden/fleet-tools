@@ -12,6 +12,7 @@ from . import dispatch as dp
 from . import kaneo
 from . import launch as lc
 from . import notify
+from . import review_watch
 from . import ticket as tk
 
 
@@ -76,13 +77,14 @@ def _ask_yes_no(question: str) -> bool:
         return False
 
 
-def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None) -> int:
+def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None, checks=None) -> int:
     """The steps of one --once run; returns the exit code. `reserve()` is called
     before each launch and says whether it may go ahead (False: the daily limit
     is reached; it may raise OSError, which refuses the launch). `offer(ticket)`
     says whether to relaunch a claimed ticket whose agent is gone. `retry_tabs`
     (--watch; a launch.KeptTabs) retries closing the tabs of tickets done on an
-    earlier cycle."""
+    earlier cycle. `checks(emit, warn)` (--watch) moves finished tickets to review and sends
+    the alert pings."""
     code = 0
     _reconcile(settings, emit, warn)
     if retry_tabs is not None:
@@ -93,7 +95,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     for t in lc.finish_investigations(tk.list_tickets(), warn):
         emit(f"{t['id']}  investigation {t['status']}")
         kaneo.mirror_quietly(t, warn)
-        notify.notify_quietly(t, "failed" if t["status"] == "failed" else None, warn)
+        notify.notify_quietly(t, "failed" if t["status"] == "failed" else "investigated", warn)
     for t in lc.lost_agents(tk.list_tickets(), warn):
         emit(f"{t['id']}  claimed, but its agent is not running in herdr (the tab died?); "
              f"task folder {t['repo']}/.worktrees/{t['branch'].removeprefix('task/')}")
@@ -102,6 +104,8 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
             relaunch_code, message = lc.relaunch(t, settings, warn)
             code = code or relaunch_code
             emit(message)
+    if checks is not None:
+        checks(emit, warn)
     tickets = tk.list_tickets()
     # Investigations are read-only and don't compete with build work: one of
     # each kind may start per run.
@@ -178,8 +182,10 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None) -> int:
         while True:
             lines: list[str] = []
             try:
+                def checks(emit, warn):
+                    review_watch.check(settings, clock.now(), emit, warn)
                 _cycle(settings, lines.append, lambda m: lines.append(f"warning: {m}"), reserve=reserve,
-                       retry_tabs=kept_tabs)
+                       retry_tabs=kept_tabs, checks=checks)
             except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
                 lines.append(f"error: {exc}")
             for line in lines:

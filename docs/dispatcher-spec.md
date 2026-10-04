@@ -48,7 +48,7 @@ Optional `$FLEET_HOME/dispatch.json`. Defaults when it's missing:
 
 - `builder`: which agent builds new work, `claude` or `codex`.
 - `models`: model flag per agent; null means the tool's default.
-- `max_running`: how many tickets may be `claimed` at once.
+- `max_running`: how many tickets may be `claimed` (or in `review`) at once.
 - `projects_dir`: a ticket's repo lives at `<projects_dir>/<repo>`.
 - Unknown keys or bad values are an error with a plain message.
 - `watch_interval_seconds` and `max_launches_per_day`: see "Watching, tab
@@ -60,7 +60,7 @@ Optional `$FLEET_HOME/dispatch.json`. Defaults when it's missing:
 
 - Human only: refused when run inside an agent (same environment check as
   `approve`).
-- Allowed from `open` or `claimed`. Anything else is refused.
+- Allowed from `open`, `claimed` or `review`. Anything else is refused.
 - `--note` (max 500 characters, gitleaks-checked like the body) is kept on the
   ticket in a new optional field `close_note`. Update the ticket format,
   validator and tests for that field.
@@ -218,6 +218,32 @@ the same rules. Only a success is logged and printed (`TAB_CLOSED`); a tab that
 is still kept is silent; one that has vanished is logged once as `TAB_GONE`
 and not retried. Finished investigations are never touched. If herdr cannot be
 asked, the cycle warns.
+
+### In review, and alerts (`--watch`)
+
+Each `--watch` cycle (`fleet/review_watch.py`) looks at every claimed build or
+fix ticket. It becomes READY, status `review` (Kaneo: In Review, with the
+`Ready to ship` label, and one ntfy "<ID> ready to ship") when all hold:
+
+1. the ticket's recorded verdict is a PASS of the branch's exact tip that meets the
+   merge gate's review rules at the branch's real risk level;
+2. a note by the ticket's own agent was recorded at or after that verdict (the
+   SHOULD FIX leftovers note does not count; the text is never read);
+3. its herdr agent is `idle` or `done`.
+
+If the tip moves, the verdict stops matching, or the agent is busy again, the
+ticket goes back to `claimed` and the label is removed. The same commit never
+pings twice. Only the dispatcher (a human's process) can set `review`: the store
+refuses it inside an agent. A ticket in review still holds its branch and its
+place in `max_running`; `ship` accepts `review` (and `claimed`), and reconcile
+marks either done once the branch is merged.
+
+The same pass sends the alert pings listed in notify-spec.md: recorded FAIL,
+review saved but not recorded (after a 2 minute grace), agent blocked over 10
+minutes, no activity for 30 minutes. Activity is a ticket change (claim, note,
+verdict), a commit, a `LAUNCHED`/`RELAUNCHED`/`REVIEW_*` log line for the
+ticket, or a change in the agent's herdr state. If herdr cannot be asked,
+claimed tickets are left alone and one warning is printed.
 
 ### A claimed ticket whose agent is gone
 

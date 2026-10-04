@@ -1,4 +1,4 @@
-"""The `ship` command: merge a claimed ticket's work with its repo's own
+"""The `ship` command: merge a ticket's work (in review, or still claimed) with its repo's own
 scripts/finish-task.sh, which keeps every check and prompt it has."""
 
 from __future__ import annotations
@@ -120,8 +120,8 @@ def main(argv=None) -> int:
         return _fail(f"unknown ticket ID: {exc}")
     except tk.TicketError as exc:
         return _fail(str(exc))
-    if t["status"] != "claimed":
-        return _fail(f"{t['id']} is {t['status']}, not claimed; only a claimed ticket can be shipped")
+    if t["status"] not in ("claimed", "review"):
+        return _fail(f"{t['id']} is {t['status']}; only a ticket in review (or still claimed) can be shipped")
     repo_name, branch = t.get("repo"), t.get("branch")
     if not repo_name or not branch:
         return _fail(f"{t['id']} has no repo and branch to ship")
@@ -157,7 +157,7 @@ def main(argv=None) -> int:
     # finish-task also exits 0 when the human answers no at its prompt, so ask
     # git, not the exit code, whether the merge happened.
     if not dp.is_merged(repo, branch, t.get("base_commit")):
-        return _fail(f"{t['id']} was not merged (cancelled?); it is still claimed")
+        return _fail(f"{t['id']} was not merged (cancelled?); it is still {t['status']}")
     later = "; run `dispatch --reconcile` to move the card to Done"
     try:
         _reconcile()

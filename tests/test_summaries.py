@@ -196,9 +196,25 @@ def test_card_without_verdict_or_notes_is_unchanged_shape(board):
     assert only_task(fake)["description"].startswith("Details.")
 
 
+def test_the_label_waits_for_the_review_status(board, env):
+    """A recorded PASS alone is not enough: only a ticket the dispatcher moved
+    to review carries the label."""
+    fake, _, tip = board
+    tid = new_ticket()
+    edit_ticket(tid, status="claimed")
+    record(file=review_file(env, "a.md", tip))
+    assert "Ready to ship" not in labels(fake)
+    edit_ticket(tid, status="review")
+    assert run("sync").returncode == 0
+    assert "Ready to ship" in labels(fake)
+    edit_ticket(tid, status="claimed")  # moved back: the label goes
+    assert run("sync").returncode == 0
+    assert "Ready to ship" not in labels(fake)
+
+
 def test_ready_to_ship_only_for_a_pass_of_the_current_last_commit(board, env):
     fake, repo_dir, tip = board
-    new_ticket()
+    edit_ticket(new_ticket(), status="review")
     assert "Ready to ship" not in labels(fake)
     record(file=review_file(env, "a.md", tip))
     assert "Ready to ship" in labels(fake)
@@ -213,14 +229,14 @@ def test_ready_to_ship_only_for_a_pass_of_the_current_last_commit(board, env):
 
 def test_a_fail_never_gets_the_label(board, env):
     fake, _, tip = board
-    new_ticket()
+    edit_ticket(new_ticket(), status="review")
     record(file=review_file(env, "a.md", tip, verdict="FAIL"))
     assert "Ready to ship" not in labels(fake)
 
 
 def test_label_is_dropped_when_a_second_reviewer_fails(board, env):
     fake, _, tip = board
-    new_ticket()
+    edit_ticket(new_ticket(), status="review")
     record(file=review_file(env, "a.md", tip, "Codex", "PASS"))
     assert "Ready to ship" in labels(fake)
     record(file=review_file(env, "b.md", tip, "Claude (opus)", "FAIL"))
@@ -230,7 +246,7 @@ def test_label_is_dropped_when_a_second_reviewer_fails(board, env):
 def test_high_risk_needs_both_reviewers_for_the_label(board, env):
     fake, _, tip = board
     tid = new_ticket()
-    edit_ticket(tid, risk="high")
+    edit_ticket(tid, risk="high", status="review")
     record(file=review_file(env, "a.md", tip, "Codex", "PASS"))
     assert "Ready to ship" not in labels(fake)
     record(file=review_file(env, "b.md", tip, "Claude (opus)", "PASS"))
@@ -244,7 +260,7 @@ def test_files_that_make_the_branch_high_risk_need_both_reviewers_and_a_strong_c
     git(repo_dir, "checkout", "-q", "task/demo")
     tip = commit_in(repo_dir, "scripts/review.sh")
     git(repo_dir, "checkout", "-q", "main")
-    new_ticket()
+    edit_ticket(new_ticket(), status="review")
     record(file=review_file(env, "a.md", tip, "Codex", "PASS"))
     assert "Ready to ship" not in labels(fake)
     record(file=review_file(env, "b.md", tip, "Claude (sonnet)", "PASS"))

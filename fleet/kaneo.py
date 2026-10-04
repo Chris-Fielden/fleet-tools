@@ -44,13 +44,13 @@ from . import ticket as tk
 TIMEOUT = 10  # seconds per request
 # Columns, left to right. Tickets use Kaneo's own To Do / In Progress / Done;
 # Proposed, Urgent and Failed are ours. An open urgent ticket sits in Urgent
-# instead of To Do. In Review is created so the order is right,
-# but nothing is put there yet (the dispatcher phase will).
+# instead of To Do; once claimed it leaves Urgent. In Review holds tickets with a
+# recorded PASS whose agent has stopped (the dispatcher moves them there).
 COLUMNS = ("Proposed", "Urgent", "To Do", "In Progress", "In Review", "Done", "Failed")
 FINAL_COLUMNS = ("Done", "Failed")
 # Kaneo has no per-card archive call, so a cancelled ticket sits in Done,
 # marked in its title.
-STATUS_COLUMN = {"proposed": "Proposed", "open": "To Do", "claimed": "In Progress",
+STATUS_COLUMN = {"proposed": "Proposed", "open": "To Do", "claimed": "In Progress", "review": "In Review",
                  "done": "Done", "cancelled": "Done", "failed": "Failed"}
 # Per-status columns an earlier version of the sync created.
 LEGACY_COLUMNS = ("open", "claimed", "cancelled")
@@ -424,7 +424,8 @@ def ready_to_ship(t: dict) -> bool:
 
 def _wanted_labels(t: dict) -> dict:
     wanted = {risk_label(t): RISK_LABEL_COLORS[rk.stored_level(t)]}
-    if ready_to_ship(t):
+    # Earned only once the dispatcher has moved the ticket to review.
+    if t["status"] == "review" and ready_to_ship(t):
         wanted[READY_LABEL] = READY_LABEL_COLOR
     return wanted
 

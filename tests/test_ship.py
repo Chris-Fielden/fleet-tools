@@ -55,6 +55,23 @@ def test_merges_through_finish_task_and_marks_done(shipping, monkeypatch, capsys
     assert f"{t['id']} merged and marked done" in capsys.readouterr().out
 
 
+def test_ships_a_ticket_in_review_and_marks_it_done(shipping, monkeypatch, capsys):
+    repo, t, log = shipping
+    tk.set_status(t["id"], "review", allowed_from=("claimed",))
+    monkeypatch.setenv("FAKE_MERGE", "1")
+    assert ship_main([t["id"]]) == 0
+    assert tk.load_ticket(t["id"])["status"] == "done"
+    assert f"{t['id']} merged and marked done" in capsys.readouterr().out
+
+
+def test_cancelled_review_ticket_stays_in_review(shipping, capsys):
+    repo, t, log = shipping
+    tk.set_status(t["id"], "review", allowed_from=("claimed",))
+    assert ship_main([t["id"]]) == 1
+    assert tk.load_ticket(t["id"])["status"] == "review"
+    assert "still review" in capsys.readouterr().err
+
+
 def test_cancelled_at_the_prompt_is_not_done(shipping, capsys):
     # finish-task exits 0 when the human answers no; nothing was merged
     repo, t, log = shipping
@@ -91,7 +108,7 @@ def test_wrong_status(projects, capsys, status):
         tk.set_status(t["id"], "done", allowed_from=("claimed",))
     assert ship_main([t["id"]]) == 1
     err = capsys.readouterr().err.strip()
-    assert err == f"ship: {t['id']} is {status}, not claimed; only a claimed ticket can be shipped"
+    assert err == f"ship: {t['id']} is {status}; only a ticket in review (or still claimed) can be shipped"
 
 
 def test_missing_repo_folder(projects, capsys):
