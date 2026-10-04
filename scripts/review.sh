@@ -12,10 +12,15 @@
 #   REVIEWER=codex  OpenAI's Codex CLI (signs in with your ChatGPT account)
 #   REVIEWER=claude A separate Claude session on another model
 #   REVIEWER=both   Codex AND Claude, one after the other. High-risk changes
-#                   need a PASS from both before the human can merge them.
-#                   Claude defaults to the stronger model "opus" here.
+#                   need a PASS from both (Claude on opus or fable) before the
+#                   human can merge them. Codex runs first. If Codex ran and
+#                   said FAIL, this is a draft round: Claude reviews on the
+#                   cheaper "sonnet" (its review cannot satisfy the gate). If
+#                   Codex passed, or could not run, Claude runs on "opus" as
+#                   the final check.
 # Optional: REVIEW_MODEL=<name> picks the model for that reviewer (with
-#   REVIEWER=both, REVIEW_MODEL sets Claude's model and REVIEW_CODEX_MODEL sets Codex's).
+#   REVIEWER=both, REVIEW_MODEL sets Claude's model in every round and
+#   REVIEW_CODEX_MODEL sets Codex's).
 #   Examples:  REVIEWER=claude REVIEW_MODEL=opus scripts/review.sh
 #              REVIEWER=codex scripts/review.sh
 #
@@ -129,6 +134,7 @@ record_on_ticket() {
 run_review() {
   local kind="$1" model="$2"
   local out=".reviews/${branch//\//-}-$sha-$kind.md"
+  saved_review=""
   local rc=0
   # Written under another name and renamed only when complete and checked, so a
   # half-finished review can never satisfy the merge gate.
@@ -179,6 +185,7 @@ run_review() {
     return 1
   fi
   mv -f "$part" "$out"   # only now can the merge gate see it
+  saved_review="$out"
   echo "Saved to $out"
   record_on_ticket "$out"
 }
@@ -187,11 +194,26 @@ case "$reviewer" in
   codex)  run_review codex "${REVIEW_MODEL:-}" ;;
   claude) run_review claude "${REVIEW_MODEL:-}" ;;
   both)
-    # Run both even if the first fails, so one outage doesn't hide the other
-    # review; fail overall if either could not run.
+    # Codex first. Run Claude even if Codex could not run, so one outage doesn't
+    # hide the other review; fail overall if either could not run.
+    # The model: Codex FAIL means this round will be rewritten, so Claude drafts
+    # on sonnet; otherwise (pass, or Codex could not run) it is the final check
+    # on opus. REVIEW_MODEL overrides both.
     status=0
-    run_review codex "${REVIEW_CODEX_MODEL:-}" || status=1
-    run_review claude "${REVIEW_MODEL:-opus}" || status=1
+    codex_verdict=""
+    if run_review codex "${REVIEW_CODEX_MODEL:-}"; then
+      codex_verdict="$(awk 'body && /^[[:space:]*#>_`-]*VERDICT[[:space:]*_`]*:/ \
+        { print toupper($0); exit } !NF { body=1 }' "$saved_review" \
+        | grep -oE 'PASS|FAIL' | head -n1 || true)"
+    else
+      status=1
+    fi
+    claude_model="${REVIEW_MODEL:-opus}"
+    if [[ "$codex_verdict" == "FAIL" ]]; then
+      claude_model="${REVIEW_MODEL:-sonnet}"
+      echo "Codex FAIL on $sha: Claude reviews on $claude_model (draft round); the final opus review waits for a Codex PASS."
+    fi
+    run_review claude "$claude_model" || status=1
     exit $status
     ;;
   *)

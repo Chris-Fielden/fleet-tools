@@ -183,7 +183,9 @@ and each review, and exits 1 if merging is not allowed. A review only counts
 if its `Commit:` header is the full id of the branch tip. The newest review
 per reviewer decides, and any FAIL blocks. Medium and low need one PASS. High
 needs a PASS from both Codex and Claude, with Claude on a stronger model
-(`opus` or `fable`): `REVIEWER=both scripts/review.sh`. Tickets on the branch
+(`opus` or `fable`): `REVIEWER=both scripts/review.sh`. That runs Codex
+first; after a Codex FAIL Claude reviews on `sonnet` (a draft round that
+cannot satisfy the gate), otherwise on `opus` as the final check. Tickets on the branch
 are found by branch name and repo name (`--repo`; the merge script passes the
 main checkout's folder name); the highest stored level counts.
 
