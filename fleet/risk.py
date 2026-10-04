@@ -224,16 +224,21 @@ NO_ITEMS_RE = re.compile(r"[\s*_`(\[]*(none|n/?a|nothing|empty|no items?)?[\s*_`
 
 
 def should_fix_items(text: str) -> str:
-    """The SHOULD FIX section of a saved review as plain text ('' when it is
-    missing, empty or says none). It runs to the next VERDICT, MUST FIX or
-    SUMMARY heading."""
+    """The SHOULD FIX section of a saved review (see review_items)."""
+    return review_items(text, "SHOULD FIX")
+
+
+def review_items(text: str, section: str) -> str:
+    """One section ("SHOULD FIX" or "MUST FIX") of a saved review as plain text
+    ('' when it is missing, empty or says none). It runs to the next VERDICT,
+    MUST FIX, SHOULD FIX or SUMMARY heading."""
     body = None
     for line in text.splitlines():
         m = SECTION_RE.match(line)
         if m:
             if body is not None:
                 break
-            if m.group(1).upper().replace("_", " ") == "SHOULD FIX":
+            if m.group(1).upper().replace("_", " ") == section:
                 body = [m.group(2)]
         elif body is not None:
             body.append(line)

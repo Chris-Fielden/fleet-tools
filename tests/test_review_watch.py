@@ -1,4 +1,4 @@
-"""In Review on a recorded PASS, and the failure / blocked / stall pings, as
+"""In Review on a recorded PASS, and ready-to-ship and true-failure handling, as
 `dispatch --watch` does them (fake herdr, fake ntfy, temp FLEET_HOME, real git)."""
 import json
 import os
@@ -333,17 +333,13 @@ def test_an_urgent_ticket_leaves_the_urgent_column_once_claimed(projects, env, h
 
 # --- failure pings -------------------------------------------------------------
 
-def test_a_recorded_fail_pings_high_and_names_the_reviewer_once(rig, ntfy):
+def test_a_recorded_fail_alone_never_pings(rig, ntfy):
     rig.verdict("FAIL", "Codex")
     rig.cycle()
     rig.cycle(5)
-    assert len(ntfy.requests) == 1
-    title, message, header = sent(ntfy)[0]
-    assert title == f"Review FAILED: {rig.id}" and "Codex" in message and header == "high"
-    assert ntfy.requests[0]["body"]["priority"] == 4
-    rig.verdict("FAIL", "Claude (opus)")   # the second reviewer fails too: new information
+    rig.verdict("FAIL", "Claude (opus)")   # the second reviewer fails the same commit: still one round
     rig.cycle(10)
-    assert len(ntfy.requests) == 2 and "Claude (opus)" in sent(ntfy)[1][1] and "Codex" not in sent(ntfy)[1][1]
+    assert ntfy.requests == [] and rig.get()["status"] == "claimed"
 
 
 def test_a_fail_of_an_old_commit_is_not_pinged(rig, ntfy):
@@ -392,67 +388,63 @@ def test_a_review_file_without_a_verdict_cannot_be_recorded(rig, ntfy):
     assert len(ntfy.requests) == 1 and "no verdict" in sent(ntfy)[0][1]
 
 
-# --- blocked and stalled -------------------------------------------------------
+# --- blocked and stalled (a true failure now, never a ping of their own) ----------
 
-def test_blocked_over_ten_minutes_pings_high_once_and_rearms(rig, ntfy):
+def oncall_ping(rig):
+    return [f"{rig.id} failed, on-call OC-1 is on it"]
+
+
+def test_blocked_over_twenty_minutes_fails_the_ticket_with_one_low_ping(rig, ntfy):
     rig.set_agent("blocked")
     rig.cycle(0)
-    rig.cycle(9)
-    assert ntfy.requests == []
-    rig.cycle(11)
-    rig.cycle(20)
-    assert len(ntfy.requests) == 1
-    title, _, header = sent(ntfy)[0]
-    assert title == f"Agent blocked: {rig.id}" and header == "high"
-    rig.set_agent("working")
+    rig.cycle(19)
+    assert ntfy.requests == [] and rig.get()["status"] == "claimed"
     rig.cycle(21)
-    rig.set_agent("blocked")
-    rig.cycle(22)
-    rig.cycle(33)
-    assert len(ntfy.requests) == 2
+    rig.cycle(30)
+    assert rig.get()["status"] == "failed" and "blocked" in rig.get()["close_note"]
+    assert [t[0] for t in sent(ntfy)] == oncall_ping(rig) and sent(ntfy)[0][2] == "low"
 
 
-def test_stalled_for_thirty_minutes_pings_default_once(rig, ntfy):
+def test_stalled_for_forty_five_minutes_fails_the_ticket_with_one_low_ping(rig, ntfy):
     rig.set_agent("working", revision=1)
     rig.cycle(0)
-    rig.cycle(29)
-    assert ntfy.requests == []
-    rig.cycle(31)
-    rig.cycle(45)
-    assert len(ntfy.requests) == 1
-    title, message, header = sent(ntfy)[0]
-    assert title == f"Ticket stalled: {rig.id}" and header == "default" and "31 min" in message
+    rig.cycle(44)
+    assert ntfy.requests == [] and rig.get()["status"] == "claimed"
+    rig.cycle(46)
+    rig.cycle(60)
+    assert rig.get()["status"] == "failed" and "stalled" in rig.get()["close_note"]
+    assert [t[0] for t in sent(ntfy)] == oncall_ping(rig)
 
 
 def test_herdr_activity_resets_the_stall_clock(rig, ntfy):
     rig.set_agent("working", revision=1)
     rig.cycle(0)
     rig.set_agent("working", revision=2)
-    rig.cycle(20)
-    rig.cycle(40)
-    assert ntfy.requests == []
-    rig.cycle(51)
-    assert len(ntfy.requests) == 1
+    rig.cycle(30)
+    rig.cycle(60)
+    assert ntfy.requests == [] and rig.get()["status"] == "claimed"
+    rig.cycle(76)
+    assert rig.get()["status"] == "failed"
 
 
 def test_a_note_or_a_commit_resets_the_stall_clock(rig, ntfy):
     rig.set_agent("working", revision=1)
     rig.cycle(0)
-    # a note saved "20 minutes from now" is the latest sign of life
-    when = (rig.now + timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # a note saved "30 minutes from now" is the latest sign of life
+    when = (rig.now + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
     rig.edit(notes=[{"at": when, "by": "claude", "text": "progress"}])
-    rig.cycle(40)
-    assert ntfy.requests == []
-    rig.cycle(51)
-    assert len(ntfy.requests) == 1
+    rig.cycle(60)
+    assert ntfy.requests == [] and rig.get()["status"] == "claimed"
+    rig.cycle(76)
+    assert rig.get()["status"] == "failed"
 
 
 def test_dispatcher_log_lines_for_the_ticket_count_but_repeating_ones_do_not(rig, ntfy):
     rig.set_agent("working", revision=1)
     rig.cycle(0)
     dp.log("RECONCILE_SKIP", f"{rig.id} task/demo not merged")   # logged every cycle: no sign of life
-    rig.cycle(31)
-    assert len(ntfy.requests) == 1
+    rig.cycle(46)
+    assert rig.get()["status"] == "failed"
 
 
 def test_blocked_then_ready_then_blocked_again_starts_a_new_spell(rig, ntfy):
@@ -463,10 +455,11 @@ def test_blocked_then_ready_then_blocked_again_starts_a_new_spell(rig, ntfy):
     assert rig.get()["status"] == "review"
     rig.set_agent("blocked")
     rig.cycle(6)            # back to claimed; blocked afresh
-    rig.cycle(12)
+    rig.cycle(22)           # 16 minutes into the new spell, 22 since the first
     assert [t[0] for t in sent(ntfy)] == [f"{rig.id} ready to ship"]
-    rig.cycle(17)
-    assert [t[0] for t in sent(ntfy)][1:] == [f"Agent blocked: {rig.id}"]
+    assert rig.get()["status"] == "claimed"
+    rig.cycle(27)
+    assert rig.get()["status"] == "failed"
 
 
 def test_an_unrecorded_review_is_noticed_on_a_ready_ticket(rig, ntfy):
@@ -498,24 +491,26 @@ def test_a_ticket_in_review_is_never_called_stalled(rig, ntfy):
 # --- never twice, state and failures ---------------------------------------------
 
 def test_a_restarted_watcher_does_not_repeat_pings(rig, ntfy):
-    rig.verdict("FAIL")
+    rig.finish()
     rig.cycle()
     assert (dp.tk.fleet_home() / "review-watch.json").is_file()
     rig.cycle(5)   # same state file, as after a restart
     assert len(ntfy.requests) == 1
 
 
-def test_a_failed_send_is_retried_and_not_remembered(rig):
+def test_a_failure_ping_that_cannot_be_sent_warns_and_is_not_repeated_or_redone(rig):
     fake = FakeNtfy(status=500)
     write_ntfy_config(fake.url)
     try:
-        rig.verdict("FAIL")
-        rig.cycle()
-        assert rig.warnings and len(fake.requests) == 1
+        rig.set_agent("blocked")
+        rig.cycle(0)
+        rig.cycle(21)
+        assert rig.get()["status"] == "failed" and rig.warnings and len(fake.requests) == 1
         fake.status = 200
-        rig.cycle(1)
-        rig.cycle(2)
-        assert len(fake.requests) == 2
+        rig.cycle(22)
+        rig.cycle(23)
+        assert len(fake.requests) == 1   # the failed ticket is closed: nothing more is decided about it
+        assert len([t for t in tk.list_tickets() if t.get("oncall")]) == 1
     finally:
         fake.stop()
 
@@ -536,7 +531,7 @@ def test_a_failed_ready_to_ship_ping_is_retried_while_in_review(rig):
 
 
 def test_a_git_timeout_on_one_ticket_still_saves_what_was_sent(rig, ntfy, monkeypatch):
-    rig.verdict("FAIL")
+    rig.finish()
     other = claim(mk(branch="task/other"))
     real = rw._tip
 
@@ -551,24 +546,25 @@ def test_a_git_timeout_on_one_ticket_still_saves_what_was_sent(rig, ntfy, monkey
 
 
 def test_keys_of_finished_tickets_are_dropped(rig, ntfy):
-    rig.verdict("FAIL")
+    rig.finish()
     rig.cycle()
-    tk.set_status(rig.id, "done", allowed_from=("claimed",))
+    tk.set_status(rig.id, "done", allowed_from=("review",))
     rig.cycle(1)
     state = json.loads(rw.state_path().read_text())
     assert state["sent"] == []
 
 
 def test_nothing_happens_without_notify_config(rig):
-    rig.verdict("FAIL")
-    rig.cycle()
-    assert rig.warnings == []
+    rig.set_agent("blocked")
+    rig.cycle(0)
+    rig.cycle(21)
+    assert rig.warnings == [] and rig.get()["status"] == "failed"
 
 
 def test_unreadable_state_starts_fresh_with_a_warning(rig, ntfy):
     path = tk.fleet_home() / "review-watch.json"
     path.write_text("{nope")
-    rig.verdict("FAIL")
+    rig.finish()
     rig.cycle()
     assert any("starting with an empty one" in w for w in rig.warnings) and len(ntfy.requests) == 1
 
@@ -576,8 +572,10 @@ def test_unreadable_state_starts_fresh_with_a_warning(rig, ntfy):
 def test_messages_carry_no_body_or_notes(rig, ntfy):
     rig.edit(body="SECRET BODY")
     rig.summary("SECRET NOTE")
-    rig.verdict("FAIL")
-    rig.cycle()
+    rig.set_agent("blocked")
+    rig.cycle(0)
+    rig.cycle(21)   # fails: the on-call ticket's body copies the spec, but no ping may
+    assert len(ntfy.requests) == 1
     assert "SECRET" not in json.dumps([r["body"] for r in ntfy.requests])
 
 
@@ -598,15 +596,17 @@ def test_watch_moves_the_ticket_and_says_so(rig, ntfy, capsys):
 @pytest.mark.parametrize("event, level", [
     ("urgent", "high"), ("failed", "high"), ("blocked", "high"), ("review_failed", "high"),
     ("review_unrecorded", "high"), ("ship", "default"), ("ready", "default"),
-    ("stalled", "default"), ("proposed", "low"), ("investigated", "low")])
+    ("stalled", "default"), ("proposed", "low"), ("investigated", "low"),
+    ("oncall", "low"), ("needs_human", "low")])
 def test_default_priorities(event, level):
     assert notify.PRIORITIES[event] == level and set(notify.PRIORITIES) == set(notify.EVENTS)
 
 
 def test_priorities_can_be_overridden(rig, ntfy):
-    write_ntfy_config(ntfy.url, priorities={"review_failed": "max", "ship": "low"})
-    rig.verdict("FAIL")
-    rig.cycle()
+    write_ntfy_config(ntfy.url, priorities={"oncall": "max", "ship": "low"})
+    rig.set_agent("blocked")
+    rig.cycle(0)
+    rig.cycle(21)
     assert sent(ntfy)[0][2] == "max" and ntfy.requests[0]["body"]["priority"] == 5
 
 

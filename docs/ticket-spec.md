@@ -50,6 +50,8 @@ launching, no hooks in this phase.
 | close_note | string, optional | 1 to 500 characters, gitleaks-checked. Set by `ticket close --note`. Absent otherwise. |
 | base_commit | string, optional | Git commit id (7 to 40 hex characters): main's tip when the dispatcher claimed the ticket. Reconcile only counts a `Merge <branch>` commit made after it. Absent on tickets claimed before this field existed (they count any merge in main's history). |
 | seq | integer, optional | Creation sequence, 1 or more, counting up across all tickets. Set by the tool; the tie-breaker when `created_at` is equal. Absent on tickets made before short ids (they count as 0). |
+| oncall | true, optional | Set only on the fix ticket the dispatcher files for the on-call agent after a true failure (prefix `OC`). Never supplied by a caller; an agent cannot file one. |
+| fail_commits | list, optional | Full ids of every commit that got a recorded FAIL, oldest first. Added by `ticket review-result` (a verdict keeps only the latest, so this is what counts FAIL rounds). |
 | created_at | string | UTC time, ISO 8601, set by the tool. |
 | updated_at | string | UTC time, ISO 8601, set by the tool. |
 
@@ -68,6 +70,7 @@ with no padding: `BD-1`, `BD-2`, `FX-1`, `EM-1`.
 | QN | question |
 | ID | investigate (ideas) |
 | EM | any ticket whose `priority` is `urgent` (wins over the type prefix) |
+| OC | the on-call fix ticket filed after a true failure (`oncall_prefix`; wins over everything) |
 
 - The prefix comes from one lookup table (`TYPE_PREFIX`, plus
   `EMERGENCY_PREFIX`) in `fleet/ticket.py`; those are the defaults, and

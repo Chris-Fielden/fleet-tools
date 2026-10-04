@@ -43,7 +43,8 @@ def _warn(message: str) -> None:
 
 def _cmd_dry_run(settings: dict) -> int:
     tickets = tk.list_tickets()
-    for d in dp.decide(tickets, settings) + dp.decide_investigations(tickets, settings):
+    for d in (dp.decide(tickets, settings) + dp.decide_investigations(tickets, settings)
+              + dp.decide_oncall(tickets, settings)):
         print(d.line())
         if d.skip:
             dp.log("DECISION", f"{d.ticket['id']} skip: {d.skip}")
@@ -107,6 +108,14 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     if checks is not None:
         checks(emit, warn)
     tickets = tk.list_tickets()
+    # The on-call agent has its own slot: it starts at once, whatever the normal
+    # queue is doing, and never counts against the daily launch limit.
+    for d in dp.decide_oncall(tickets, settings):
+        if d.eligible:
+            oncall_code, message = lc.launch_oncall(d, settings, warn)
+            code = code or oncall_code
+            emit(message)
+            break
     # Investigations are read-only and don't compete with build work: one of
     # each kind may start per run.
     started = False

@@ -6,9 +6,14 @@
   that review, and its herdr agent is idle or done. One "ready to ship" ping.
   If that stops being true (the tip moved, the agent is busy again) it goes
   back to claimed.
-* Pings for: a recorded FAIL (names the reviewer), a review that ran but could
-  not be recorded, an agent blocked for over 10 minutes, and a claimed ticket
-  with no activity for 30 minutes.
+* A claimed ticket TRULY FAILS when its agent sat idle on a failed commit for
+  5 minutes, it has 3 FAIL verdicts on different commits, its agent was blocked
+  for 20 minutes, or it had no activity for 45 minutes. It is then closed as
+  failed and an on-call fix ticket is filed (launched by the dispatch cycle in
+  its own slot); see _fail_ticket. A mid-loop FAIL verdict never pings.
+* The only ping here besides "ready to ship" is a review that ran but could
+  not be recorded; failures ping once, low ("on-call is on it" or "needs a
+  human").
 
 Every state is decided from the stored ticket (verdict, notes), the git branch,
 the review files in the task folder, herdr and the dispatcher log. The agent's
@@ -32,8 +37,10 @@ from . import notify
 from . import risk as rk
 from . import ticket as tk
 
-BLOCKED_AFTER = 10 * 60   # seconds an agent waits for input before a ping
-STALL_AFTER = 30 * 60     # seconds with no commit, note or log output before a ping
+BLOCKED_AFTER = 20 * 60   # seconds an agent waits for input before the ticket fails
+STALL_AFTER = 45 * 60     # seconds with no commit, note or log output before the ticket fails
+STOPPED_AFTER = 5 * 60    # seconds an agent sits idle on a failed tip before the ticket fails
+FAIL_ROUNDS = 3           # FAIL verdicts on different commits before the ticket fails
 UNRECORDED_GRACE = 2 * 60  # seconds review.sh gets to record a review it just saved
 LOG_TAIL = 256 * 1024
 # Dispatcher log kinds that show a ticket's work moving. (RECONCILE_SKIP and
@@ -47,13 +54,15 @@ def state_path() -> Path:
 
 
 def _load_state(warn) -> dict:
-    state = {"sent": [], "blocked_since": {}, "seen": {}}
+    state = {"sent": [], "blocked_since": {}, "stopped_since": {}, "seen": {}}
     try:
         data = json.loads(state_path().read_text(encoding="utf-8"))
         if (isinstance(data, dict) and isinstance(data.get("sent"), list)
-                and isinstance(data.get("blocked_since"), dict) and isinstance(data.get("seen"), dict)):
+                and isinstance(data.get("blocked_since"), dict) and isinstance(data.get("seen"), dict)
+                and isinstance(data.get("stopped_since", {}), dict)):
             state.update(sent=[k for k in data["sent"] if isinstance(k, str)],
-                         blocked_since=data["blocked_since"], seen=data["seen"])
+                         blocked_since=data["blocked_since"], seen=data["seen"],
+                         stopped_since=data.get("stopped_since", {}))
         else:
             warn(f"{state_path()} has an unexpected shape; starting with an empty one")
     except FileNotFoundError:
@@ -145,23 +154,9 @@ def _ping(t: dict, event: str, key: str, state: dict, warn, detail: str | None =
     return False
 
 
-def _alert_pings(t: dict, repo: Path, tip: str, agent: dict | None, state: dict,
-                 now: datetime, emit, warn, quiet: bool = False) -> None:
-    """The FAIL and not-recorded pings always apply. `quiet` (the ticket is in
-    review, so its agent has stopped and its work is finished) leaves out the
-    blocked and stalled pings and ends any blocked spell."""
+def _unrecorded_pings(t: dict, repo: Path, tip: str, state: dict, now: datetime, emit, warn) -> None:
+    """A review that was saved for this tip but never reached the ticket."""
     tid, v = t["id"], t["verdict"]
-    # 1. A recorded FAIL of this exact tip.
-    if v is not None and v["commit"] == tip and v["result"] == "FAIL":
-        failed = sorted((k, r["reviewer"]) for k, r in v["reviews"].items() if r["result"] == "FAIL")
-        fresh = [(k, who) for k, who in failed if f"{tid}:review_failed:{tip}:{k}" not in state["sent"]]
-        if fresh:
-            detail = "failed by " + ", ".join(who for _, who in fresh)
-            if notify.notify_quietly(t, "review_failed", warn, detail):
-                state["sent"] += [f"{tid}:review_failed:{tip}:{k}" for k, _ in fresh]
-                emit(f"{tid}  review FAILED ({detail})")
-                dp.log("ALERT", f"{tid} review_failed {tip[:8]} {detail}")
-    # 2. A review that was saved for this tip but never reached the ticket.
     wt = repo / ".worktrees" / t["branch"].removeprefix("task/")
     for kind, info in sorted(rk.latest_reviews(wt / ".reviews", tip).items()):
         recorded = (v is not None and v["commit"] == tip and kind in v["reviews"]
@@ -177,26 +172,210 @@ def _alert_pings(t: dict, repo: Path, tip: str, agent: dict | None, state: dict,
         if _ping(t, "review_unrecorded", key, state, warn, detail):
             emit(f"{tid}  {detail}")
             dp.log("ALERT", f"{tid} review_unrecorded {tip[:8]} {kind}")
+
+
+# --- true failure ----------------------------------------------------------------
+# A FAIL verdict is a normal mid-loop result and never pings. A claimed ticket
+# has TRULY failed only when (decided from the ticket, git and herdr, never from
+# what an agent says):
+#   * its agent stopped (idle or done) with the branch tip still the commit
+#     that got a FAIL, for STOPPED_AFTER seconds in a row; or
+#   * it has FAIL_ROUNDS or more FAIL verdicts on different commits, the latest
+#     verdict still being a FAIL (going in circles); or
+#   * its agent has waited for input for BLOCKED_AFTER seconds (permission
+#     prompts are never answered); or
+#   * nothing has happened for STALL_AFTER seconds.
+# Then the ticket is closed as failed and an on-call agent is filed (see _fail_ticket).
+
+def fail_rounds(t: dict) -> int:
+    """Different commits that got a recorded FAIL."""
+    v = t["verdict"]
+    commits = set(t.get("fail_commits", []))
+    if v is not None and v["result"] == "FAIL":
+        commits.add(v["commit"])
+    return len(commits)
+
+
+def _failed_reviewers(t: dict) -> str:
+    v = t["verdict"]
+    if v is None or v["result"] != "FAIL":
+        return "none"
+    return ", ".join(sorted(r["reviewer"] for r in v["reviews"].values() if r["result"] == "FAIL"))
+
+
+def _end_spells(ticket_id: str, state: dict) -> None:
+    """The ticket is ready (its agent has stopped for good): no blocked or
+    stopped-on-a-failure spell is running any more."""
+    state["blocked_since"].pop(ticket_id, None)
+    state["stopped_since"].pop(ticket_id, None)
+
+
+def _failure_reason(t: dict, repo: Path, tip: str, agent: dict | None, state: dict,
+                    now: datetime) -> str | None:
+    """Why this claimed ticket has truly failed, or None. Keeps the clocks for
+    the stopped and blocked spells in `state`."""
+    tid, v = t["id"], t["verdict"]
+    failed_now = v is not None and v["result"] == "FAIL"
+    agent_state = agent.get("agent_status") if agent else None
+    reason = None
+    # 1. Going in circles.
+    rounds = fail_rounds(t)
+    if failed_now and rounds >= FAIL_ROUNDS:
+        reason = f"going in circles: {rounds} FAIL verdicts on different commits"
+    # 2. The agent stopped without fixing the failed commit.
+    if failed_now and v["commit"] == tip and agent_state in ("idle", "done"):
+        seen = state["stopped_since"].get(tid)
+        if not (isinstance(seen, dict) and seen.get("tip") == tip and _parse(seen.get("at")) is not None):
+            seen = {"tip": tip, "at": _stamp(now)}
+            state["stopped_since"][tid] = seen
+        waited = (now - _parse(seen["at"])).total_seconds()
+        if reason is None and waited >= STOPPED_AFTER:
+            reason = (f"the agent stopped {int(waited // 60)} min after a FAIL and the branch tip "
+                      "is still the failed commit")
+    else:
+        state["stopped_since"].pop(tid, None)
     # 3. An agent waiting for a person.
-    if not quiet and agent is not None and agent.get("agent_status") == "blocked":
+    if agent_state == "blocked":
         since = state["blocked_since"].setdefault(tid, _stamp(now))
         waited = (now - (_parse(since) or now)).total_seconds()
-        if waited >= BLOCKED_AFTER and _ping(
-                t, "blocked", f"{tid}:blocked:{since}", state, warn,
-                f"waiting for input for {int(waited // 60)} min"):
-            emit(f"{tid}  agent blocked for over {BLOCKED_AFTER // 60} minutes")
-            dp.log("ALERT", f"{tid} blocked since {since}")
+        if reason is None and waited >= BLOCKED_AFTER:
+            reason = f"the agent was blocked waiting for input for {int(waited // 60)} min"
     else:
         state["blocked_since"].pop(tid, None)
     # 4. Nothing has happened for a long time.
-    if quiet:
-        return
     last = _last_activity(t, repo, tip, agent, state, now)
     idle = (now - last).total_seconds()
-    if idle >= STALL_AFTER and _ping(t, "stalled", f"{tid}:stalled:{_stamp(last)}", state, warn,
-                                     f"no activity for {int(idle // 60)} min"):
-        emit(f"{tid}  stalled: no commit, note or log output for {int(idle // 60)} minutes")
-        dp.log("ALERT", f"{tid} stalled since {_stamp(last)}")
+    if reason is None and idle >= STALL_AFTER:
+        reason = f"stalled: no commit, note, log output or agent change for {int(idle // 60)} min"
+    return reason
+
+
+def _clip(text: str, limit: int) -> str:
+    text = text.strip()
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _log_tail(tid: str, lines: int = 12) -> str:
+    pattern = re.compile(rf"\b{re.escape(tid)}\b")
+    try:
+        with open(dp.log_path(), "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - LOG_TAIL))
+            found = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join([line for line in found if pattern.search(line)][-lines:])
+
+
+def _oncall_body(t: dict, detail: str, tip: str, repo: Path) -> str:
+    """What the on-call agent needs, in one ticket body (4000 characters at most):
+    the failed ticket's spec and notes, the latest reviews' MUST FIX sections,
+    why it failed and the log tail."""
+    v = t["verdict"]
+    reviewed = v["commit"] if v is not None and v["result"] == "FAIL" else tip
+    parts = [f"On-call fix for {t['id']} ({t['type']}): {_clip(t['title'], 100)}",
+             f"WHY IT FAILED: {detail}",
+             f"FAILED BRANCH: {t['branch']} at {tip}. Your new branch starts from that commit.",
+             "FAILED TICKET SPEC:\n" + _clip(t["body"], 1200)]
+    notes = [f"- {n['by']} {n['at']}: {_clip(n['text'], 250)}" for n in t.get("notes", [])[-4:]]
+    if notes:
+        parts.append("FAILED TICKET NOTES (latest):\n" + "\n".join(notes))
+    wt = repo / ".worktrees" / t["branch"].removeprefix("task/")
+    for kind, info in sorted(rk.latest_reviews(wt / ".reviews", reviewed).items()):
+        try:
+            must = rk.review_items(Path(info["file"]).read_text(encoding="utf-8"), "MUST FIX")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if must:
+            parts.append(f"MUST FIX from the latest {info['reviewer']} review ({reviewed[:7]}):\n"
+                         + _clip(must, 500))
+    tail = _log_tail(t["id"])
+    if tail:
+        parts.append("DISPATCHER LOG TAIL:\n" + _clip(tail, 600))
+    return _clip("\n\n".join(parts), tk.BODY_MAX)
+
+
+def _note(ticket_id: str, text: str, warn) -> None:
+    try:
+        tk.add_note(ticket_id, _clip(text, tk.NOTE_MAX))
+    except (tk.TicketError, tk.TicketInvalid) as exc:
+        warn(f"{ticket_id}: could not save a note ({exc})")
+
+
+def _file_oncall(t: dict, detail: str, tip: str, repo: Path, warn) -> dict | None:
+    """File the on-call fix ticket for a failed ticket; None if it cannot be made."""
+    fields = {"type": "fix", "repo": t["repo"], "branch": f"task/oc-{t['id'].lower()}",
+              "title": _clip(f"On-call: fix {t['id']}: {t['title']}", 100), "parent": t["id"],
+              "body": _oncall_body(t, detail, tip, repo)}
+    try:
+        try:
+            return tk.create_ticket(fields, oncall=True)
+        except tk.TicketInvalid:
+            # The copied text tripped the secret scan or a limit: point at the ticket instead.
+            fields["body"] = (f"On-call fix for {t['id']}. Why it failed: {_clip(detail, 300)}. "
+                              f"Failed branch {t['branch']} at {tip}. Run `ticket show {t['id']}` "
+                              "for its spec and notes.")
+            return tk.create_ticket(fields, oncall=True)
+    except (tk.TicketError, tk.TicketInvalid) as exc:
+        warn(f"{t['id']}: could not file the on-call ticket: {exc}")
+        return None
+
+
+def _fail_ticket(t: dict, reason: str, repo: Path, tip: str, settings: dict, state: dict,
+                 emit, warn) -> None:
+    """A ticket has truly failed: close it as failed (its card moves to Failed),
+    then file ONE on-call ticket, which the dispatch cycle launches at once in
+    the on-call slot. If it is the on-call ticket that failed, or an on-call
+    attempt was already made, or the daily on-call limit is reached, nothing
+    more is launched: the ticket gets a diagnosis note and one "needs a human"
+    ping. Never pings for a mid-loop FAIL."""
+    tid = t["id"]
+    detail = f"{reason}; failed by: {_failed_reviewers(t)}; FAIL rounds: {fail_rounds(t)}"
+    try:
+        failed = tk.set_status(tid, "failed", allowed_from=("claimed",),
+                               close_note=_clip(f"Failed: {detail}", tk.CLOSE_NOTE_MAX))
+    except tk.TicketError as exc:
+        dp.log("FAIL_SKIP", f"{tid} {exc}")
+        warn(f"{tid}: could not close as failed: {exc}")
+        return
+    kaneo.mirror_quietly(failed, warn)
+    emit(f"{tid}  failed: {detail}")
+    dp.log("FAILED", f"{tid} {_clip(detail, 200)}")
+    tickets = tk.list_tickets()
+    if t.get("oncall"):
+        original = t["parent"]
+        diagnosis = (f"Diagnosis: on-call {tid} could not fix {original}. {detail}. Its branch "
+                     f"{t['branch']} ends at {tip}. Nothing more will be launched for it.")
+        _note(tid, diagnosis, warn)
+        _human(original, diagnosis, state, warn)
+        return
+    cap = settings["max_oncall_per_day"]
+    if any(x.get("oncall") and x["parent"] == tid for x in tickets):
+        why = "an on-call attempt was already made for it"
+    elif dp.oncall_today(tickets) >= cap:
+        why = f"the daily on-call limit ({cap}) is reached"
+    else:
+        oc = _file_oncall(failed, detail, tip, repo, warn)
+        if oc is not None:
+            kaneo.mirror_quietly(oc, warn)
+            _note(tid, f"On-call ticket {oc['id']} was filed to fix this. {detail}.", warn)
+            dp.log("ONCALL_FILED", f"{oc['id']} for {tid}")
+            _ping(failed, "oncall", f"{tid}:oncall", state, warn, oc["id"])
+            return
+        why = "the on-call ticket could not be filed"
+    _human(tid, f"Needs a human: {why}. {detail}.", state, warn)
+
+
+def _human(ticket_id: str, note: str, state: dict, warn) -> None:
+    """Note why a human must look at a failed ticket and send the one low ping."""
+    _note(ticket_id, note, warn)
+    try:
+        ticket = tk.load_ticket(ticket_id)
+    except (tk.TicketError, tk.TicketInvalid) as exc:
+        warn(f"{ticket_id}: {exc}")
+        return
+    dp.log("NEEDS_HUMAN", f"{ticket_id}")
+    _ping(ticket, "needs_human", f"{ticket_id}:needs_human", state, warn)
 
 
 # --- the cycle -----------------------------------------------------------------
@@ -227,7 +406,8 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
         busy = agents_known and agent is not None and not stopped
         if earned and not busy:
             _ping(t, "ship", f"{t['id']}:ship:{tip}", state, warn)  # a send that failed is retried
-            _alert_pings(t, repo, tip, agent, state, now, emit, warn, quiet=True)
+            _end_spells(t["id"], state)
+            _unrecorded_pings(t, repo, tip, state, now, emit, warn)
             return
         new = _move(t, "claimed", ("review",), warn)
         if new:
@@ -245,9 +425,13 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             dp.log("REVIEW_READY", f"{t['id']} {tip[:8]} ready to ship")
             kaneo.mirror_quietly(new, warn)
             _ping(new, "ship", f"{t['id']}:ship:{tip}", state, warn)
-            _alert_pings(new, repo, tip, agent, state, now, emit, warn, quiet=True)
+            _end_spells(t["id"], state)
+            _unrecorded_pings(new, repo, tip, state, now, emit, warn)
         return
-    _alert_pings(t, repo, tip, agent, state, now, emit, warn)
+    _unrecorded_pings(t, repo, tip, state, now, emit, warn)
+    reason = _failure_reason(t, repo, tip, agent, state, now)
+    if reason:
+        _fail_ticket(t, reason, repo, tip, settings, state, emit, warn)
 
 
 def check(settings: dict, now: datetime, emit, warn) -> None:
@@ -270,7 +454,7 @@ def check(settings: dict, now: datetime, emit, warn) -> None:
         except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
             warn(f"{t['id']}: {exc}")
     live = {t["id"] for t in tickets}
-    for name in ("blocked_since", "seen"):
+    for name in ("blocked_since", "stopped_since", "seen"):
         state[name] = {k: v for k, v in state[name].items() if k in live}
     state["sent"] = [k for k in state["sent"] if k.split(":", 1)[0] in live]
     try:

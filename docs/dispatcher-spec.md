@@ -246,12 +246,48 @@ ticket already in review is not moved back for a vanished agent. Recording a
 review again (even a second PASS on the same commit) refreshes the verdict's
 time, so the agent's summary must come after the latest recording.
 
-The same pass sends the alert pings listed in notify-spec.md: recorded FAIL,
-review saved but not recorded (after a 2 minute grace), agent blocked over 10
-minutes, no activity for 30 minutes. Activity is a ticket change (claim, note,
+The same pass pings for a review saved but not recorded (after a 2 minute grace)
+and decides true failure (next section). Activity is a ticket change (claim, note,
 verdict), a commit, a `LAUNCHED`/`RELAUNCHED`/`REVIEW_*` log line for the
 ticket, or a change in the agent's herdr state. If herdr cannot be asked,
 claimed tickets are left alone and one warning is printed.
+
+### True failure and the on-call agent
+
+A FAIL verdict is a normal mid-loop result and never pings. A claimed ticket
+TRULY FAILS when any of these holds, decided from the stored ticket, git and
+herdr (never from an agent's summary):
+
+1. its agent has been `idle`/`done` for 5 minutes in a row while the branch tip
+   is still the commit that got a FAIL;
+2. it has FAIL verdicts on 3 or more different commits (`fail_commits` on the
+   ticket) and the latest verdict is still FAIL (going in circles);
+3. its agent has been `blocked` (waiting for input) for 20 minutes. Permission
+   prompts are never answered; they are failures;
+4. nothing has happened for 45 minutes (no commit, note, log line or herdr
+   change).
+
+Then `--watch` closes the ticket as failed (its card moves to Failed) with a
+close note naming the reason, the failing reviewer and the FAIL round count,
+files ONE on-call ticket and sends one low ping, "<ID> failed, on-call <OC ID>
+is on it". The on-call ticket has the prefix `OC` (`oncall_prefix`), type `fix`,
+`oncall: true`, and `--parent` the failed ticket. Its body holds the failed
+ticket's spec and latest notes, the MUST FIX sections of the latest review
+files, the reason and the log tail. The failed ticket gets a note pointing to it.
+
+The same cycle launches it at once in the **on-call slot**: separate from
+`max_running`, one agent at a time (a second waits, first in first out), not
+counted against `max_launches_per_day`. Nothing runs when nothing has failed.
+The agent works in a new task folder on branch `task/oc-<failed id>` that starts
+from the failed branch's tip, and then follows the normal ready-to-ship flow.
+It uses the `builder` agent.
+
+Loop guard: at most one on-call attempt per original ticket and at most
+`max_oncall_per_day` (3) a day (an on-call ticket counts from the moment it is
+filed). If the on-call ticket itself truly fails, or the cap is hit, or an
+attempt was already made, nothing more is launched: the ticket is closed as
+failed with a diagnosis note and one low ping, "<ID> needs a human, see notes".
+(`ticket close --failed` by a human still pings `failed` at once.)
 
 ### A claimed ticket whose agent is gone
 

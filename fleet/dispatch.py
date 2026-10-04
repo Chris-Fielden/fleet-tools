@@ -211,6 +211,8 @@ class Decision:
     name: str | None = None  # branch without "task/"
     repo_path: Path | None = None
     research: bool = False  # an investigate ticket: no task folder, no branch
+    oncall: bool = False    # an on-call fix ticket: own slot, branches from the failed tip
+    base: str | None = None  # oncall: the failed branch tip the new branch starts from
 
     @property
     def eligible(self) -> bool:
@@ -226,6 +228,8 @@ class Decision:
         model = self.model or "default"
         if self.research:
             return f"{self.ticket['id']}  would launch {self.agent} ({model}) to investigate (read-only)"
+        if self.oncall:
+            return f"{self.ticket['id']}  would launch on-call {self.agent} ({model}) in {self.worktree}"
         return f"{self.ticket['id']}  would launch {self.agent} ({model}) in {self.worktree}"
 
 
@@ -286,10 +290,14 @@ def decide(tickets: list[dict], settings: dict) -> list[Decision]:
     # Investigations are read-only: they neither fill the capacity nor hold a
     # branch. They have their own rules (decide_investigations).
     # A ticket in review still holds its branch and its place in the capacity.
-    claimed = [t for t in tickets if t["status"] in ("claimed", "review") and t["type"] != "investigate"]
+    # On-call fix tickets have their own slot (decide_oncall): they neither fill
+    # the normal capacity nor wait in the normal queue.
+    claimed = [t for t in tickets if t["status"] in ("claimed", "review") and t["type"] != "investigate"
+               and not t.get("oncall")]
     decisions = []
     picked = False
-    open_tickets = sorted((t for t in tickets if t["status"] == "open" and t["type"] != "investigate"),
+    open_tickets = sorted((t for t in tickets if t["status"] == "open" and t["type"] != "investigate"
+                           and not t.get("oncall")),
                           key=lambda t: (t.get("priority") != "urgent", *tk.oldest_first_key(t)))
     for t in open_tickets:
         d = _judge(t, by_id, claimed, settings)
@@ -335,6 +343,57 @@ def decide_investigations(tickets: list[dict], settings: dict, now: datetime | N
             d.skip = "only one investigation is started per run"
         else:
             picked = True
+        decisions.append(d)
+    return decisions
+
+
+def oncall_today(tickets: list[dict], now: datetime | None = None) -> int:
+    """On-call attempts made today (UTC): an on-call ticket counts from the
+    moment it is filed, so a queued one is already spent. Counted from the
+    stored tickets, so restarting the watcher cannot reset it."""
+    today = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+    return sum(1 for t in tickets if t.get("oncall") and t["created_at"].startswith(today))
+
+
+def decide_oncall(tickets: list[dict], settings: dict) -> list[Decision]:
+    """One Decision per open on-call ticket, first in, first out. The on-call
+    slot is separate from the normal capacity and holds one agent at a time: it
+    is busy while an on-call ticket is claimed (one waiting in review has an
+    agent that has stopped). Only the first eligible one stays eligible."""
+    by_id = {t["id"]: t for t in tickets}
+    busy = any(t.get("oncall") and t["status"] == "claimed" for t in tickets)
+    waiting = sorted((t for t in tickets if t.get("oncall") and t["status"] == "open"),
+                     key=tk.oldest_first_key)
+    projects_dir = settings["projects_dir"]
+    decisions, picked = [], False
+    for t in waiting:
+        repo = projects_dir / t["repo"]
+        d = Decision(ticket=t, name=t["branch"].removeprefix("task/"), repo_path=repo, oncall=True,
+                     agent=settings["builder"], model=settings["models"].get(settings["builder"]))
+        parent = by_id.get(t["parent"])
+        if repo.resolve().parent != projects_dir.resolve() or not repo.is_dir():
+            d.skip = f"repo folder {repo} not found"
+        elif _git(repo, "rev-parse", "--show-toplevel").returncode != 0:
+            d.skip = f"{repo} is not a git repo"
+        elif not TASK_NAME_RE.fullmatch(d.name):
+            d.skip = f"branch {t['branch']} can't be used as a task folder name"
+        elif branch_exists(repo, t["branch"]):
+            d.skip = f"branch {t['branch']} already exists in {t['repo']}"
+        elif parent is None:
+            d.skip = f"failed ticket {t['parent']} not found"
+        else:
+            tip = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{parent['branch']}^{{commit}}")
+            if tip.returncode != 0 or not tip.stdout.strip():
+                d.skip = f"failed branch {parent['branch']} not found in {t['repo']}"
+            else:
+                d.base = tip.stdout.strip()
+        if d.skip is None:
+            if busy:
+                d.skip = "the on-call agent is busy"
+            elif picked:
+                d.skip = "waiting its turn behind an earlier on-call ticket"
+            else:
+                picked = True
         decisions.append(d)
     return decisions
 
