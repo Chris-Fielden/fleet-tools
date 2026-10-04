@@ -19,7 +19,7 @@ with open(os.environ["FAKE_HERDR_LOG"], "a") as fh:
 cmd = " ".join(args[:2])
 world_file = os.environ.get("FAKE_HERDR_WORLD")
 world = json.load(open(world_file)) if world_file else None
-if world is not None and cmd in ("workspace list", "workspace create", "tab list", "tab close", "tab create", "agent list",
+if world is not None and cmd in ("workspace list", "workspace create", "tab list", "tab close", "tab create", "tab focus", "agent list",
                                                    "agent start"):
     if cmd == "workspace list":
         out = {"result": {"workspaces": world["workspaces"]}}
@@ -41,6 +41,10 @@ if world is not None and cmd in ("workspace list", "workspace create", "tab list
         world["tabs"].append({"tab_id": f"{ws}:t{n}", "label": args[args.index("--label") + 1],
                               "workspace_id": ws, "focused": False, "agent_status": "unknown"})
         out = {"result": {"tab": {"tab_id": f"{ws}:t{n}"}, "root_pane": {"pane_id": f"{ws}:p{n}"}}}
+    elif cmd == "tab focus":
+        for t in world["tabs"]:
+            t["focused"] = t["tab_id"] == args[2]
+        out = {"result": {}}
     elif cmd == "tab close":
         world["tabs"] = [t for t in world["tabs"] if t["tab_id"] != args[2]]
         world["agents"] = [a for a in world["agents"] if a.get("tab_id") != args[2]]

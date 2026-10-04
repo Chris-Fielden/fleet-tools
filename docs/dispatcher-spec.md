@@ -208,12 +208,14 @@ looks for that ticket's tab in `herdr_workspace`: the tab of the agent named
 after the ticket, else the one tab labelled with the ticket id. It closes it
 only if its agent, and every other agent in that tab, is `idle` or `done`. It
 never closes a tab with an agent that is `working`, `blocked` or `unknown`, a
-focused tab, a label shared by several
-tabs, or anything when herdr cannot be asked. The ticket is done either way.
+label shared by several tabs, or anything when herdr cannot be asked. A
+focused tab whose agents are all finished is closed too, but first
+`herdr tab focus` moves focus to another tab in the workspace (one labelled
+"dispatch" if there is one); with no other tab, or if the switch fails, it is kept. The ticket is done either way.
 Each ticket logs one line: `TAB_CLOSED <id> <tab> (agent <state>)` or
 `TAB_KEPT <id> <reason>`.
 
-A tab kept at that moment (typically because it was focused) is not forgotten:
+A tab kept at that moment (for example because focus could not be moved) is not forgotten:
 on every later `--watch` cycle the dispatcher tries again for each `done`
 ticket whose last tab log line is `TAB_KEPT` (other than "no tab found"), with
 the same rules. Only a success is logged and printed (`TAB_CLOSED`); a tab that

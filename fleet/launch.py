@@ -607,8 +607,9 @@ def finish_investigations(tickets: list[dict], warn):
 
 def close_finished_tab(ticket_id: str, settings: dict) -> tuple[bool, str]:
     """Close the herdr tab of a ticket that is now done, if it still exists and
-    its agent is idle or done. Never closes a working or blocked agent or a
-    focused tab. Returns (closed, reason) and logs TAB_CLOSED or TAB_KEPT."""
+    its agent is idle or done. Never closes a working or blocked agent. A
+    focused tab is closed too, after focus moves to another tab in the
+    workspace (kept if there is none). Returns (closed, reason) and logs TAB_CLOSED or TAB_KEPT."""
     closed, reason = _close_finished_tab(ticket_id, settings)
     _safe_log("TAB_CLOSED" if closed else "TAB_KEPT", f"{ticket_id} {reason}")
     return closed, reason
@@ -740,12 +741,21 @@ def _close_tab_in(ticket_id: str, tabs: list[dict], agents: list[dict],
     state = agent.get("agent_status") if agent is not None else tab.get("agent_status")
     # Closing a tab ends every pane in it, so every agent in it must be finished.
     in_tab = [a for a in agents if a.get("tab_id") == tab["tab_id"]]
-    if tab.get("focused") or any(a.get("focused") for a in in_tab):
-        return False, f"tab {tab['tab_id']} is focused", None
     for a in [{"agent_status": state}] + in_tab:
         if a.get("agent_status") not in RESEARCH_DONE_STATES:
             return False, (f"tab {tab['tab_id']} has an agent that is "
                            f"{a.get('agent_status') or 'unknown'}, not idle or done"), None
+    if tab.get("focused") or any(a.get("focused") for a in in_tab):
+        # Every agent in the tab is finished, so it is safe to move focus away first.
+        others = [x for x in tabs if x is not tab and isinstance(x.get("tab_id"), str)
+                  and x["tab_id"] != tab["tab_id"]]
+        if not others:
+            return False, f"tab {tab['tab_id']} is focused and there is no other tab to switch to", None
+        target = next((x for x in others if "dispatch" in str(x.get("label", "")).lower()), others[0])
+        try:
+            herdr("tab", "focus", target["tab_id"])
+        except LaunchError as exc:
+            return False, f"tab {tab['tab_id']} is focused and focus could not move ({exc})", None
     try:
         herdr("tab", "close", tab["tab_id"])
     except LaunchError as exc:
