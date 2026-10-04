@@ -456,7 +456,7 @@ def _check_agent_rate(creator: str) -> None:
             f"(the limit is {AGENT_TICKET_LIMIT}). Wait, or ask the human to create it.")
 
 
-def create_ticket(fields: dict) -> dict:
+def create_ticket(fields: dict, *, needs_approval: bool = False) -> dict:
     """Validate, check for secrets, assign an id and save. Returns the ticket."""
     creator = current_creator()
     errors = validate_new(fields)
@@ -469,7 +469,9 @@ def create_ticket(fields: dict) -> dict:
     # Investigate tickets always wait for approval; everything else starts
     # open (the human approves at merge). A build ticket that follows up an
     # investigation (it has a parent) also waits for approval.
-    status = "proposed" if t == "investigate" or (t == "build" and fields.get("parent")) else "open"
+    # needs_approval: the caller wants a human to approve it first.
+    status = ("proposed" if needs_approval or t == "investigate" or (t == "build" and fields.get("parent"))
+              else "open")
     try:
         start_risk = rk.starting_level(t, fields["repo"])
     except rk.RiskError as exc:
@@ -618,12 +620,13 @@ def append_to_body(ticket_id: str, heading: str, items: str) -> dict | None:
         ticket = load_ticket(ticket_id)
         if ticket["status"] not in ACTIVE_STATUSES:
             raise TicketError(f"{ticket_id} is {ticket['status']}, so nothing new can be added to it")
-        fresh = [ln for ln in items.splitlines() if ln.strip() and ln not in ticket["body"]]
+        held = {ln.strip() for ln in ticket["body"].splitlines()}
+        fresh = [ln for ln in items.splitlines() if ln.strip() and ln.strip() not in held]
         if not fresh:
             return None
         body = f"{ticket['body']}\n\n{heading}\n" + "\n".join(fresh)
         if len(body) > BODY_MAX:
-            raise TicketError(f"{ticket_id} is too full to take these items; they are in its notes instead")
+            raise TicketError(f"{ticket_id} is too full to take these items; they are in the notes on the reviewed ticket")
         errors = check_secrets(ticket["title"], body)
         if errors:
             raise TicketInvalid(errors)

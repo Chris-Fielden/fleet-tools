@@ -224,7 +224,7 @@ def _save_leftovers(args, info: dict, changed: list, review_text: str) -> None:
     try:
         heading = f"From the {info['reviewer']} review of {info['commit'][:7]}:"
         existing = next((o for o in tk.list_tickets()
-                         if o.get("parent") == parent["id"] and o["branch"] == branch
+                         if o.get("parent") == parent["id"] and o.get("branch") == branch
                          and o["status"] in tk.ACTIVE_STATUSES), None)  # a finished one is not reused
         if existing:  # one grouped ticket per reviewed ticket: add this reviewer's new items
             added = tk.append_to_body(existing["id"], heading, items)
@@ -235,9 +235,13 @@ def _save_leftovers(args, info: dict, changed: list, review_text: str) -> None:
         body = (f"Smaller review suggestions left over from {parent['id']} "
                 f"({parent['title']}), kept out of that branch so its tip review stays valid.\n\n"
                 f"{heading}\n{items}")
+        if len(body) > tk.BODY_MAX:
+            body = body[:tk.BODY_MAX - 15].rstrip() + "\n[...truncated]"
+        # Proposed, not open: its branch would start from main before the
+        # reviewed branch is merged, so a human approves it after the merge.
         new = tk.create_ticket({
             "type": "fix", "repo": parent["repo"], "branch": branch, "parent": parent["id"],
-            "title": f"Leftover review items from {parent['id']}", "body": body[:tk.BODY_MAX]})
+            "title": f"Leftover review items from {parent['id']}", "body": body}, needs_approval=True)
         print(f"{new['id']} proposed for the leftover SHOULD FIX items")
         kaneo.mirror_quietly(new, _warn)
     except (tk.TicketError, tk.TicketInvalid, OSError, UnicodeDecodeError) as exc:

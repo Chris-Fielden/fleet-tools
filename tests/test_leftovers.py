@@ -91,7 +91,7 @@ def test_propose_makes_one_grouped_fix_ticket(env):
     assert out.count("Leftover review items from") == 1
     fx = [l.split()[0] for l in out.splitlines() if "Leftover review items" in l][0]
     t = stored(fx)
-    assert t["parent"] == tid and t["type"] == "fix" and "b.py: add a test" in t["body"]
+    assert t["status"] == "proposed" and t["parent"] == tid and t["type"] == "fix" and "b.py: add a test" in t["body"]
     assert t["branch"] == f"task/leftovers-{tid.lower()}"
 
 
@@ -176,4 +176,4 @@ def test_a_finished_leftovers_ticket_is_not_reused(env):
     assert len(ids) == 2
     assert stored(first)["body"] == before and stored(first)["status"] == "done"
     new = next(i for i in ids if i != first)
-    assert "z.py: new thing" in stored(new)["body"] and stored(new)["status"] == "open"
+    assert "z.py: new thing" in stored(new)["body"] and stored(new)["status"] == "proposed"
