@@ -75,6 +75,9 @@ def single_instance():
         except BlockingIOError:
             raise AlreadyRunning() from None
         try:
+            lock.truncate(0)   # so `fleet stop` knows whom to signal
+            lock.write(str(os.getpid()))
+            lock.flush()
             yield
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
