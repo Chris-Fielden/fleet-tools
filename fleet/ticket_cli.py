@@ -181,9 +181,10 @@ def _cmd_note(args) -> int:
 
 def _cmd_review_result(args) -> int:
     try:
-        info = rk.parse_review(Path(args.file).read_text(encoding="utf-8"))
+        review_text = Path(args.file).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise tk.TicketInvalid([f"cannot read review file {args.file}: {exc}"]) from None
+    info = rk.parse_review(review_text)
     if info["verdict"] is None or not info["commit"]:
         raise tk.TicketInvalid([f"{args.file} has no VERDICT line or no Commit header"])
     changed = tk.record_verdict(args.branch, args.repo, info["verdict"], info["commit"], info["reviewer"])
@@ -193,14 +194,14 @@ def _cmd_review_result(args) -> int:
         print(f"{t['id']} verdict {t['verdict']['result']} recorded")
         kaneo.mirror_quietly(t, _warn)
     if args.leftovers and info["verdict"] == "PASS" and changed:
-        _save_leftovers(args, info, changed)
+        _save_leftovers(args, info, changed, review_text)
     return 0
 
 
-def _save_leftovers(args, info: dict, changed: list) -> None:
+def _save_leftovers(args, info: dict, changed: list, review_text: str) -> None:
     """Keep a PASS review's SHOULD FIX items where they will not be lost.
     Never changes the verdict or the exit status: a problem here is a warning."""
-    items = rk.should_fix_items(Path(args.file).read_text(encoding="utf-8"))
+    items = rk.should_fix_items(review_text)
     if not items:
         return
     label = f"SHOULD FIX leftovers from the {info['reviewer']} review of {info['commit'][:7]} (PASS):\n"
@@ -214,23 +215,31 @@ def _save_leftovers(args, info: dict, changed: list) -> None:
             noted = tk.add_note(t["id"], text)
             print(f"{t['id']} SHOULD FIX leftovers saved as a note")
             kaneo.mirror_quietly(noted, _warn)
-        except (tk.TicketError, tk.TicketInvalid) as exc:
+        except (tk.TicketError, tk.TicketInvalid, OSError, UnicodeDecodeError) as exc:
             _warn(f"could not save the SHOULD FIX leftovers on {t['id']}: {exc}")
     if not args.propose_leftovers:
         return
     parent = changed[0]
     branch = f"task/leftovers-{parent['id'].lower()}"
     try:
-        if any(o["parent"] == parent["id"] and o["branch"] == branch for o in tk.list_tickets()):
-            return  # one grouped ticket per reviewed ticket
+        heading = f"From the {info['reviewer']} review of {info['commit'][:7]}:"
+        existing = next((o for o in tk.list_tickets()
+                         if o.get("parent") == parent["id"] and o["branch"] == branch), None)
+        if existing:  # one grouped ticket per reviewed ticket: add this reviewer's new items
+            added = tk.append_to_body(existing["id"], heading, items)
+            if added:
+                print(f"{added['id']} leftover items added from the {info['reviewer']} review")
+                kaneo.mirror_quietly(added, _warn)
+            return
         body = (f"Smaller review suggestions left over from {parent['id']} "
-                f"({parent['title']}), kept out of that branch so its tip review stays valid.\n\n{items}")
+                f"({parent['title']}), kept out of that branch so its tip review stays valid.\n\n"
+                f"{heading}\n{items}")
         new = tk.create_ticket({
             "type": "fix", "repo": parent["repo"], "branch": branch, "parent": parent["id"],
             "title": f"Leftover review items from {parent['id']}", "body": body[:tk.BODY_MAX]})
         print(f"{new['id']} proposed for the leftover SHOULD FIX items")
         kaneo.mirror_quietly(new, _warn)
-    except (tk.TicketError, tk.TicketInvalid) as exc:
+    except (tk.TicketError, tk.TicketInvalid, OSError, UnicodeDecodeError) as exc:
         _warn(f"could not propose a leftovers ticket for {parent['id']}: {exc}")
 
 

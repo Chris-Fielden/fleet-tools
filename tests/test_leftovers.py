@@ -2,7 +2,7 @@
 
 Everything uses a temporary FLEET_HOME, fake reviewers and throwaway repos."""
 
-import os
+import sys
 
 from conftest import BIN, new_args, run
 from fleet import risk as rk
@@ -66,7 +66,7 @@ def test_recording_twice_does_not_duplicate(env):
 
 def test_no_flag_fail_and_empty_save_nothing(env):
     tid = new_ticket()
-    leftovers(review(env, ITEMS), )
+    leftovers(review(env, ITEMS))
     leftovers(review(env, ITEMS, verdict="FAIL", must="1. broken"), "--leftovers")
     leftovers(review(env, "none"), "--leftovers")
     t = stored(tid)
@@ -114,7 +114,7 @@ def test_review_sh_saves_leftovers(task, env):
     fake_tool(env / "bin", "codex")
     fake.write_text(fake.read_text().replace('echo "SUMMARY: fake"', 'echo "SHOULD FIX: 1. tidy"\necho "SUMMARY: fake"'))
     wrapper = env / "ticket-wrapper"
-    wrapper.write_text(f'#!/bin/sh\nexec "{os.sys.executable}" "{BIN}" "$@"\n')
+    wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{BIN}" "$@"\n')
     wrapper.chmod(0o755)
     r = run_review(task, env / "bin", REVIEWER="codex", FLEET_TICKET=str(wrapper))
     assert r.returncode == 0, r.stdout + r.stderr
@@ -124,3 +124,39 @@ def test_review_sh_saves_leftovers(task, env):
     r = run_review(task, env / "bin", REVIEWER="codex", FLEET_TICKET=str(wrapper), REVIEW_PROPOSE_LEFTOVERS="1")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "Leftover review items" in run("list").stdout
+
+
+def test_second_reviewers_items_are_added_to_the_existing_ticket(env):
+    tid = new_ticket()
+    a = review(env, "\n1. a.py: rename x\n2. shared: add a test", name="a.md")
+    b = env / "b.md"
+    b.write_text(REVIEW.format(sha=SHA, verdict="PASS", must="none",
+                               should="\n1. c.py: handle None\n2. shared: add a test").replace("Codex", "Claude (opus)"))
+    leftovers(a, "--leftovers", "--propose-leftovers")
+    r = leftovers(b, "--leftovers", "--propose-leftovers")
+    assert r.returncode == 0, r.stderr
+    out = run("list").stdout
+    assert out.count("Leftover review items from") == 1
+    fx = [l.split()[0] for l in out.splitlines() if "Leftover review items" in l][0]
+    body = stored(fx)["body"]
+    assert "a.py: rename x" in body and "c.py: handle None" in body
+    assert "From the Claude (opus) review of aaaaaaa:" in body
+    assert body.count("shared: add a test") == 1  # the duplicate line is not repeated
+    # a third recording with nothing new changes nothing
+    leftovers(b, "--leftovers", "--propose-leftovers")
+    assert stored(fx)["body"] == body
+    assert stored(tid)["verdict"]["result"] == "PASS"
+
+
+def test_review_sh_retries_without_flags_for_an_older_ticket(task, env):
+    tid = new_ticket(repo="repo")
+    commit_in(task, "fleet/x.py")
+    fake_tool(env / "bin", "codex")
+    old = env / "ticket-old"
+    old.write_text('#!/bin/sh\ncase "$*" in *--leftovers*) echo "unrecognized arguments" >&2; exit 2;; esac\n'
+                   f'exec "{sys.executable}" "{BIN}" "$@"\n')
+    old.chmod(0o755)
+    r = run_review(task, env / "bin", REVIEWER="codex", FLEET_TICKET=str(old))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "retrying without the leftovers flags" in r.stdout
+    assert stored(tid)["verdict"]["result"] == "PASS"

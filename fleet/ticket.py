@@ -607,6 +607,29 @@ def add_note(ticket_id: str, text: str) -> dict:
     return ticket
 
 
+def append_to_body(ticket_id: str, heading: str, items: str) -> dict | None:
+    """Add the lines of `items` that the ticket body does not already hold,
+    under `heading`. Returns the ticket, or None when nothing new was added.
+    The check and the write happen under one lock."""
+    if not ID_RE.fullmatch(ticket_id):
+        raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
+    with _locked():
+        ticket = load_ticket(ticket_id)
+        fresh = [ln for ln in items.splitlines() if ln.strip() and ln not in ticket["body"]]
+        if not fresh:
+            return None
+        body = f"{ticket['body']}\n\n{heading}\n" + "\n".join(fresh)
+        if len(body) > BODY_MAX:
+            body = body[:BODY_MAX - 15].rstrip() + "\n[...truncated]"
+        errors = check_secrets(ticket["title"], body)
+        if errors:
+            raise TicketInvalid(errors)
+        ticket["body"] = body
+        ticket["updated_at"] = _now()
+        _write_atomic(_ticket_path(ticket_id), ticket)
+    return ticket
+
+
 def verdict_line(v: dict | None) -> str:
     """One line for a stored verdict, for `ticket show` and the card."""
     if v is None:

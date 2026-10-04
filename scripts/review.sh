@@ -117,8 +117,12 @@ record_on_ticket() {
   # never changes the verdict or the saved review the merge gate reads.
   local extra=(--leftovers)
   [[ "${REVIEW_PROPOSE_LEFTOVERS:-}" == "1" ]] && extra+=(--propose-leftovers)
+  # If that fails (an older ticket command may not know the flags), retry once
+  # without them so the verdict is still recorded.
   "$ticket_cmd" review-result --branch "$branch" --repo "$repo" --file "$1" "${extra[@]}" \
-    || echo "note: the verdict could not be recorded on the ticket (the saved review is unaffected)."
+    || { echo "note: retrying without the leftovers flags."
+         "$ticket_cmd" review-result --branch "$branch" --repo "$repo" --file "$1" \
+           || echo "note: the verdict could not be recorded on the ticket (the saved review is unaffected)."; }
 }
 
 # run_review <codex|claude> <model or empty>
