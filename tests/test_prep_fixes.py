@@ -176,3 +176,26 @@ def test_an_unreadable_prep_state_fails_closed(q, env, capsys):
     assert ship_main([a["id"]]) == 1
     assert "cannot tell whether an agent is working" in capsys.readouterr().err
     assert tk.load_ticket(a["id"])["status"] == "review"
+
+
+def test_a_half_launched_job_that_stopped_is_still_validated(q, herdr_log, env):
+    a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
+    settings, _, _ = start_prep()
+    with prep._state() as st:
+        st["jobs"][0].update(ready=False, started="2026-10-03T10:00:00Z")
+    (a_wt / "stray.txt").write_text("left behind by the agent")   # uncommitted work
+    set_agent_status(env, "prep", "idle")
+    _, warns = finish_prep(settings, now=datetime(2026, 10, 3, 18, 0, tzinfo=timezone.utc))
+    assert tk.load_ticket(a["id"])["status"] == "claimed" and prep.locked_ids() == set()
+    assert not [i for i, _ in prep.read_list()]
+
+
+def test_an_unchanged_branch_whose_task_folder_is_gone_is_left_off_the_list(q, herdr_log, env):
+    a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
+    b, _ = in_review(q, "task/two", {"two.txt": "2"})
+    settings, _, _ = start_prep()
+    git(q, "worktree", "remove", "--force", str(a_wt))
+    set_agent_status(env, "prep", "idle")
+    finish_prep(settings)
+    assert tk.load_ticket(a["id"])["status"] == "claimed"
+    assert [i for i, _ in prep.read_list()] == [b["id"]]

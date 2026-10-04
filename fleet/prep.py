@@ -556,6 +556,8 @@ def _finish_prep(job: dict, settings: dict, now: datetime, emit, warn) -> None:
         if tip != job["tips"].get(t["id"]):
             return validate(t, settings)   # only a moved tip needs the full re-check
         dirty = dp._git(_worktree(t, settings), "status", "--porcelain")
+        if dirty.returncode != 0:
+            return "the task folder is missing or unreadable"
         return "the task folder has uncommitted changes" if dirty.stdout.strip() else None
 
     # A keeper is re-checked BEFORE its duplicates are cancelled: if what was folded into it does
@@ -651,14 +653,13 @@ def finish(settings: dict, now: datetime, emit, warn) -> None:
         agent = agents.get(job["name"])
         started = _parse(job.get("started"))
         if not job.get("ready", True):
-            # A launch that died half way. Its tickets are released only once herdr confirms that
-            # no such agent is running (listed and busy, or not asked, keeps the lock).
+            # A launch that died half way. Its tickets stay locked until herdr confirms that no such
+            # agent is running (listed and busy, or not asked, keeps the lock); then the job goes
+            # through the normal finish, so any change the agent made is still validated.
             stopped = agent is None or agent.get("agent_status") in ("idle", "done")
-            if stopped and started is not None and now - started > timedelta(minutes=10):
-                warn(f"the {job['name']} launch never completed; releasing its tickets")
-                with _state() as st:
-                    st["jobs"] = [j for j in st["jobs"] if j["name"] != job["name"]]
-            continue
+            if not (stopped and started is not None and now - started > timedelta(minutes=10)):
+                continue
+            warn(f"the {job['name']} launch never completed; checking its tickets as for a finished agent")
         if agent is not None and agent.get("agent_status") not in ("idle", "done"):
             if started is not None and now - started > JOB_MAX:
                 warn(f"the {job['name']} agent has been working for over {JOB_MAX}; its tickets stay locked "
