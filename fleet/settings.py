@@ -28,6 +28,9 @@ DEFAULTS = {
     "max_investigations_per_day": 3,
     "watch_interval_seconds": 120,
     "max_launches_per_day": 10,
+    # Overnight queue: at this time (HH:MM, America/Los_Angeles) the prep pass
+    # runs over the tickets in review, if it has not already run.
+    "prep_time": "06:00",
     # Where things live
     "projects_dir": "~/projects",
     "research_dir": "~/fleet-research",
@@ -50,6 +53,7 @@ DEFAULTS = {
 MIN_WATCH_INTERVAL = 30
 TRACKERS = ("local",)  # keep in step with tracker.BACKENDS (a test checks)
 PREFIX_RE = re.compile(r"[A-Z]{2}")
+PREP_TIME_RE = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
 
 
 class SettingsError(Exception):
@@ -137,6 +141,11 @@ def _merge(settings: dict, given, path: Path) -> None:
             path, given, "watch_interval_seconds", MIN_WATCH_INTERVAL, f"{MIN_WATCH_INTERVAL} or more")
     if "max_launches_per_day" in given:
         settings["max_launches_per_day"] = _whole(path, given, "max_launches_per_day", 0, "0 or more")
+    if "prep_time" in given:
+        value = given["prep_time"]
+        if not isinstance(value, str) or not PREP_TIME_RE.fullmatch(value):
+            raise SettingsError(f"{path}: prep_time must be a time like \"06:00\" (24 hours, HH:MM)")
+        settings["prep_time"] = value
     for key in ("projects_dir", "research_dir", "herdr_workspace"):
         if key in given:
             if not isinstance(given[key], str) or not given[key].strip():

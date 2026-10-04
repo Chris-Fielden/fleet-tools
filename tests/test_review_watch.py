@@ -138,6 +138,18 @@ def test_pass_summary_and_idle_agent_moves_to_review_with_one_ping(rig, ntfy):
     assert len(ntfy.requests) == 1 and rig.get()["status"] == "review"
 
 
+def test_the_tab_closes_when_the_ticket_reaches_review(rig, ntfy):
+    rig.finish()
+    rig.world.write_text(json.dumps({
+        "workspaces": [{"workspace_id": "w1", "label": "fleet"}],
+        "tabs": [{"tab_id": "w1:t4", "label": rig.id, "workspace_id": "w1", "focused": False}],
+        "agents": [{"name": rig.id.lower(), "agent_status": "idle", "tab_id": "w1:t4"}]}))
+    rig.cycle()
+    assert rig.get()["status"] == "review"
+    assert json.loads(rig.world.read_text())["tabs"] == []
+    assert f"TAB_CLOSED {rig.id} tab w1:t4" in dp.log_path().read_text()
+
+
 def test_done_agent_counts_like_idle(rig, ntfy):
     rig.finish()
     rig.set_agent("done")
@@ -270,12 +282,15 @@ def test_an_agent_can_never_set_review(rig, monkeypatch):
     assert rig.get()["status"] == "claimed"
 
 
-def test_a_review_ticket_still_holds_the_capacity_and_the_branch(rig):
+def test_a_review_ticket_holds_the_branch_but_not_the_capacity(rig):
     rig.finish()
     rig.cycle()
+    assert rig.get()["status"] == "review"
     other = mk(branch="task/other")
-    decision = dp.decide(tk.list_tickets(), rig.settings)[0]
-    assert decision.ticket["id"] == other["id"] and decision.skip == "at capacity"
+    same = mk(branch="task/demo")
+    decisions = {d.ticket["id"]: d for d in dp.decide(tk.list_tickets(), rig.settings)}
+    assert decisions[other["id"]].skip is None            # the next ticket launches while this one waits
+    assert "in use by claimed ticket" in decisions[same["id"]].skip   # but the branch stays taken
 
 
 def test_review_queue_lists_oldest_first(rig):

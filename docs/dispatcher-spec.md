@@ -50,7 +50,7 @@ missing:
 
 - `builder`: which agent builds new work, `claude` or `codex`.
 - `models`: model flag per agent; null means the tool's default.
-- `max_running`: how many tickets may be `claimed` (or in `review`) at once.
+- `max_running`: how many tickets may be `claimed` at once (a ticket in `review` does not count).
 - `projects_dir`: a ticket's repo lives at `<projects_dir>/<repo>`.
 - Unknown keys or bad values are an error with a plain message.
 - `watch_interval_seconds` and `max_launches_per_day`: see "Watching, tab
@@ -236,8 +236,9 @@ fix ticket. It becomes READY, status `review` (Kaneo: In Review, with the
 If the tip moves, the verdict stops matching, or the agent is busy again, the
 ticket goes back to `claimed` and the label is removed. The same commit never
 pings twice. Only the dispatcher (a human's process) can set `review`: the store
-refuses it inside an agent. A ticket in review still holds its branch and its
-place in `max_running`; `ship` accepts `review` (and `claimed`), and reconcile
+refuses it inside an agent. A ticket in review still holds its branch but no
+place in `max_running` (the next ticket launches while it waits), and its herdr tab is
+closed when it gets there (never a focused one; a kept tab closes when the ticket is done); `ship` accepts `review` (and `claimed`), and reconcile
 marks either done once the branch is merged.
 
 A claimed ticket whose agent is no longer listed in herdr (its tab was closed)
@@ -397,3 +398,54 @@ At the start of each `--once`, a claimed investigation whose agent is gone or
 means waiting for a person, so it is not finished) is marked `done`; if it recorded no notes, it is marked `failed`
 with a `close_note`. If herdr cannot be asked, nothing changes. A failed
 launch puts the ticket back to the status it had.
+
+## The overnight queue: prep pass and `ship --list` (`fleet/prep.py`)
+
+A ticket in review no longer fills a `max_running` slot, so the queue keeps building
+all night while finished work waits. In the morning the human ships from one list.
+
+**When it runs.** Every cycle (`--once` and `--watch`), if some ticket in review was not
+covered by an earlier prep pass at its current tip, the dispatcher launches ONE prep
+agent over all tickets in review when either nothing is left to build (nothing claimed,
+nothing open that could start or is only waiting its turn) or it is `prep_time`
+(default `06:00`) America/Los_Angeles or later. A pass covers the tickets it saw, so it
+runs once unless new tickets reach review (or a ticket returns with a new tip) after it.
+Only one prep agent runs at a time, at most 3 launch attempts a day, and it counts as a
+launch against `max_launches_per_day`. It needs `builder` claude, like investigations
+(it works from `<research_dir>/PREP`, with the guard hooks, and never touches the ticket
+store). State: `$FLEET_HOME/prep.json`.
+
+**What the agent does** (judgment, in git only), reading `manifest-prep.json`
+(spec, notes, branch, folder, tip of every ticket in review): (a) among duplicates it keeps the
+ticket with the most context and folds anything useful only the others have into its branch;
+(b) where two tickets change the same code it combines them into the best version that keeps
+what each needed, picks a shipping order and brings each branch up to date with main and the
+earlier tickets. It writes `report-prep.json`: `order`, per-ticket `summary` and
+`reconciled`, and `duplicates` (`keep`, `cancel`, `note`).
+
+**What the dispatcher does when the agent stops** (so nothing depends on trusting the
+report): cancels each named duplicate with a note naming the keeper (its branch is left in
+place) and a note on the keeper; reads every branch's tip from git and, for each that moved,
+re-runs `scripts/check.sh` and `scripts/review.sh` (which applies the reviews the risk level
+needs) in its task folder, then saves a `Prep pass:` note after the new verdict (the review
+watch counts it as that tip's summary). A branch that fails any of that goes back to
+`claimed` (normal handling) and stays off the list. Tickets handed to an agent are locked:
+`--watch` does not judge them meanwhile. It then writes the ship list and sends one ping,
+`<N> ready to ship, list ready` (ntfy event `ship_list`, default priority; none if the list is empty).
+
+**The ship list**: `$FLEET_HOME/ship-list.txt`, a `#` comment line first, then one line per
+ticket in shipping order: `ID | title | risk | what it does | folded in: ..; reconciled with: ..`
+(`-` when neither). Tickets the agent left out of `order` follow, oldest first.
+
+**`ship --list`** (human only, refused in agents like `ship`): prints the list, then ships each
+ticket in order exactly as `ship ID` does, so the merge script asks its usual confirmation for
+each. A ticket already done is skipped. It stops at the first failure (a ticket that is no longer in
+review, a refused or declined merge, an agent still working on it) and says why. `ship ID` still
+works for one ticket.
+
+**A conflict at ship time**: if the merge script stops with a half-done merge, `ship` aborts
+it (main is as it was), starts a short reconcile agent for that one ticket (same rules as (b):
+merge main into the branch, keep what both sides needed) and exits 1. When that agent stops
+the dispatcher re-checks and re-reviews the branch like in the prep pass; a pass leaves the
+ticket in review and the review watch sends the usual `ready to ship` ping. No conflict means
+no agent.

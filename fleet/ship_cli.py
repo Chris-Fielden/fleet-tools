@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 
 from . import dispatch as dp
+from . import launch as lc
+from . import prep
 from . import ticket as tk
 
 
@@ -106,22 +108,40 @@ def _review_if_needed(repo: Path, name: str, branch: str, script: Path) -> str |
     return None
 
 
-def main(argv=None) -> int:
-    p = _Parser(prog="ship")
-    p.add_argument("id", help="ticket id, like BD-17")
-    args = p.parse_args(argv)
-
-    who = tk.current_creator()
-    if who != "human":
-        return _fail(f"refusing to run inside an agent (running as {who}); only a human ships")
+def _conflict_agent(repo: Path, t: dict, settings: dict) -> str | None:
+    """The merge script stops with the merge half done when the branch conflicts with main.
+    If that is what happened, put main back as it was and start a short reconcile agent.
+    Returns a one-line message, or None when there was no merge conflict."""
+    probe = dp._git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+    if probe.returncode != 0:
+        return None
+    # The script refuses a main checkout with changes, so aborting restores exactly what was there.
+    if dp._git(repo, "merge", "--abort").returncode != 0:
+        return (f"{t['branch']} conflicts with main, and the half-done merge in {repo} "
+                "could not be aborted: run git merge --abort there")
     try:
-        t = tk.load_ticket(args.id)
+        started = prep.start_reconcile(t, settings, lambda m: print(f"ship: {m}", file=sys.stderr))
+    except (lc.LaunchError, OSError, subprocess.TimeoutExpired) as exc:
+        return (f"{t['branch']} conflicts with main (the merge was aborted); "
+                f"no reconcile agent could be started ({exc})")
+    return (f"{t['branch']} conflicts with main (the merge was aborted); {started}. "
+            "You will get a ping when it is ready: ship it again then")
+
+
+def _ship_one(ticket_id: str, in_list: bool = False) -> int:
+    """Ship one ticket; prints what happened and returns the exit code."""
+    try:
+        t = tk.load_ticket(ticket_id)
     except tk.TicketInvalid as exc:
         return _fail(f"unknown ticket ID: {exc}")
     except tk.TicketError as exc:
         return _fail(str(exc))
     if t["status"] not in ("claimed", "review"):
         return _fail(f"{t['id']} is {t['status']}; only a ticket in review (or still claimed) can be shipped")
+    if in_list and t["status"] != "review":
+        return _fail(f"{t['id']} is {t['status']}, not in review any more, so it is no longer ready")
+    if t["id"] in prep.locked_ids():
+        return _fail(f"an agent is still working on {t['id']}; wait for its ping")
     repo_name, branch = t.get("repo"), t.get("branch")
     if not repo_name or not branch:
         return _fail(f"{t['id']} has no repo and branch to ship")
@@ -152,6 +172,10 @@ def main(argv=None) -> int:
     except OSError as exc:
         return _fail(f"could not run {script}: {exc}")
     if done.returncode != 0:
+        if t["status"] == "review":
+            conflict = _conflict_agent(repo, t, settings)
+            if conflict:
+                return _fail(conflict)
         return _fail(f"finish-task refused {branch} (exit {done.returncode}); nothing was reconciled")
 
     # finish-task also exits 0 when the human answers no at its prompt, so ask
@@ -171,3 +195,45 @@ def main(argv=None) -> int:
         # e.g. a running `dispatch --watch` holds the lock; it reconciles on its next pass
         print(f"ship: {t['id']} merged, but is still {status}{later}")
     return 0
+
+
+def _ship_list() -> int:
+    """Show the ship list and ship each ticket in order, with the merge script's own
+    confirmation for each. Stops at the first failure and says why."""
+    try:
+        entries = prep.read_list()
+    except OSError as exc:
+        return _fail(f"cannot read the ship list: {exc}")
+    if not entries:
+        return _fail(f"there is no ship list ({prep.list_path()}); the prep pass writes it")
+    print("Ship list:")
+    for _, line in entries:
+        print(f"  {line}")
+    shipped = 0
+    for n, (ticket_id, _) in enumerate(entries, 1):
+        try:
+            status = tk.load_ticket(ticket_id)["status"]
+        except (tk.TicketError, tk.TicketInvalid) as exc:
+            return _fail(f"stopped at {ticket_id}: {exc}")
+        if status == "done":
+            print(f"ship: {ticket_id} is already done; skipping")
+            continue
+        print(f"\nship: {ticket_id} ({n} of {len(entries)})")
+        if _ship_one(ticket_id, in_list=True) != 0:
+            return _fail(f"stopped at {ticket_id}; the rest of the list was not shipped")
+        shipped += 1
+    print(f"ship: the list is done ({shipped} shipped)")
+    return 0
+
+
+def main(argv=None) -> int:
+    p = _Parser(prog="ship")
+    p.add_argument("id", nargs="?", help="ticket id, like BD-17")
+    p.add_argument("--list", action="store_true", help="ship every ticket on the ship list, in order")
+    args = p.parse_args(argv)
+    if args.list == bool(args.id):
+        p.error("give a ticket id, or --list, not both and not neither")
+    who = tk.current_creator()
+    if who != "human":
+        return _fail(f"refusing to run inside an agent (running as {who}); only a human ships")
+    return _ship_list() if args.list else _ship_one(args.id)

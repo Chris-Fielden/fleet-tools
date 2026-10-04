@@ -32,23 +32,24 @@ TITLE_MAX = 60
 # blocked agent now brings in an on-call agent instead); the names stay valid
 # so an older "priorities" setting in notify.json keeps loading.
 EVENTS = ("ready", "urgent", "failed", "proposed", "investigated", "ship", "blocked",
-          "review_failed", "review_unrecorded", "stalled", "oncall", "needs_human")
+          "review_failed", "review_unrecorded", "stalled", "oncall", "needs_human", "ship_list")
 _HEADLINE = {"ready": "Review ready", "urgent": "Urgent ticket", "failed": "Ticket failed",
              "proposed": "Follow-up proposed", "investigated": "Investigation done",
              "ship": "Ready to ship", "blocked": "Agent blocked", "review_failed": "Review FAILED",
              "review_unrecorded": "Review not recorded", "stalled": "Ticket stalled",
-             "oncall": "On-call launched", "needs_human": "Needs a human"}
+             "oncall": "On-call launched", "needs_human": "Needs a human",
+             "ship_list": "Ship list ready"}
 # ntfy's own names for its five priorities.
 PRIORITY_NUMBERS = {"min": 1, "low": 2, "default": 3, "high": 4, "max": 5}
 # Per event; override any of them under "priorities" in notify.json.
 PRIORITIES = {"ready": "default", "urgent": "high", "failed": "high", "proposed": "low",
               "investigated": "low", "ship": "default", "blocked": "high",
               "review_failed": "high", "review_unrecorded": "high", "stalled": "default",
-              "oncall": "low", "needs_human": "low"}
+              "oncall": "low", "needs_human": "low", "ship_list": "default"}
 _TAGS = {"ready": ["mag"], "urgent": ["rotating_light"], "failed": ["x"], "proposed": ["bulb"],
          "investigated": ["mag_right"], "ship": ["white_check_mark"], "blocked": ["hand"],
          "review_failed": ["x"], "review_unrecorded": ["warning"], "stalled": ["hourglass"],
-         "oncall": ["pager"], "needs_human": ["sos"]}
+         "oncall": ["pager"], "needs_human": ["sos"], "ship_list": ["package"]}
 
 
 class NotifyError(Exception):
@@ -135,6 +136,10 @@ def _message(ticket: dict, event: str, cfg: dict, detail: str | None = None) -> 
     elif event == "oncall":   # `detail` is the on-call ticket's id
         title = f"{ticket['id']} failed, on-call {_short(detail or '?')} is on it"
         text = f"{ticket['type']} · {ticket['status']} · {_short(ticket['title'])}"
+        detail = None
+    elif event == "ship_list":   # `detail` is the whole message, e.g. "3 ready to ship, list ready"
+        title = _short(detail or "ship list ready")
+        text = "run `ship --list`"
         detail = None
     elif event == "needs_human":
         title = f"{ticket['id']} needs a human, see notes"

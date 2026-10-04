@@ -217,6 +217,7 @@ class Decision:
     research: bool = False  # an investigate ticket: no task folder, no branch
     oncall: bool = False    # an on-call fix ticket: own slot, branches from the failed tip
     base: str | None = None  # oncall: the failed branch tip the new branch starts from
+    prompt: str | None = None  # a prep or reconcile agent: its whole starting prompt
 
     @property
     def eligible(self) -> bool:
@@ -246,9 +247,10 @@ def branch_holders(tickets: list[dict]) -> list[dict]:
 
 
 def capacity_holders(tickets: list[dict]) -> list[dict]:
-    """Tickets that fill the normal `max_running` capacity: the branch holders except
-    on-call ones, which have their own slot."""
-    return [t for t in branch_holders(tickets) if not t.get("oncall")]
+    """Tickets that fill the normal `max_running` capacity: the claimed ones. A ticket
+    in review is waiting for the human, not for an agent, so it keeps its branch but
+    not its place; on-call ones have their own slot."""
+    return [t for t in branch_holders(tickets) if not t.get("oncall") and t["status"] == "claimed"]
 
 
 def oncall_slot_busy(tickets: list[dict], running: frozenset | set | None) -> str | None:
@@ -324,7 +326,7 @@ def decide(tickets: list[dict], settings: dict) -> list[Decision]:
     by_id = {t["id"]: t for t in tickets}
     # Investigations are read-only: they neither fill the capacity nor hold a
     # branch. They have their own rules (decide_investigations).
-    # A ticket in review still holds its branch and its place in the capacity.
+    # A ticket in review still holds its branch, but no longer a place in the capacity.
     # On-call fix tickets have their own slot (decide_oncall): they neither fill
     # the normal capacity nor wait in the normal queue, but they still hold their branch.
     holders, claimed = branch_holders(tickets), capacity_holders(tickets)
