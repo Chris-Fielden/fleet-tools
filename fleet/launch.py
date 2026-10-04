@@ -373,7 +373,8 @@ def start_agent(d: dp.Decision, folder: Path, workspace: str, warn, projects_dir
             args += ["--", "--model", d.model]
         herdr(*args)
         template = RESEARCH_PROMPT if d.research else ONCALL_PROMPT if d.oncall else PROMPT
-        prompt = template.format(id=ticket_id, projects_dir=projects_dir, parent=d.ticket.get("parent"))
+        prompt = d.prompt or template.format(id=ticket_id, projects_dir=projects_dir,
+                                             parent=d.ticket.get("parent"))
         herdr("agent", "prompt", name, prompt)
         wait_until_working(name)
     except LaunchError:

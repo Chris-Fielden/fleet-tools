@@ -13,11 +13,12 @@ with a plain message.
 |---|---|---|
 | `builder` | `claude` | agent that builds new work (`claude` or `codex`) |
 | `models` | `{"claude": "sonnet", "codex": null}` | model per agent; null = tool default |
-| `max_running` | `1` | tickets claimed or in review at once |
+| `max_running` | `1` | tickets claimed at once (a ticket in review does not count) |
 | `auto_investigate` | `true` | start proposed investigations without approval |
 | `max_investigations_per_day` | `3` | |
 | `watch_interval_seconds` | `120` | at least 30 |
 | `max_launches_per_day` | `10` | |
+| `prep_time` | `06:00` | HH:MM, America/Los_Angeles: the prep pass over tickets in review runs by then (or earlier, when nothing is left to build) |
 | `projects_dir` | `~/projects` | a ticket's repo is `<projects_dir>/<repo>` |
 | `research_dir` | `~/fleet-research` | folder for read-only research agents |
 | `herdr_workspace` | `fleet` | herdr workspace agents are launched in |

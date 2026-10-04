@@ -12,6 +12,7 @@ from . import dispatch as dp
 from . import kaneo
 from . import launch as lc
 from . import notify
+from . import prep
 from . import review_watch
 from . import ticket as tk
 
@@ -91,15 +92,24 @@ def running_agents(tickets: list[dict], warn) -> frozenset | None:
         return None
 
 
-def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None, checks=None) -> int:
+def _prep_quietly(step, warn) -> None:
+    """One step of the prep pass; a problem with it must not stop the cycle's launches."""
+    try:
+        step()
+    except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired, lc.LaunchError) as exc:
+        warn(f"prep pass: {exc}")
+
+
+def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None, checks=None, clock=None) -> int:
     """The steps of one --once run; returns the exit code. `reserve()` is called
     before each launch and says whether it may go ahead (False: the daily limit
     is reached; it may raise OSError, which refuses the launch). `offer(ticket)`
     says whether to relaunch a claimed ticket whose agent is gone. `retry_tabs`
     (--watch; a launch.KeptTabs) retries closing the tabs of tickets done on an
     earlier cycle. `checks(emit, warn)` (--watch) moves finished tickets to review and sends
-    the alert pings."""
+    the alert pings. `clock` is the time source for the prep pass (default: real time)."""
     code = 0
+    clock = clock or dp.Clock()
     _reconcile(settings, emit, warn)
     if retry_tabs is not None:
         done = {t["id"] for t in tk.list_tickets() if t["status"] == "done"}
@@ -118,8 +128,12 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
             relaunch_code, message = lc.relaunch(t, settings, warn)
             code = code or relaunch_code
             emit(message)
+    # Overnight queue: finish prep agents that stopped before the review pass looks at their
+    # tickets, and start the next prep pass after it has moved new tickets into review.
+    _prep_quietly(lambda: prep.finish(settings, clock.now(), emit, warn), warn)
     if checks is not None:
         checks(emit, warn)
+    _prep_quietly(lambda: prep.maybe_start(settings, clock.now(), emit, warn, reserve), warn)
     tickets = tk.list_tickets()
     # The on-call agent has its own slot: it starts at once, whatever the normal
     # queue is doing, and never counts against the daily launch limit.
@@ -215,7 +229,7 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None) -> int:
                 def checks(emit, warn):
                     review_watch.check(settings, clock.now(), emit, warn)
                 _cycle(settings, lines.append, lambda m: lines.append(f"warning: {m}"), reserve=reserve,
-                       retry_tabs=kept_tabs, checks=checks)
+                       retry_tabs=kept_tabs, checks=checks, clock=clock)
             except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
                 lines.append(f"error: {exc}")
             for line in lines:

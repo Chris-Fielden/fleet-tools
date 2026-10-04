@@ -1,0 +1,244 @@
+"""EM-9 review fixes: branch ownership, tips recorded early, keeper validated first, odd reports."""
+
+import json
+import subprocess
+from datetime import datetime, timezone
+
+import pytest
+
+from fleet import dispatch as dp
+from fleet import launch as lc
+from fleet import prep
+from fleet import ticket as tk
+from fleet.ship_cli import main as ship_main
+from test_dispatch import calls, git, herdr_log, projects, mk, claim  # noqa: F401
+from test_prep import (agent_names, commit, conflicting, finish_prep, in_review, log_lines, merge, q,  # noqa: F401
+                       report, set_agent_status, start_prep)
+
+
+def test_ship_never_aborts_a_merge_the_human_started(q, herdr_log, env, capsys):
+    a, a_wt, b, b_wt = conflicting(q)
+    assert ship_main([a["id"]]) == 0
+    assert merge(q, "task/beta").returncode != 0               # the human's own half-done merge
+    assert ship_main([b["id"]]) == 1
+    assert "merge is already in progress" in capsys.readouterr().err
+    assert git(q, "rev-parse", "-q", "--verify", "MERGE_HEAD").strip()   # untouched
+    assert agent_names(herdr_log) == [] and log_lines(env, "finish") == ["alpha"]
+
+
+def test_the_prep_agent_leaves_out_tickets_a_reconcile_agent_holds(q, herdr_log, env):
+    a, a_wt, b, b_wt = conflicting(q)
+    assert ship_main([a["id"]]) == 0
+    assert ship_main([b["id"]]) == 1                           # a reconcile agent holds beta
+    c, _ = in_review(q, "task/gamma", {"g.txt": "g"})
+    settings, _, _ = start_prep()
+    assert prep.locked_ids() == {b["id"], c["id"]}
+    manifest = json.loads((lc.research_folder(prep.FOLDER_ID, settings) / "manifest-prep.json").read_text())
+    assert [t["id"] for t in manifest["tickets"]] == [c["id"]]
+
+
+def test_a_reconcile_agent_needs_the_same_builder_as_the_prep_agent(q, herdr_log, env, capsys):
+    a, a_wt, b, b_wt = conflicting(q)
+    assert ship_main([a["id"]]) == 0
+    (env / "fleet" / "settings.json").write_text(json.dumps({"builder": "codex"}))
+    assert ship_main([b["id"]]) == 1
+    assert "no reconcile agent could be started" in capsys.readouterr().err and agent_names(herdr_log) == []
+    assert prep.locked_ids() == set()
+
+
+def test_a_long_running_agent_keeps_its_locks(q, herdr_log, env):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    settings, _, _ = start_prep()
+    with prep._state() as st:
+        st["jobs"][0]["started"] = "2026-10-03T10:00:00Z"
+    _, warns = finish_prep(settings, now=datetime(2026, 10, 3, 18, 0, tzinfo=timezone.utc))   # 8 hours later
+    assert prep.locked_ids() == {a["id"]} and any("stay locked" in w for w in warns)
+    assert not (env / "fleet" / "ship-list.txt").exists()
+
+
+def test_the_starting_tips_are_recorded_before_the_agent_exists(q, herdr_log, env, monkeypatch):
+    a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
+    tip = prep.tip_of(q, "task/one")
+    seen = {}
+    real = lc.start_agent
+
+    def spy(*args, **kw):
+        seen["job"] = prep._load()["jobs"][0]               # saved already, not ready yet
+        commit(a_wt, {"fast.txt": "an agent this fast"})    # the agent writes the moment it starts
+        return real(*args, **kw)
+    monkeypatch.setattr(lc, "start_agent", spy)
+    settings, _, _ = start_prep()
+    assert seen["job"]["tips"] == {a["id"]: tip} and seen["job"]["ready"] is False
+    report(settings, order=[a["id"]])
+    set_agent_status(env, "prep", "idle")
+    finish_prep(settings)
+    assert log_lines(env, "check") == [str(a_wt)]            # the moved tip was re-checked
+
+
+def test_a_keeper_that_fails_its_recheck_does_not_cancel_the_duplicate(q, herdr_log, env, monkeypatch):
+    full, full_wt = in_review(q, "task/full", {"f.txt": "1"}, body="the full spec " * 20)
+    thin, _ = in_review(q, "task/thin", {"f.txt": "1"}, body="short")
+    settings, _, _ = start_prep()
+    commit(full_wt, {"extra.txt": "folded"})
+    monkeypatch.setenv("FAKE_REVIEW_FAIL", "task/full")
+    report(settings, order=[full["id"], thin["id"]], duplicates=[{"keep": full["id"], "cancel": [thin["id"]]}])
+    set_agent_status(env, "prep", "idle")
+    finish_prep(settings)
+    assert tk.load_ticket(full["id"])["status"] == "claimed"
+    assert tk.load_ticket(thin["id"])["status"] == "review"      # still active
+    assert [i for i, _ in prep.read_list()] == [thin["id"]]
+
+
+@pytest.mark.parametrize("bad", [[], {}, 5, None, [["x"]]])
+def test_odd_report_fields_are_ignored_not_fatal(q, herdr_log, env, bad):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    settings, _, _ = start_prep()
+    report(settings, order=bad, tickets=bad, duplicates=[{"keep": bad, "cancel": bad}, bad])
+    set_agent_status(env, "prep", "idle")
+    _, warns = finish_prep(settings)
+    assert not warns and [i for i, _ in prep.read_list()] == [a["id"]]
+
+
+def test_a_half_launched_job_with_a_busy_agent_keeps_its_tickets(q, herdr_log, env):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    settings, _, _ = start_prep()
+    with prep._state() as st:
+        st["jobs"][0].update(ready=False, started="2026-10-03T10:00:00Z")
+    finish_prep(settings, now=datetime(2026, 10, 3, 18, 0, tzinfo=timezone.utc))
+    assert prep.locked_ids() == {a["id"]}              # herdr lists it as working: still locked
+    set_agent_status(env, "prep", "idle")
+    finish_prep(settings, now=datetime(2026, 10, 3, 18, 0, tzinfo=timezone.utc))
+    assert prep.locked_ids() == set()
+
+
+def test_a_reconciled_ticket_shipped_alone_before_gets_a_list_line(q, herdr_log, env):
+    a, a_wt, b, b_wt = conflicting(q)
+    assert ship_main([a["id"]]) == 0 and ship_main([b["id"]]) == 1
+    assert merge(b_wt, "main").returncode != 0
+    (b_wt / "code.py").write_text("def shared():\n    return 0\n\ndef alpha():\n    return 'a'\n\ndef beta():\n    return 'b'\n")
+    git(b_wt, "add", "-A")
+    git(b_wt, "commit", "-q", "-m", "merge main")
+    set_agent_status(env, f"prep-{b['id'].lower()}", "idle")
+    finish_prep(dp.load_settings())
+    assert [i for i, _ in prep.read_list()] == [b["id"]]
+
+
+def test_uncommitted_edits_left_by_the_agent_keep_a_ticket_off_the_list(q, herdr_log, env):
+    a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
+    settings, _, _ = start_prep()
+    (a_wt / "one.txt").write_text("edited but not committed")
+    set_agent_status(env, "prep", "idle")
+    finish_prep(settings)
+    assert tk.load_ticket(a["id"])["status"] == "claimed" and prep.read_list() == []
+
+
+def test_a_ticket_being_shipped_is_left_out_of_the_prep_agent(q, herdr_log, env, monkeypatch):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    b, _ = in_review(q, "task/two", {"two.txt": "2"})
+    assert prep.reserve_shipping(a["id"]) is None
+    assert prep.locked_ids() == {a["id"]}
+    settings, _, _ = start_prep()
+    manifest = json.loads((lc.research_folder(prep.FOLDER_ID, settings) / "manifest-prep.json").read_text())
+    assert [t["id"] for t in manifest["tickets"]] == [b["id"]]
+
+
+def test_ship_reserves_its_ticket_while_it_runs_and_releases_it_after(q, herdr_log, env, monkeypatch):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    seen = []
+    real = subprocess.run
+
+    def spy(cmd, *args, **kw):
+        if any("finish-task" in str(c) for c in cmd):
+            seen.append(prep.locked_ids())
+        return real(cmd, *args, **kw)
+
+    monkeypatch.setattr("fleet.ship_cli.subprocess.run", spy)
+    assert ship_main([a["id"]]) == 0
+    assert seen == [{a["id"]}] and prep.locked_ids() == set()
+
+
+def test_ship_refuses_a_ticket_another_ship_holds_and_ignores_a_dead_one(q, env, capsys):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    with prep._state() as st:
+        st["shipping"].append({"id": a["id"], "pid": 1})     # init: alive, not us
+    assert ship_main([a["id"]]) == 1 and "already being shipped" in capsys.readouterr().err
+    with prep._state() as st:
+        st["shipping"] = [{"id": a["id"], "pid": 2 ** 22 + 12345}]   # no such process
+    assert prep.locked_ids() == set()
+    assert ship_main([a["id"]]) == 0
+
+
+def test_an_unreadable_prep_state_fails_closed(q, env, capsys):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    (env / "fleet" / "prep.json").write_text("{not json")
+    with pytest.raises(OSError):
+        prep.locked_ids()
+    assert ship_main([a["id"]]) == 1
+    assert "cannot tell whether an agent is working" in capsys.readouterr().err
+    assert tk.load_ticket(a["id"])["status"] == "review"
+
+
+def test_a_half_launched_job_that_stopped_is_still_validated(q, herdr_log, env):
+    a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
+    settings, _, _ = start_prep()
+    with prep._state() as st:
+        st["jobs"][0].update(ready=False, started="2026-10-03T10:00:00Z")
+    (a_wt / "stray.txt").write_text("left behind by the agent")   # uncommitted work
+    set_agent_status(env, "prep", "idle")
+    _, warns = finish_prep(settings, now=datetime(2026, 10, 3, 18, 0, tzinfo=timezone.utc))
+    assert tk.load_ticket(a["id"])["status"] == "claimed" and prep.locked_ids() == set()
+    assert not [i for i, _ in prep.read_list()]
+
+
+def test_an_unchanged_branch_whose_task_folder_is_gone_is_left_off_the_list(q, herdr_log, env):
+    a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
+    b, _ = in_review(q, "task/two", {"two.txt": "2"})
+    settings, _, _ = start_prep()
+    git(q, "worktree", "remove", "--force", str(a_wt))
+    set_agent_status(env, "prep", "idle")
+    finish_prep(settings)
+    assert tk.load_ticket(a["id"])["status"] == "claimed"
+    assert [i for i, _ in prep.read_list()] == [b["id"]]
+
+
+def test_two_ships_into_one_repo_never_run_together(q, herdr_log, env, capsys):
+    from fleet import ship_cli
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    with ship_cli._repo_lock(a["repo"]) as busy:
+        assert busy is False
+        assert ship_main([a["id"]]) == 1                  # another ship holds the repo
+        assert "already merging into" in capsys.readouterr().err
+        assert log_lines(env, "finish") == []             # the merge script never ran
+    assert prep.locked_ids() == set()                     # the refused run released its reservation
+    assert ship_main([a["id"]]) == 0
+
+
+def test_giving_up_on_a_job_is_a_loud_warning(q, herdr_log, env, monkeypatch):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    settings, _, _ = start_prep()
+    set_agent_status(env, "prep", "idle")
+    monkeypatch.setattr(prep, "_finish_prep", lambda *x: (_ for _ in ()).throw(OSError("disk full")))
+    warns = []
+    for _ in range(prep.MAX_TRIES):
+        warns += finish_prep(settings)[1]
+    assert prep.locked_ids() == set()
+    assert any("given up" in w and a["id"] in w for w in warns)
+
+
+def test_the_recheck_runs_the_branch_scripts_with_an_agent_identity(q, herdr_log, env, monkeypatch):
+    a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
+    settings, _, _ = start_prep()
+    commit(a_wt, {"more.txt": "changed by the prep agent"})
+    seen = []
+    real = prep._run
+
+    def spy(cmd, cwd, timeout, env=None):
+        seen.append(dict(env or {}))
+        return real(cmd, cwd, timeout, env)
+
+    monkeypatch.setattr(prep, "_run", spy)
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.setenv("CODEX_SANDBOX", "1")
+    set_agent_status(env, "prep", "idle")
+    finish_prep(settings)
+    assert len(seen) == 2 and all(e.get("CLAUDECODE") == "1" and "CODEX_SANDBOX" not in e for e in seen)
