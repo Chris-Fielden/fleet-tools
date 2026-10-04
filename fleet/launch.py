@@ -133,6 +133,23 @@ def herdr(*args: str, timeout: float = 120) -> dict:
     return data
 
 
+def herdr_run(*args: str, timeout: float = 120) -> None:
+    """Run one herdr command that only has to succeed (`pane run`: herdr 0.9.3
+    prints no JSON for it). Judged by the exit status, never by the output."""
+    try:
+        cmd = shlex.split(os.environ.get("FLEET_HERDR", "herdr")) + list(args)
+    except ValueError:
+        raise LaunchError("FLEET_HERDR is not a valid command line") from None
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=max(timeout, 0.001))
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LaunchError(f"herdr {args[0]} {args[1]} failed: {exc}") from None
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        raise LaunchError(f"herdr {args[0]} {args[1]} exited {proc.returncode}"
+                          + (f": {detail[0][:200]}" if detail else ""))
+
+
 def _dicts(node):
     """Every dict inside a JSON value."""
     if isinstance(node, dict):

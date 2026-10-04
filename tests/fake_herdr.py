@@ -4,6 +4,7 @@
 FAKE_HERDR_LOG   file that gets one JSON line of arguments per call
 FAKE_HERDR_STATE status `agent list` reports for the agent (default: working)
 FAKE_HERDR_WORKSPACE label of the one workspace it knows (default: fleet)
+FAKE_HERDR_RUN_TEXT  what `pane run` prints instead of JSON; FAKE_HERDR_RUN_FAIL makes it exit 1
 FAKE_HERDR_WORLD  optional JSON file {"workspaces": [...], "tabs": [...], "agents": [...]}
                   that `workspace list/create`, `tab list/close` and `agent list` read
                   and change, in herdr's real reply shapes
@@ -65,6 +66,12 @@ elif cmd == "pane run":
         subprocess.Popen([sys.executable, os.environ["FAKE_HERDR_RUN_AS"], *shlex.split(args[3])],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
+    if os.environ.get("FAKE_HERDR_RUN_FAIL"):   # herdr itself fails
+        print("fake herdr: pane run failed", file=sys.stderr)
+        sys.exit(1)
+    if "FAKE_HERDR_RUN_TEXT" in os.environ:   # herdr 0.9.3 prints no JSON here
+        print(os.environ["FAKE_HERDR_RUN_TEXT"])
+        sys.exit(0)
     out = {"result": {}}
 elif cmd == "workspace create":
     out = {"result": {"workspace": {"workspace_id": "w9", "label": args[args.index("--label") + 1]}}}
