@@ -41,6 +41,7 @@ from . import dispatch as dp
 from . import risk as rk
 from . import settings as st
 from . import ticket as tk
+from . import webconf as wc
 
 TIMEOUT = 10  # seconds per request
 # Columns, left to right. Tickets use Kaneo's own To Do / In Progress / Done;
@@ -79,6 +80,21 @@ def config_path() -> Path:
 
 def map_path() -> Path:
     return tk.fleet_home() / "kaneo-map.json"
+
+
+def cards_path() -> Path:
+    return tk.fleet_home() / "kaneo-cards.json"
+
+
+def card_url(ticket_id: str) -> str | None:
+    """The browser address of a ticket's Kaneo card, as saved by the last sync
+    that touched it; None when there is no card yet. Holds no secret."""
+    try:
+        data = json.loads(cards_path().read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    url = data.get(ticket_id) if isinstance(data, dict) else None
+    return url if isinstance(url, str) and url.startswith(("http://", "https://")) else None
 
 
 def load_config() -> dict:
@@ -125,8 +141,16 @@ def load_config() -> dict:
         raise KaneoError(f"'url' in {path} is not a valid URL") from None
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise KaneoError(f"'url' in {path} must start with http:// or https://")
+    # Where a person opens cards in a browser; the API url unless told otherwise.
+    ui_url = data.get("ui_url") or data["url"]
+    try:
+        ui = urllib.parse.urlsplit(ui_url) if isinstance(ui_url, str) else None
+    except ValueError:
+        ui = None
+    if ui is None or ui.scheme not in ("http", "https") or not ui.netloc:
+        raise KaneoError(f"'ui_url' in {path} must start with http:// or https://")
     return {"url": data["url"].rstrip("/"), "workspace_id": data["workspace_id"],
-            "api_key": data["api_key"]}
+            "api_key": data["api_key"], "ui_url": ui_url.rstrip("/")}
 
 
 # --- HTTP --------------------------------------------------------------------
@@ -145,6 +169,7 @@ class Client:
         self.base_url = cfg["url"]
         self._key = cfg["api_key"]
         self.workspace_id = cfg["workspace_id"]
+        self.ui_url = cfg.get("ui_url", cfg["url"])
         self._opener = urllib.request.build_opener(_NoRedirect)
 
     def request(self, method: str, path: str, body=None, query=None):
@@ -240,6 +265,10 @@ def card_description(t: dict) -> str:
              ("type", "branch", "commit", "parent", "created_by", "assignee")]
     notes = t.get("notes", [])
     top = ""
+    action = {"proposed": ("approve", "Approve"), "review": ("ship", "Ship")}.get(t["status"])
+    link = wc.action_url(action[0], t["id"]) if action else None
+    if link:   # opens a confirmation page on the tailnet; the link alone changes nothing
+        top += f"**[{action[1]}]({link})**\n\n"
     if t["verdict"] is not None:
         top += f"**Review verdict:** {tk.verdict_line(t['verdict'])}\n\n"
     if notes:
@@ -268,6 +297,12 @@ class _Board:
             self.icon = st.DEFAULTS["kaneo"]["project_icon"]
         self._projects: dict[str, str | None] = {}
         self._columns: dict[str, dict[str, dict]] = {}
+        self.card_urls: dict[str, str] = {}   # ticket id -> card address seen this run
+
+    def note_card(self, ticket_id: str, project_id: str, task_id: str) -> None:
+        # The path Kaneo's web app opens a card at.
+        self.card_urls[ticket_id] = (f"{self.c.ui_url}/dashboard/workspace/{self.c.workspace_id}"
+                                     f"/project/{project_id}/task/{task_id}")
 
     def project_id(self, repo: str):
         if repo in self._projects:
@@ -384,8 +419,10 @@ def _mirror_card(t: dict, board: _Board, tasks: dict, dry_run: bool) -> str:
         made = c.request("POST", f"/task/{pid}", body={
             "title": title, "description": desc, "priority": card_priority(t), "status": slug})
         tasks[t["id"]] = made["id"]
+        board.note_card(t["id"], pid, made["id"])
         return "created"
 
+    board.note_card(t["id"], pid, tasks[t["id"]])
     if (slug is not None and existing.get("projectId") == pid
             and existing.get("title") == title
             and existing.get("description") == desc and existing.get("status") == slug
@@ -485,6 +522,23 @@ def _mirror(t: dict, board: _Board, tasks: dict, dry_run: bool) -> str:
     return outcome
 
 
+def _save_card_urls(found: dict) -> None:
+    """Remember where each card lives, for the phone notifications. Best effort:
+    a failure here never fails a sync. Called with the sync lock held."""
+    try:
+        try:
+            have = json.loads(cards_path().read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            have = {}
+        if not isinstance(have, dict):
+            have = {}
+        merged = {**have, **found}
+        if merged != have:
+            tk._write_atomic(cards_path(), merged)
+    except OSError:
+        pass
+
+
 def sync(tickets: list[dict], dry_run: bool = False):
     """Mirror tickets. Yields (ticket_id, outcome) where outcome is one of
     created/updated/unchanged (or 'would ...' on a dry run) or 'error: ...'.
@@ -514,6 +568,8 @@ def sync(tickets: list[dict], dry_run: bool = False):
                 outcome = "error: Kaneo sent a reply in an unexpected shape"
             yield t["id"], outcome
         board.prune()
+        if not dry_run:
+            _save_card_urls(board.card_urls)
 
 
 def mirror_quietly(ticket: dict, warn) -> None:

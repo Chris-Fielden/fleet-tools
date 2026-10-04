@@ -29,6 +29,29 @@ sent once (per commit, or once per failed ticket); what was sent is kept in
 `$FLEET_HOME/review-watch.json`, so a restart does not repeat it, and a send that
 failed is tried again on the next cycle.
 
+### Click URL and buttons
+
+Every ping for a ticket with a synced Kaneo card sets its **Click** URL to that
+card and adds an **Open card** action button (`docs/web-spec.md` says where the
+address comes from). A `ship` ping adds a **Ship** button and a `proposed` ping an
+**Approve** button when `web.json` exists. They are plain `view` actions that open a
+confirmation page, which is checked server-side; they never POST by themselves.
+
+### Failure pings explain themselves
+
+`failed`, `oncall` and `needs_human` pings put, in the message body, the **Reason**
+(the ticket's close note), the **Reviewer** that failed it, the **FAIL rounds** count
+and the first **MUST FIX** line of the saved review of the failed commit. All of it
+comes from the stored ticket and the review file. The text is scanned with gitleaks; if
+that finds anything (or cannot run), only the one-line summary is sent.
+
+### Results of a web ship
+
+| Event | When |
+|---|---|
+| `shipped` | A web ship merged the ticket. Default priority. |
+| `ship_failed` | A web ship was refused or failed, with the reason. High. |
+
 ### Priorities
 
 Each message carries its ntfy priority in the JSON body and in a `Priority`
