@@ -228,6 +228,13 @@ def test_page_is_stale_when_the_branch_moves(endpoint, rig):
     assert not rig.log.exists()
 
 
+def test_pages_cannot_be_framed(endpoint, rig):
+    reviewed(rig.wt, rig.repo)
+    with urllib.request.urlopen(f"{endpoint}/ship/{rig.t['id']}") as r:
+        assert "frame-ancestors 'none'" in r.headers["Content-Security-Policy"]
+        assert r.headers["X-Frame-Options"] == "DENY"
+
+
 def test_forged_token_is_refused(endpoint, rig):
     full = reviewed(rig.wt, rig.repo)
     assert call(endpoint, f"/ship/{rig.t['id']}", {"token": "0" * 64, "commit": full})[0] == 409

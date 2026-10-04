@@ -245,7 +245,10 @@ def make_handler(endpoint: Endpoint, log=lambda m: None):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+            # No other site may frame a page (it would hide the Confirm button under its own).
+            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; "
+                             "form-action 'self'; frame-ancestors 'none'")
+            self.send_header("X-Frame-Options", "DENY")
             self.end_headers()
             self.wfile.write(body)
 
@@ -333,6 +336,7 @@ def make_handler(endpoint: Endpoint, log=lambda m: None):
                                           "You can close this page: a phone ping reports the result.</p>"
                                           f"<p>Log: {html.escape(path.name)}</p>"))
             except (Refused, tk.TicketError, tk.TicketInvalid) as exc:
+                self._notify_refusal(t, str(exc), action)
                 self._send(409, _page("Refused", f"<p class=bad>{html.escape(str(exc))}</p>"))
 
         def _notify_refusal(self, t: dict, reason: str, action: str) -> None:
