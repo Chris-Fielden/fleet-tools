@@ -1,5 +1,7 @@
 """dispatch --watch, tab cleanup after reconcile, lost agents (fake herdr, fake clock)."""
 import json
+import sys
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -260,7 +262,7 @@ def test_reconcile_closes_the_finished_tab(projects, herdr_log, env, monkeypatch
 
 @pytest.mark.parametrize("status, focused, reason", [
     ("working", False, "working"), ("blocked", False, "blocked"), ("unknown", False, "unknown"),
-    ("idle", True, "focused"), ("working", True, "focused")])
+    ("idle", True, "focused"), ("working", True, "working")])
 def test_reconcile_keeps_a_busy_or_focused_tab(projects, herdr_log, env, monkeypatch, status, focused, reason):
     t = merged_claimed(projects)
     world(env, monkeypatch, t["id"], status=status, tab_focused=focused)
@@ -269,6 +271,49 @@ def test_reconcile_keeps_a_busy_or_focused_tab(projects, herdr_log, env, monkeyp
     assert not any(x[:2] == ["tab", "close"] for x in calls(herdr_log))
     log = dp.log_path().read_text()
     assert "TAB_KEPT" in log and reason in log and "TAB_CLOSED" not in log
+
+
+def add_tab(path, label="dispatch", focused=False):
+    data = json.loads(path.read_text())
+    data["tabs"].append({"tab_id": "w3:t9", "label": label, "workspace_id": "w3",
+                         "focused": focused, "agent_status": "idle"})
+    path.write_text(json.dumps(data))
+
+
+def test_reconcile_closes_a_focused_tab_after_moving_focus(projects, herdr_log, env, monkeypatch):
+    t = merged_claimed(projects)
+    w = world(env, monkeypatch, t["id"], tab_focused=True)
+    add_tab(w)
+    assert dispatch_main(["--reconcile"]) == 0
+    c = calls(herdr_log)
+    assert ["tab", "focus", "w3:t9"] in c and ["tab", "close", "w3:t4"] in c
+    assert c.index(["tab", "focus", "w3:t9"]) < c.index(["tab", "close", "w3:t4"])
+    data = json.loads(w.read_text())
+    assert [x["tab_id"] for x in data["tabs"]] == ["w3:t9"] and data["tabs"][0]["focused"]
+    assert "TAB_CLOSED" in dp.log_path().read_text()
+
+
+def test_reconcile_never_moves_focus_or_closes_a_working_focused_tab(projects, herdr_log, env, monkeypatch):
+    t = merged_claimed(projects)
+    w = world(env, monkeypatch, t["id"], status="working", tab_focused=True)
+    add_tab(w)
+    assert dispatch_main(["--reconcile"]) == 0
+    assert not any(x[:2] in (["tab", "close"], ["tab", "focus"]) for x in calls(herdr_log))
+    assert "TAB_KEPT" in dp.log_path().read_text()
+
+
+def test_reconcile_keeps_a_focused_tab_when_focus_cannot_move(projects, herdr_log, env, monkeypatch):
+    t = merged_claimed(projects)
+    w = world(env, monkeypatch, t["id"], tab_focused=True)
+    add_tab(w)
+    wrapper = env / "no-focus-herdr"
+    wrapper.write_text(f"#!/bin/sh\n[ \"$1 $2\" = \"tab focus\" ] && exit 1\n"
+                       f"exec {sys.executable} {Path(__file__).parent / 'fake_herdr.py'} \"$@\"\n")
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("FLEET_HERDR", str(wrapper))
+    assert dispatch_main(["--reconcile"]) == 0
+    assert not any(x[:2] == ["tab", "close"] for x in calls(herdr_log))
+    assert "focus could not move" in dp.log_path().read_text()
 
 
 def test_reconcile_with_no_tab_logs_tab_kept(projects, herdr_log, env, monkeypatch):
