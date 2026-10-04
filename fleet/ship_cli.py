@@ -165,6 +165,11 @@ def _ship_one(ticket_id: str, in_list: bool = False) -> int:
     if problem:
         return _fail(problem)
 
+    # A merge already under way is the human's: never touch it. Any MERGE_HEAD seen after the
+    # merge script fails is then this run's own conflict.
+    if dp._git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
+        return _fail(f"a merge is already in progress in {repo}; finish or abort it first")
+
     # Same terminal, same prompts: nothing is answered or skipped on the
     # human's behalf. FLEET_HOME and the rest of the environment carry over.
     try:

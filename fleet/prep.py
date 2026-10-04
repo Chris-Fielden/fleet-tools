@@ -245,21 +245,47 @@ def due(tickets: list[dict], settings: dict, now: datetime) -> str | None:
 
 
 def _start_job(kind: str, tickets: list[dict], settings: dict, warn) -> dict:
-    """Write the manifest, open the tab and start the agent. Returns the job record.
-    Raises LaunchError or OSError; the tab is closed again if the start fails."""
-    name = "prep" if kind == "prep" else f"prep-{tickets[0]['id'].lower()}"
-    label = name.upper()
-    folder = lc.research_folder(FOLDER_ID, settings)
-    manifest, report = folder / f"manifest-{name}.json", folder / f"report-{name}.json"
-    report.unlink(missing_ok=True)   # nothing left over from an earlier run
-    manifest.write_text(json.dumps(_manifest(tickets, settings), indent=2) + "\n", encoding="utf-8")
-    prompt = (PREP_PROMPT if kind == "prep" else RECONCILE_PROMPT).format(manifest=manifest, report=report)
-    agent = settings["builder"]
-    d = dp.Decision(ticket={"id": label}, agent=agent, model=settings["models"].get(agent), prompt=prompt)
-    tab = lc.start_agent(d, folder, lc.ensure_workspace(settings["herdr_workspace"]), warn)
-    tips = {t["id"]: tip_of(_repo(t, settings), t["branch"]) for t in tickets}
-    return {"name": name, "label": label, "kind": kind, "ids": [t["id"] for t in tickets], "tips": tips,
-            "started": _stamp(datetime.now(timezone.utc)), "tab": tab, "tries": 0}
+    """Reserve the tickets (and their tips) for a job, then write the manifest, open the tab and
+    start the agent. The reservation is saved before the agent exists, so it can neither find an
+    unlocked ticket nor change a branch before its starting tips are on record. Tickets another
+    agent already works on are left out. Raises LaunchError or OSError; a failed start releases
+    the reservation (and start_agent closes the tab)."""
+    if kind not in ("prep", "reconcile"):
+        raise ValueError(kind)
+    problem = dp.research_problem(settings)   # the same rule for both kinds of agent
+    if problem:
+        raise lc.LaunchError(problem)
+    with _state() as st:
+        locked = {i for j in st["jobs"] for i in j["ids"]}
+        if kind == "prep" and any(j["kind"] == "prep" for j in st["jobs"]):
+            raise lc.LaunchError("a prep agent is already running")
+        tickets = [t for t in tickets if t["id"] not in locked]
+        if not tickets:
+            raise lc.LaunchError("every ticket is already being worked on by an agent")
+        name = "prep" if kind == "prep" else f"prep-{tickets[0]['id'].lower()}"
+        job = {"name": name, "label": name.upper(), "kind": kind, "ids": [t["id"] for t in tickets],
+               "tips": {t["id"]: tip_of(_repo(t, settings), t["branch"]) for t in tickets},
+               "started": _stamp(datetime.now(timezone.utc)), "tab": None, "tries": 0, "ready": False}
+        st["jobs"].append(job)
+    try:
+        folder = lc.research_folder(FOLDER_ID, settings)
+        manifest, report = folder / f"manifest-{name}.json", folder / f"report-{name}.json"
+        report.unlink(missing_ok=True)   # nothing left over from an earlier run
+        manifest.write_text(json.dumps(_manifest(tickets, settings), indent=2) + "\n", encoding="utf-8")
+        prompt = (PREP_PROMPT if kind == "prep" else RECONCILE_PROMPT).format(manifest=manifest, report=report)
+        agent = settings["builder"]
+        d = dp.Decision(ticket={"id": job["label"]}, agent=agent, model=settings["models"].get(agent), prompt=prompt)
+        job["tab"] = lc.start_agent(d, folder, lc.ensure_workspace(settings["herdr_workspace"]), warn)
+    except BaseException as exc:
+        if not isinstance(exc, lc.AgentMayBeRunning):   # an agent that may be running keeps its locks
+            with _state() as st:
+                st["jobs"] = [j for j in st["jobs"] if j["name"] != name]
+        raise
+    with _state() as st:
+        for j in st["jobs"]:
+            if j["name"] == name:
+                j.update(tab=job["tab"], ready=True)
+    return job
 
 
 def maybe_start(settings: dict, now: datetime, emit, warn, reserve=None) -> None:
@@ -294,21 +320,14 @@ def maybe_start(settings: dict, now: datetime, emit, warn, reserve=None) -> None
         dp.log("PREP_FAILED", f"launch failed: {exc}")
         emit(f"prep pass not started: {exc}")
         return
-    with _state() as st:
-        st["jobs"].append(job)
-    dp.log("PREP_STARTED", f"{len(review)} tickets in review ({why}): {', '.join(job['ids'])}")
-    emit(f"prep agent started over {len(review)} tickets in review ({why})")
+    dp.log("PREP_STARTED", f"{len(job['ids'])} tickets in review ({why}): {', '.join(job['ids'])}")
+    emit(f"prep agent started over {len(job['ids'])} tickets in review ({why})")
 
 
 def start_reconcile(t: dict, settings: dict, warn) -> str:
     """For `ship`: start a reconcile agent for one ticket in review whose merge conflicts.
     Returns a one-line message; raises LaunchError or OSError."""
-    with _state() as st:
-        if t["id"] in {i for j in st["jobs"] for i in j["ids"]}:
-            raise lc.LaunchError(f"an agent is already working on {t['id']}")
     job = _start_job("reconcile", [t], settings, warn)
-    with _state() as st:
-        st["jobs"].append(job)
     dp.log("PREP_STARTED", f"{t['id']} reconcile agent: the merge into main conflicts")
     return f"started a reconcile agent for {t['id']} (tab {job['tab']})"
 
@@ -397,7 +416,8 @@ def _apply_duplicates(report: dict, live: dict, settings: dict, emit, warn) -> d
     folded: dict[str, list[str]] = {}
     groups = report.get("duplicates")
     for group in groups if isinstance(groups, list) else []:
-        if not isinstance(group, dict) or group.get("keep") not in live or live[group["keep"]]["status"] != "review":
+        if (not isinstance(group, dict) or not isinstance(group.get("keep"), str)
+                or group["keep"] not in live or live[group["keep"]]["status"] != "review"):
             continue
         keep = group["keep"]
         note = _clip(group.get("note", ""), 200) if isinstance(group.get("note"), str) else ""
@@ -489,16 +509,33 @@ def _finish_prep(job: dict, settings: dict, now: datetime, emit, warn) -> None:
     tickets = {t["id"]: t for t in tk.list_tickets()}
     live = {i: tickets[i] for i in job["ids"] if i in tickets and tickets[i]["status"] == "review"}
     report = _read_report(job, settings, warn)
+
+    def recheck(t: dict) -> str | None:
+        tip = tip_of(_repo(t, settings), t["branch"])
+        return "its branch is gone" if tip is None else (
+            validate(t, settings) if tip != job["tips"].get(t["id"]) else None)   # only a moved tip needs it
+
+    # A keeper is re-checked BEFORE its duplicates are cancelled: if what was folded into it does
+    # not pass, the other tickets stay active.
+    results: dict[str, str | None] = {}
+    groups = report.get("duplicates")
+    for group in groups if isinstance(groups, list) else []:
+        keep = group.get("keep") if isinstance(group, dict) else None
+        if isinstance(keep, str) and keep in live and keep not in results:
+            results[keep] = recheck(live[keep])
+            if results[keep]:
+                _bounce(live[keep], results[keep], emit, warn)
+                live[keep] = dict(live[keep], status="claimed")
     folded = _apply_duplicates(report, live, settings, emit, warn)
     gone = {c for cs in folded.values() for c in cs}
     ok, failed = [], set()
     for i in job["ids"]:
         t = live.get(i)
-        if t is None or i in gone:
+        if t is None or i in gone or t["status"] != "review":
+            if t is not None and results.get(i):
+                failed.add(i)
             continue
-        tip = tip_of(_repo(t, settings), t["branch"])
-        problem = "its branch is gone" if tip is None else (
-            validate(t, settings) if tip != job["tips"].get(i) else None)   # only a moved tip needs the re-check
+        problem = results[i] if i in results else recheck(t)
         if problem:
             failed.add(i)
             _bounce(t, problem, emit, warn)
@@ -567,11 +604,17 @@ def finish(settings: dict, now: datetime, emit, warn) -> None:
     for job in jobs:
         agent = agents.get(job["name"])
         started = _parse(job.get("started"))
-        timed_out = started is not None and now - started > JOB_MAX
-        if agent is not None and agent.get("agent_status") not in ("idle", "done") and not timed_out:
+        if not job.get("ready", True):
+            if started is not None and now - started > timedelta(minutes=10):   # a launch that died half way
+                warn(f"the {job['name']} launch never completed; releasing its tickets")
+                with _state() as st:
+                    st["jobs"] = [j for j in st["jobs"] if j["name"] != job["name"]]
             continue
-        if timed_out and agent is not None and agent.get("agent_status") not in ("idle", "done"):
-            warn(f"the {job['name']} agent is still working after {JOB_MAX}; finishing without it (tab left open)")
+        if agent is not None and agent.get("agent_status") not in ("idle", "done"):
+            if started is not None and now - started > JOB_MAX:
+                warn(f"the {job['name']} agent has been working for over {JOB_MAX}; its tickets stay locked "
+                     "until it stops (close its tab by hand if it is stuck)")
+            continue
         try:
             (_finish_prep if job["kind"] == "prep" else _finish_reconcile)(job, settings, now, emit, warn)
         except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired, lc.LaunchError) as exc:
@@ -582,6 +625,6 @@ def finish(settings: dict, now: datetime, emit, warn) -> None:
                         j["tries"] = j.get("tries", 0) + 1
                 st["jobs"] = [j for j in st["jobs"] if j.get("tries", 0) < MAX_TRIES]
             continue
-        if agent is not None and not timed_out:
+        if agent is not None:
             closed, reason = lc.close_finished_tab(job["label"], settings)
             emit(f"{job['label']}  tab {'closed' if closed else 'kept'}: {reason}")
