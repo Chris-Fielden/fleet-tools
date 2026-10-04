@@ -22,6 +22,7 @@ from . import risk as rk
 TYPES = ("build", "review", "fix", "question", "investigate")
 PRIORITIES = ("normal", "urgent")
 STATUSES = ("proposed", "open", "claimed", "done", "failed", "cancelled")
+ACTIVE_STATUSES = ("proposed", "open", "claimed")  # not yet finished
 CREATORS = ("human", "claude", "codex")
 
 FIELDS = (
@@ -455,7 +456,7 @@ def _check_agent_rate(creator: str) -> None:
             f"(the limit is {AGENT_TICKET_LIMIT}). Wait, or ask the human to create it.")
 
 
-def create_ticket(fields: dict) -> dict:
+def create_ticket(fields: dict, *, needs_approval: bool = False) -> dict:
     """Validate, check for secrets, assign an id and save. Returns the ticket."""
     creator = current_creator()
     errors = validate_new(fields)
@@ -468,7 +469,9 @@ def create_ticket(fields: dict) -> dict:
     # Investigate tickets always wait for approval; everything else starts
     # open (the human approves at merge). A build ticket that follows up an
     # investigation (it has a parent) also waits for approval.
-    status = "proposed" if t == "investigate" or (t == "build" and fields.get("parent")) else "open"
+    # needs_approval: the caller wants a human to approve it first.
+    status = ("proposed" if needs_approval or t == "investigate" or (t == "build" and fields.get("parent"))
+              else "open")
     try:
         start_risk = rk.starting_level(t, fields["repo"])
     except rk.RiskError as exc:
@@ -603,6 +606,32 @@ def add_note(ticket_id: str, text: str) -> dict:
         now = _now()
         ticket["notes"] = notes + [{"at": now, "by": who, "text": text}]
         ticket["updated_at"] = now
+        _write_atomic(_ticket_path(ticket_id), ticket)
+    return ticket
+
+
+def append_to_body(ticket_id: str, heading: str, items: str) -> dict | None:
+    """Add the lines of `items` that the ticket body does not already hold,
+    under `heading`. Returns the ticket, or None when nothing new was added.
+    The check and the write happen under one lock."""
+    if not ID_RE.fullmatch(ticket_id):
+        raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
+    with _locked():
+        ticket = load_ticket(ticket_id)
+        if ticket["status"] not in ACTIVE_STATUSES:
+            raise TicketError(f"{ticket_id} is {ticket['status']}, so nothing new can be added to it")
+        held = {ln.strip() for ln in ticket["body"].splitlines()}
+        fresh = [ln for ln in items.splitlines() if ln.strip() and ln.strip() not in held]
+        if not fresh:
+            return None
+        body = f"{ticket['body']}\n\n{heading}\n" + "\n".join(fresh)
+        if len(body) > BODY_MAX:
+            raise TicketError(f"{ticket_id} is too full to take these items; they are in the notes on the reviewed ticket")
+        errors = check_secrets(ticket["title"], body)
+        if errors:
+            raise TicketInvalid(errors)
+        ticket["body"] = body
+        ticket["updated_at"] = _now()
         _write_atomic(_ticket_path(ticket_id), ticket)
     return ticket
 

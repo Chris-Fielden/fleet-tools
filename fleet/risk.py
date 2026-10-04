@@ -218,6 +218,29 @@ def parse_review(text: str) -> dict:
     return {"kind": kind, "reviewer": reviewer, "commit": head.get("commit"), "verdict": verdict}
 
 
+SECTION_RE = re.compile(
+    r"^[\s*#>_`-]*(VERDICT|MUST[ _]FIX|SHOULD[ _]FIX|SUMMARY)[\s*_`]*:[\s*_`]*(.*)$", re.I)
+NO_ITEMS_RE = re.compile(r"[\s*_`(\[]*(none|n/?a|nothing|empty|no items?)?[\s*_`)\].]*", re.I)
+
+
+def should_fix_items(text: str) -> str:
+    """The SHOULD FIX section of a saved review as plain text ('' when it is
+    missing, empty or says none). It runs to the next VERDICT, MUST FIX or
+    SUMMARY heading."""
+    body = None
+    for line in text.splitlines():
+        m = SECTION_RE.match(line)
+        if m:
+            if body is not None:
+                break
+            if m.group(1).upper().replace("_", " ") == "SHOULD FIX":
+                body = [m.group(2)]
+        elif body is not None:
+            body.append(line)
+    out = "\n".join(body or []).strip()
+    return "" if NO_ITEMS_RE.fullmatch(out) else out
+
+
 def latest_reviews(reviews_dir: Path, full_sha: str) -> dict:
     """The newest review of exactly `full_sha`, per reviewer kind."""
     out = {}
