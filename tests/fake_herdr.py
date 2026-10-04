@@ -55,6 +55,12 @@ elif args[:1] == ["server"] and len(args) == 1:
     open(os.environ["FAKE_HERDR_SERVER"], "w").close()
     sys.exit(0)
 elif cmd == "pane run":
+    if os.environ.get("FAKE_HERDR_RUN_AS"):   # really run the command, through a stand-in program
+        import shlex
+        import subprocess
+        subprocess.Popen([sys.executable, os.environ["FAKE_HERDR_RUN_AS"], *shlex.split(args[3])],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
     out = {"result": {}}
 elif cmd == "workspace create":
     out = {"result": {"workspace": {"workspace_id": "w9", "label": args[args.index("--label") + 1]}}}

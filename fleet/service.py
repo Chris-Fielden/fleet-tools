@@ -13,7 +13,9 @@ $FLEET_LOGINCTL and $FLEET_TAILSCALE.
 from __future__ import annotations
 
 import fcntl
+import contextlib
 import getpass
+import http.client
 import json
 import os
 import shlex
@@ -74,6 +76,21 @@ def _wait_for(condition, seconds: float | None = None) -> bool:
         if time.monotonic() >= deadline:
             return False
         time.sleep(POLL_SECONDS)
+
+
+@contextlib.contextmanager
+def _serialized():
+    """One start or stop at a time (two `fleet start`s must not close each
+    other's dispatcher tab)."""
+    path = tk.fleet_home() / "fleet-ctl.lock"
+    tk.refuse_real_store_in_tests(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def _refuse_agent() -> None:
@@ -142,7 +159,7 @@ def dispatcher_running() -> bool:
         info = path.stat()
     except OSError:
         return False
-    held = _flock_held_in_proc(info)
+    held = _flock_held_in_proc(info, _recorded_pid())
     if held is not None:
         return held
     try:   # no /proc/locks: take the lock for a moment instead
@@ -157,16 +174,28 @@ def dispatcher_running() -> bool:
     return False
 
 
-def _flock_held_in_proc(info) -> bool | None:
+def _recorded_pid() -> int | None:
+    try:
+        return int(_lock_path().read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _flock_held_in_proc(info, pid: int | None) -> bool | None:
     """Whether /proc/locks lists a flock on this file; None if it cannot be read.
-    Unlike taking the lock, this can never make a starting dispatcher lose it."""
+    Unlike taking the lock, this can never make a starting dispatcher lose it.
+    On some filesystems (btrfs) /proc/locks shows another device number, so the
+    inode alone also counts when the lock is held by the pid the file records."""
     try:
         text = Path("/proc/locks").read_text()
     except OSError:
         return None
     want = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}"
-    return any(len(f) > 5 and f[1] == "FLOCK" and f[5] == want
-               for f in (line.split() for line in text.splitlines()))
+    for f in (line.split() for line in text.splitlines()):
+        if len(f) > 5 and f[1] == "FLOCK":
+            if f[5] == want or (pid is not None and f[4] == str(pid) and f[5].rpartition(":")[2] == str(info.st_ino)):
+                return True
+    return False
 
 
 def dispatcher_pid() -> int | None:
@@ -228,7 +257,9 @@ def cmd_start(pause: bool = False) -> int:
     print("herdr: " + ("started in the background" if started else "already running"))
     for name in dict.fromkeys((settings["herdr_workspace"], TOOLS_WORKSPACE)):
         print(f"workspace {name}: {lc.ensure_workspace(name)}")
-    if start_dispatcher():
+    with _serialized():
+        started_dispatcher = start_dispatcher()
+    if started_dispatcher:
         print(f"dispatcher: started in tab '{DISPATCH_TAB}' of {TOOLS_WORKSPACE}")
     else:
         print("dispatcher: already running")
@@ -238,14 +269,15 @@ def cmd_start(pause: bool = False) -> int:
 
 
 def cmd_stop() -> int:
-    print(stop_dispatcher())
-    try:
-        if herdr_running():
-            closed = _close_tabs(lc.find_workspace(TOOLS_WORKSPACE))
-            if closed:
-                print(f"closed the '{DISPATCH_TAB}' tab")
-    except (lc.LaunchError, ServiceError):
-        pass   # no workspace or tab to tidy: the dispatcher is what matters
+    with _serialized():
+        print(stop_dispatcher())
+        try:
+            if herdr_running():
+                closed = _close_tabs(lc.find_workspace(TOOLS_WORKSPACE))
+                if closed:
+                    print(f"closed the '{DISPATCH_TAB}' tab")
+        except (lc.LaunchError, ServiceError):
+            pass   # no workspace or tab to tidy: the dispatcher is what matters
     print("agents were left running")
     return 0
 
@@ -271,7 +303,7 @@ def _reachable(url: str) -> tuple[bool, str]:
             return True, f"HTTP {resp.status}" + _healthy_suffix(body)
     except urllib.error.HTTPError as exc:
         return True, f"HTTP {exc.code}"
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
         reason = getattr(exc, "reason", exc)
         return False, f"unreachable ({type(reason).__name__})"
 
@@ -415,7 +447,7 @@ def unit_text() -> str:
             env[name] = os.environ[name]
     exe = [sys.executable, str(ROOT / "bin" / "fleet")]
     lines = ["[Unit]", "Description=Start the agent fleet (herdr and the dispatcher)",
-             "Wants=network-online.target", "After=network-online.target", "",
+             "",
              # KillMode=process: stopping the unit (or logging out) must not kill herdr or the agents.
              "[Service]", "Type=oneshot", "RemainAfterExit=yes", "KillMode=process"]
     lines += [f"Environment={_unit_quote(f'{k}={v}')}" for k, v in env.items()]

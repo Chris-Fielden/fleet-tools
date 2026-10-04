@@ -236,3 +236,27 @@ def test_status_says_when_the_service_is_installed_but_not_enabled(env, capsys):
     (env / "FLEET_SYSTEMCTL").write_text("#!/bin/sh\necho disabled\nexit 1\n")
     usage_cli.main(["status"])
     assert "service is disabled" in capsys.readouterr().out
+
+
+def test_status_survives_a_server_that_hangs_up(monkeypatch):
+    import http.client
+    monkeypatch.setattr(sv.urllib.request.OpenerDirector, "open",
+                        lambda *a, **k: (_ for _ in ()).throw(http.client.RemoteDisconnected("x")))
+    up, detail = sv._reachable("http://127.0.0.1:9")
+    assert not up and "RemoteDisconnected" in detail
+
+
+def test_the_started_command_really_takes_the_lock_and_stop_ends_it(env, monkeypatch, capsys):
+    """No stubbing of dispatcher_running: a stand-in runs under the real lock."""
+    stand_in = env / "stand-in.py"
+    stand_in.write_text("import sys, time\nsys.path.insert(0, %r)\nfrom fleet import dispatch as dp\n"
+                        "with dp.single_instance():\n    time.sleep(60)\n" % str(ROOT))
+    monkeypatch.setenv("FAKE_HERDR_RUN_AS", str(stand_in))
+    monkeypatch.setattr(sv, "WAIT_SECONDS", 5)
+    assert usage_cli.main(["start"]) == 0
+    assert "dispatcher: started" in capsys.readouterr().out
+    assert sv.dispatcher_running() and sv.dispatcher_pid()
+    assert usage_cli.main(["start"]) == 0
+    assert "dispatcher: already running" in capsys.readouterr().out
+    assert usage_cli.main(["stop"]) == 0
+    assert not sv.dispatcher_running()

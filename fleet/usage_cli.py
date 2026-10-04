@@ -64,8 +64,7 @@ def _service(args) -> int:
         if args.cmd == "stop":
             return sv.cmd_stop()
         if args.cmd == "restart":
-            sv.cmd_stop()
-            return sv.cmd_start()
+            return sv.cmd_stop() or sv.cmd_start()
         if args.cmd == "status":
             return sv.cmd_status()
         if args.cmd == "logs":
