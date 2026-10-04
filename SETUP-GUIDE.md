@@ -453,7 +453,7 @@ To choose the reviewer yourself:
 ```bash
 REVIEWER=codex scripts/review.sh
 REVIEWER=claude REVIEW_MODEL=opus scripts/review.sh
-REVIEWER=both scripts/review.sh      # Codex and a stronger Claude (opus); needed for high risk
+REVIEWER=both scripts/review.sh      # Codex, then Claude (sonnet after a Codex FAIL, else opus); high risk needs both PASS
 ```
 
 Each review is saved with the full id of the commit it covers. A review of an

@@ -387,6 +387,67 @@ def test_review_sh_both_runs_codex_and_stronger_claude(task, env):
     assert rk.check_reviews(got, "high") == []
 
 
+def claude_models(env):
+    """A fake claude that records the --model it was given."""
+    log = env / "models.txt"
+    p = env / "bin" / "claude"
+    p.parent.mkdir(exist_ok=True)
+    p.write_text("#!/bin/sh\n"
+                 'while [ $# -gt 0 ]; do\n'
+                 f'  if [ "$1" = --model ]; then echo "$2" >> {log}; fi\n'
+                 '  shift\ndone\n'
+                 'echo "VERDICT: PASS"\necho "SUMMARY: fake"\n')
+    p.chmod(p.stat().st_mode | stat.S_IEXEC)
+    return log
+
+
+def test_review_sh_both_codex_fail_runs_sonnet_not_opus(task, env):
+    full = commit_in(task, "fleet/x.py")
+    fake_tool(env / "bin", "codex", "FAIL")
+    log = claude_models(env)
+    r = run_review(task, env / "bin", REVIEWER="both")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert log.read_text().split() == ["sonnet"]
+    got = rk.latest_reviews(task / ".reviews", full)
+    assert got["codex"]["verdict"] == "FAIL" and "sonnet" in got["claude"]["reviewer"]
+
+
+def test_review_sh_both_codex_pass_runs_opus(task, env):
+    full = commit_in(task, "fleet/x.py")
+    fake_tool(env / "bin", "codex", "PASS")
+    log = claude_models(env)
+    assert run_review(task, env / "bin", REVIEWER="both").returncode == 0
+    assert log.read_text().split() == ["opus"]
+    assert rk.check_reviews(rk.latest_reviews(task / ".reviews", full), "high") == []
+
+
+def test_review_sh_both_codex_unable_runs_opus(task, env):
+    commit_in(task, "fleet/x.py")
+    log = claude_models(env)
+    shim = env / "bin" / "codex"
+    shim.write_text("#!/bin/sh\nexit 1\n")
+    shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
+    assert run_review(task, env / "bin", REVIEWER="both").returncode == 1
+    assert log.read_text().split() == ["opus"]
+
+
+def test_review_sh_both_review_model_overrides_the_round_choice(task, env):
+    commit_in(task, "fleet/x.py")
+    fake_tool(env / "bin", "codex", "FAIL")
+    log = claude_models(env)
+    run_review(task, env / "bin", REVIEWER="both", REVIEW_MODEL="fable")
+    assert log.read_text().split() == ["fable"]
+
+
+def test_gate_rejects_codex_fail_with_sonnet_pass(task, env):
+    full = commit_in(task, "fleet/x.py")
+    fake_tool(env / "bin", "codex", "FAIL")
+    claude_models(env)
+    run_review(task, env / "bin", REVIEWER="both")
+    problems = rk.check_reviews(rk.latest_reviews(task / ".reviews", full), "high")
+    assert any("stronger Claude model" in p for p in problems)
+
+
 def test_review_sh_both_fails_if_one_cannot_run(task, env):
     commit_in(task, "fleet/x.py")
     fake_tool(env / "bin", "claude")  # no codex on the (fake) path first; real one may exist
