@@ -118,9 +118,13 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
         kept = [i for i in retry_tabs.poll() if i in done]
         for ticket_id, reason in lc.retry_kept_tabs(kept, settings, warn):
             emit(f"{ticket_id}  tab closed: {reason}")
+    prompted: set[str] = set()
+    if checks is not None:   # --watch only
+        # Notes go first, before anything below decides that an idle agent has finished.
+        prompted = push_notes.push(tk.list_tickets(), emit, warn)
     for ticket_id, reason in lc.sweep_tabs(settings, warn):
         emit(f"{ticket_id}  stale tab swept: {reason}")
-    for t in lc.finish_investigations(tk.list_tickets(), warn):
+    for t in lc.finish_investigations([t for t in tk.list_tickets() if t["id"] not in prompted], warn):
         emit(f"{t['id']}  investigation {t['status']}")
         kaneo.mirror_quietly(t, warn)
         notify.notify_quietly(t, "failed" if t["status"] == "failed" else "investigated", warn)
@@ -137,9 +141,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     # Overnight queue: finish prep agents that stopped before the review pass looks at their
     # tickets, and start the next prep pass after it has moved new tickets into review.
     _prep_quietly(lambda: prep.finish(settings, clock.now(), emit, warn), warn)
-    if checks is not None:   # --watch only
-        # Notes first: an agent that has just finished must still get what the human added.
-        push_notes.push(tk.list_tickets(), emit, warn)
+    if checks is not None:
         checks(emit, warn)
     _prep_quietly(lambda: prep.maybe_start(settings, clock.now(), emit, warn, reserve), warn)
     lines, held = dp.ensure_investigations(tk.list_tickets(), warn)

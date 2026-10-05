@@ -188,3 +188,15 @@ def test_notes_are_pushed_before_the_review_checks(world, herdr_log):
     dispatch_cli._cycle(dp.load_settings(), lambda m: None, lambda m: None,
                         checks=lambda emit, warn: seen.append(len(prompts(herdr_log))))
     assert seen == [1]
+
+
+def test_an_idle_investigation_with_a_pending_note_is_prompted_not_finished(world, herdr_log):
+    from fleet import dispatch_cli
+    from fleet import dispatch as dp
+    t = tk.set_status(mk(type="investigate")["id"], "claimed", allowed_from=("open", "proposed"), assignee="claude")
+    world(t["id"].lower(), "idle")
+    run_push()
+    tk.add_note(t["id"], "look at the logs too")
+    dispatch_cli._cycle(dp.load_settings(), lambda m: None, lambda m: None, checks=lambda emit, warn: None)
+    assert len(prompts(herdr_log)) == 1
+    assert tk.load_ticket(t["id"])["status"] == "claimed"

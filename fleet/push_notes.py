@@ -60,10 +60,12 @@ def baseline(ticket: dict) -> None:
         pass   # the first cycle that sees the ticket then starts it at its note count
 
 
-def push(tickets: list[dict], emit, warn) -> None:
+def push(tickets: list[dict], emit, warn) -> set[str]:
     """One pass. Never raises for herdr or disk trouble: it warns and tries again
     next cycle. The count is saved right after a send, before anything else can
-    fail; only a crash in between could resend that one note."""
+    fail; only a crash in between could resend that one note. Returns the ids of the
+    tickets whose agent was just prompted: it is not finished, whatever herdr says."""
+    prompted: set[str] = set()
     claimed = sorted((t for t in tickets if t["status"] == "claimed" and t.get("assignee") in tk.AGENTS),
                      key=tk.oldest_first_key)
     try:
@@ -101,6 +103,7 @@ def push(tickets: list[dict], emit, warn) -> None:
                 warn(f"could not send a note to {t['id']}: {exc}")
                 continue
             new[t["id"]] = done + 1
+            prompted.add(t["id"])
             agents[name] = "working"   # it has a prompt now; the next note waits
             _save(new)
             emit(f"{t['id']}  sent a new human note to its agent")
@@ -111,3 +114,4 @@ def push(tickets: list[dict], emit, warn) -> None:
         _save(new)
     except (tk.TicketError, OSError) as exc:
         warn(f"pushing notes: {exc}")
+    return prompted
