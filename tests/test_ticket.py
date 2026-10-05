@@ -477,7 +477,7 @@ def test_old_ids_keep_working(monkeypatch):
 
 
 def test_bad_ids_refused():
-    for bad in ("bd-1", "BD1", "BD-0", "BD-01", "BD-X", "BD--1", "T-1-1", "../BD-1", "B-1"):
+    for bad in ("BD1", "BD-0", "BD-01", "BD-X", "BD--1", "T-1-1", "../BD-1", "B-1"):
         assert run("show", bad).returncode == 2
 
 
@@ -644,3 +644,60 @@ def test_rate_limit_ignores_tickets_older_than_an_hour(monkeypatch):
         t["created_at"] = old
         tk._write_atomic(tk._ticket_path(t["id"]), t)
     assert _make(monkeypatch, "CLAUDECODE", 1)
+
+
+# BD-44: ids are case-insensitive wherever a human types one ---------------------
+
+def variants(tid):
+    return [tid.lower(), tid.capitalize(), tid.swapcase(), f" {tid.lower()} "]
+
+
+def test_show_note_and_risk_accept_any_case():
+    tid = make()["id"]
+    for typed in variants(tid):
+        shown = run("show", typed, "--json")
+        assert shown.returncode == 0, shown.stderr
+        assert json.loads(shown.stdout)["id"] == tid
+        assert run("note", typed, "a remark").returncode == 0
+        assert run("risk", typed).returncode == 0
+    stored = tk.load_ticket(tid)
+    assert stored["id"] == tid and len(stored["notes"]) == len(variants(tid))
+
+
+def test_approve_accepts_any_case():
+    tid = make(type="investigate", repo="ideas", branch="task/inv-a")["id"]
+    r = run("approve", tid.lower())
+    assert r.returncode == 0, r.stderr
+    assert tk.load_ticket(tid)["status"] == "open"
+
+
+def test_close_accepts_any_case():
+    tid = make()["id"]
+    r = run("close", tid.capitalize(), "--cancelled")
+    assert r.returncode == 0, r.stderr
+    assert tk.load_ticket(tid)["status"] == "cancelled"
+
+
+def test_parent_is_case_insensitive_and_stored_uppercase():
+    parent = make(type="investigate", repo="ideas", branch="task/inv-b")
+    r = run("new", *new_args(type="review", branch="task/rev-b", commit="abc1234",
+                             parent=parent["id"].lower()))
+    assert r.returncode == 0, r.stderr
+    assert tk.load_ticket(r.stdout.strip())["parent"] == parent["id"]
+
+
+def test_normalize_id():
+    assert tk.normalize_id("bd-12") == "BD-12"
+    assert tk.normalize_id("t-20250101-001") == "T-20250101-001"
+    assert tk.normalize_id(None) is None
+    with pytest.raises(tk.TicketInvalid):
+        tk.load_ticket("not-an-id")
+
+
+def test_attach_investigation_and_set_priority_normalize_ids(monkeypatch):
+    inv = make(type="investigate", repo="ideas", branch="task/inv-a")["id"]
+    build = make()["id"]
+    monkeypatch.setattr(tk, "current_creator", lambda: "human")
+    t = tk.attach_investigation(build.lower(), inv.lower())
+    assert t["id"] == build and t["parent"] == inv
+    assert tk.set_priority(build.lower(), "urgent")["id"] == build

@@ -576,9 +576,10 @@ def _status(ticket_id: str) -> int:
 
 def main(argv=None) -> int:
     p = _Parser(prog="ship")
-    p.add_argument("id", nargs="?", help="ticket id, like BD-17")
-    p.add_argument("--status", metavar="ID", help="show how far a ship of ID got, or how it ended")
-    p.add_argument("--job", metavar="ID", help=argparse.SUPPRESS)
+    p.add_argument("id", nargs="?", type=tk.normalize_id, help="ticket id, like BD-17 (any case)")
+    p.add_argument("--status", metavar="ID", type=tk.normalize_id,
+                   help="show how far a ship of ID got, or how it ended")
+    p.add_argument("--job", metavar="ID", type=tk.normalize_id, help=argparse.SUPPRESS)
     p.add_argument("--tip", help=argparse.SUPPRESS)
     p.add_argument("--answer", help=argparse.SUPPRESS)
     p.add_argument("--list", action="store_true", help="ship every ticket on the ship list, in order")

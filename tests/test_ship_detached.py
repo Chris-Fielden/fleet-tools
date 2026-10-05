@@ -121,3 +121,8 @@ def test_status_accepts_a_legacy_ticket_id(real_task, capsys):  # noqa: F811
 def test_status_of_a_ship_never_run(real_task, capsys):  # noqa: F811
     assert ship_cli._status("BD-9") == 1
     assert "no ship of BD-9" in capsys.readouterr().err
+
+
+def test_status_flag_accepts_any_case_id(real_task, capsys):  # noqa: F811
+    assert ship_cli.main(["--status", "bd-9"]) == 1
+    assert "no ship of BD-9" in capsys.readouterr().err

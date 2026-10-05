@@ -39,7 +39,7 @@ def _build_parser() -> argparse.ArgumentParser:
     body.add_argument("--body")
     body.add_argument("--body-file")
     new.add_argument("--commit")
-    new.add_argument("--parent")
+    new.add_argument("--parent", type=tk.normalize_id)
     new.add_argument("--priority", choices=tk.PRIORITIES)
     new.add_argument("--force", action="store_true",
                      help="file it although a ticket with a very similar title exists (humans only; "
@@ -51,27 +51,27 @@ def _build_parser() -> argparse.ArgumentParser:
     ls.add_argument("--json", action="store_true")
 
     show = sub.add_parser("show", help="show one ticket")
-    show.add_argument("id")
+    show.add_argument("id", type=tk.normalize_id)
     show.add_argument("--json", action="store_true")
 
     approve = sub.add_parser("approve", help="approve a proposed ticket (humans only)")
-    approve.add_argument("id")
+    approve.add_argument("id", type=tk.normalize_id)
 
     prio = sub.add_parser("priority", help="make an unfinished ticket urgent or normal (humans only)")
-    prio.add_argument("id")
+    prio.add_argument("id", type=tk.normalize_id)
     prio.add_argument("priority", choices=tk.PRIORITIES)
 
     sub.add_parser("fix-titles", help="retitle open tickets squashed from multi-line text (humans only)")
 
     close = sub.add_parser("close", help="close an open, claimed or in-review ticket (humans only)")
-    close.add_argument("id")
+    close.add_argument("id", type=tk.normalize_id)
     outcome = close.add_mutually_exclusive_group(required=True)
     for name in tk.CLOSE_OUTCOMES:
         outcome.add_argument(f"--{name}", dest="outcome", action="store_const", const=name)
     close.add_argument("--note")
 
     note = sub.add_parser("note", help="add a note to a ticket (findings, remarks)")
-    note.add_argument("id")
+    note.add_argument("id", type=tk.normalize_id)
     note.add_argument("text")
 
     rr = sub.add_parser("review-result",
@@ -86,7 +86,7 @@ def _build_parser() -> argparse.ArgumentParser:
                          "holding those items")
 
     risk = sub.add_parser("risk", help="show a ticket's risk level, judge a diff, or raise a level")
-    risk.add_argument("id", nargs="?")
+    risk.add_argument("id", nargs="?", type=tk.normalize_id)
     risk.add_argument("--diff", metavar="BASE...BRANCH",
                       help="level for the files this range changes, with the rule for each")
     risk.add_argument("--dir", default=".", help="the git repo to diff in (default: here)")
@@ -99,7 +99,7 @@ def _build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--dir", default=".", help="the git repo (default: here)")
     gate.add_argument("--repo", help="only tickets filed against this repo name count")
     gate.add_argument("--worktree", required=True, help="the task worktree holding .reviews/")
-    gate.add_argument("--ticket", help="the ticket being shipped: it must be on this branch, and its id "
+    gate.add_argument("--ticket", type=tk.normalize_id, help="the ticket being shipped: it must be on this branch, and its id "
                                        "is the word to type")
     gate.add_argument("--field", choices=("risk", "confirm", "ok", "reviews", "others"),
                       help="print just one value instead of the report")
