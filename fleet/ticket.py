@@ -39,6 +39,7 @@ OPTIONAL_FIELDS = ("close_note", "base_commit", "seq", "priority", "risk", "note
 # fail_commits: every commit that got a recorded FAIL, oldest first (a verdict
 # only keeps the latest, and "going in circles" counts rounds).
 CLOSE_NOTE_MAX = 500
+FAIL_COMMITS_MAX = 50   # fail_commits keeps the newest this many (the going-in-circles threshold is far lower)
 NOTE_MAX = 4000
 REVIEW_KINDS = ("codex", "claude")
 VERDICT_RESULTS = ("PASS", "FAIL")
@@ -718,7 +719,7 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
             t["verdict"] = {"result": "FAIL" if failed else "PASS",
                             "commit": commit, "reviewer": reviewer, "at": now, "reviews": reviews}
             if failed and commit not in t.get("fail_commits", []):
-                t["fail_commits"] = t.get("fail_commits", []) + [commit]
+                t["fail_commits"] = (t.get("fail_commits", []) + [commit])[-FAIL_COMMITS_MAX:]
             t["updated_at"] = now
             _write_atomic(_ticket_path(t["id"]), t)
             changed.append(t)

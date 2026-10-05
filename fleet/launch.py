@@ -784,6 +784,49 @@ def _close_tab_in(ticket_id: str, tabs: list[dict], agents: list[dict],
     return True, f"tab {tab['tab_id']} (agent {state})", tab["tab_id"]
 
 
+SWEEP_STATUSES = ("done", "failed", "cancelled")
+SWEEP_SKIP_WORKSPACES = ("fleet-tools",)   # the dispatch tab lives there (service.TOOLS_WORKSPACE)
+
+
+def sweep_tabs(settings: dict, warn=lambda m: None) -> list[tuple[str, str]]:
+    """Close the stale tabs of the agents workspace: the tab holding the own agent
+    (named after the ticket) of a ticket that is done, failed or cancelled (a done
+    investigation included), found through a tab labelled with the ticket id, even a
+    focused one. Never a tab of a claimed, open or in-review ticket, a tab that is not
+    labelled with a ticket id (the workspace's base tab), a tab that only carries the
+    label with no such agent in it (it may be a human's), a tab with an agent still
+    working or blocked, or anything outside herdr_workspace (never fleet-tools).
+    Returns (ticket id, reason) per tab closed and logs TAB_SWEPT for each."""
+    if settings["herdr_workspace"] in SWEEP_SKIP_WORKSPACES:
+        return []
+    status = {t["id"]: t["status"] for t in tk.list_tickets()}
+    if not any(s in SWEEP_STATUSES for s in status.values()):
+        return []   # nothing could be stale: do not bother herdr
+    try:
+        tabs, agents = _herdr_tabs(settings)
+    except LaunchError as exc:
+        warn(f"tab sweep: herdr could not be asked ({exc})")
+        return []
+    swept = []
+    for tab in list(tabs):
+        label = tab.get("label")
+        if not isinstance(label, str) or status.get(label) not in SWEEP_STATUSES:
+            continue
+        if swept:   # a tab closed before this one may have been the focus target: ask again
+            try:
+                tabs, agents = _herdr_tabs(settings)
+            except LaunchError as exc:
+                warn(f"tab sweep: herdr could not be asked ({exc})")
+                break
+        # Ownership is the ticket's own agent living in the tab: a tab that only carries
+        # the label (a human's shell or editor reusing it) is never closed.
+        closed, reason, _ = _close_tab_in(label, tabs, agents, by_label=False)
+        if closed:
+            _safe_log("TAB_SWEPT", f"{label} ({status[label]}) {reason}")
+            swept.append((label, reason))
+    return swept
+
+
 def lost_agents(tickets: list[dict], warn) -> list[dict]:
     """Claimed build or fix tickets whose herdr agent is no longer listed: the
     tab died and the ticket stays claimed, blocking the queue. If herdr cannot

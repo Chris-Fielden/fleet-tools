@@ -180,6 +180,8 @@ def _merge(settings: dict, given, path: Path) -> None:
         settings["max_oncall_per_day"] = _whole(path, given, "max_oncall_per_day", 0, "0 or more")
     if "fail_rounds_threshold" in given:
         settings["fail_rounds_threshold"] = _whole(path, given, "fail_rounds_threshold", 1, "1 or more")
+        if settings["fail_rounds_threshold"] > tk.FAIL_COMMITS_MAX:   # only that many FAIL commits are kept
+            raise SettingsError(f"{path}: fail_rounds_threshold must be {tk.FAIL_COMMITS_MAX} or less")
     used = list(settings["id_prefixes"].values()) + [settings["emergency_prefix"], settings["oncall_prefix"]]
     if len(set(used)) != len(used):
         raise SettingsError(f"{path}: id prefixes must differ from each other and from emergency_prefix and oncall_prefix")

@@ -612,7 +612,7 @@ def test_fix_refuses_plain_folder(projects, herdr_log):
     (repo / ".worktrees" / "job").mkdir(parents=True)
     assert dispatch_main(["--once"]) == 1
     assert tk.load_ticket(fix["id"])["status"] == "open"
-    assert not herdr_log.exists()
+    assert not [c for c in (calls(herdr_log) if herdr_log.exists() else []) if c[:2] in (["tab", "create"], ["agent", "start"])]
 
 
 def test_fix_refuses_symlink_and_wrong_branch(projects, herdr_log):
@@ -626,7 +626,7 @@ def test_fix_refuses_symlink_and_wrong_branch(projects, herdr_log):
     git(repo / ".worktrees" / "job", "checkout", "-q", "-b", "task/elsewhere")
     assert dispatch_main(["--once"]) == 1
     assert tk.load_ticket(fix["id"])["status"] == "open"
-    assert not herdr_log.exists()
+    assert not [c for c in (calls(herdr_log) if herdr_log.exists() else []) if c[:2] in (["tab", "create"], ["agent", "start"])]
 
 
 def test_writer_file_error_rolls_back(projects, herdr_log, monkeypatch):

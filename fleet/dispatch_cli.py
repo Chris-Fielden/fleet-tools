@@ -117,6 +117,8 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
         kept = [i for i in retry_tabs.poll() if i in done]
         for ticket_id, reason in lc.retry_kept_tabs(kept, settings, warn):
             emit(f"{ticket_id}  tab closed: {reason}")
+    for ticket_id, reason in lc.sweep_tabs(settings, warn):
+        emit(f"{ticket_id}  stale tab swept: {reason}")
     for t in lc.finish_investigations(tk.list_tickets(), warn):
         emit(f"{t['id']}  investigation {t['status']}")
         kaneo.mirror_quietly(t, warn)
