@@ -6,9 +6,10 @@ human that was not sent yet, prompts the agent once, when it is idle.
 
 What was handled is kept in $FLEET_HOME/pushed-notes.json as {ticket id: number
 of notes handled}. Notes are only ever appended, so a count is enough, and a
-restart of the watcher cannot resend anything. A ticket seen for the first time
-starts at its current note count: those notes were in the ticket the agent read
-at launch (or predate this feature).
+restart of the watcher cannot resend anything. A launch records the notes the
+agent was started with (`baseline`). A claimed ticket the watcher never launched
+(or launched before this feature) starts at its current note count the first time
+it is seen.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from . import launch as lc
 from . import ticket as tk
 
 PREFIX = "New note from the human on your ticket:"
+FINISHED = ("done", "failed", "cancelled")
 
 
 def state_path():
@@ -45,20 +47,39 @@ def _save(state: dict) -> None:
     tmp.replace(path)
 
 
-def push(tickets: list[dict], emit, warn) -> None:
-    """One pass. Never raises for herdr or disk trouble: it warns and tries again
-    next cycle."""
-    claimed = [t for t in tickets if t["status"] == "claimed" and t.get("assignee") in tk.AGENTS]
+def baseline(ticket: dict) -> None:
+    """A ticket was just launched with the notes it holds now in front of the agent:
+    count them as handled, so a note added after the launch (even before the next
+    cycle) still goes out. A ticket that is already counted keeps its count."""
     try:
         state = _load()
-        new = {k: v for k, v in state.items() if k in {t["id"] for t in claimed}}
+        if ticket["id"] not in state:
+            state[ticket["id"]] = len(ticket.get("notes") or [])
+            _save(state)
+    except (tk.TicketError, OSError):
+        pass   # the first cycle that sees the ticket then starts it at its note count
+
+
+def push(tickets: list[dict], emit, warn) -> None:
+    """One pass. Never raises for herdr or disk trouble: it warns and tries again
+    next cycle. The count is saved right after a send, before anything else can
+    fail; only a crash in between could resend that one note."""
+    claimed = sorted((t for t in tickets if t["status"] == "claimed" and t.get("assignee") in tk.AGENTS),
+                     key=tk.oldest_first_key)
+    try:
+        state = _load()
+        # Counts are kept until the ticket is finished: it may leave the claimed
+        # set for a while (released, then claimed again) and must not lose its count.
+        finished = {t["id"] for t in tickets if t["status"] in FINISHED}
+        new = {k: v for k, v in state.items() if k not in finished}
+        for t in claimed:   # first sight: what is there now was in the ticket at launch
+            new.setdefault(t["id"], len(t.get("notes") or []))
+        if new != state:
+            _save(new)
         agents = None
-        for t in sorted(claimed, key=tk.oldest_first_key):
+        for t in claimed:
             notes = t.get("notes") or []
-            done = new.get(t["id"])
-            if done is None:
-                new[t["id"]] = len(notes)
-                continue
+            done = new[t["id"]]
             # Skip notes by anyone else, then see whether the next one is the human's.
             while done < len(notes) and notes[done].get("by") != "human":
                 done += 1
@@ -81,11 +102,12 @@ def push(tickets: list[dict], emit, warn) -> None:
                 continue
             new[t["id"]] = done + 1
             agents[name] = "working"   # it has a prompt now; the next note waits
-            dp.log("NOTE_PUSHED", f"{t['id']} note {done + 1} of {len(notes)} sent to {name}")
-            emit(f"{t['id']}  sent a new human note to its agent")
-            _save(new)   # save at once: a crash must not make the next cycle resend
-            state = dict(new)
-        if new != state:
             _save(new)
+            emit(f"{t['id']}  sent a new human note to its agent")
+            try:
+                dp.log("NOTE_PUSHED", f"{t['id']} note {done + 1} of {len(notes)} sent to {name}")
+            except OSError:
+                pass
+        _save(new)
     except (tk.TicketError, OSError) as exc:
         warn(f"pushing notes: {exc}")

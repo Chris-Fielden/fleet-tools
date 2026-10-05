@@ -152,3 +152,39 @@ def test_watch_loop_pushes_notes(world, herdr_log, projects):
         tk.add_note(t["id"], "from the watcher test")
     watch({}, FakeClock(3, at={1: add}))
     assert len(prompts(herdr_log)) == 1
+
+
+def test_baseline_at_launch_keeps_a_note_added_before_the_first_cycle(world, herdr_log):
+    t = claim(mk())
+    tk.add_note(t["id"], "in front of the agent at launch")
+    push_notes.baseline(tk.load_ticket(t["id"]))
+    tk.add_note(t["id"], "added right after the launch")
+    world(t["id"].lower(), "idle")
+    run_push()
+    assert [p[3].split("\n")[1] for p in prompts(herdr_log)] == ["added right after the launch"]
+
+
+def test_count_survives_a_ticket_leaving_the_claimed_set(world, herdr_log):
+    t = claim(mk())
+    name = t["id"].lower()
+    world(name, "idle")
+    run_push()
+    tk.set_status(t["id"], "open", allowed_from=("claimed",), assignee=None)
+    tk.add_note(t["id"], "added while released")
+    run_push()
+    claim(tk.load_ticket(t["id"]))
+    run_push()
+    assert len(prompts(herdr_log)) == 1
+
+
+def test_notes_are_pushed_before_the_review_checks(world, herdr_log):
+    from fleet import dispatch_cli
+    from fleet import dispatch as dp
+    t = claim(mk())
+    world(t["id"].lower(), "idle")
+    run_push()
+    tk.add_note(t["id"], "added while it worked")
+    seen = []
+    dispatch_cli._cycle(dp.load_settings(), lambda m: None, lambda m: None,
+                        checks=lambda emit, warn: seen.append(len(prompts(herdr_log))))
+    assert seen == [1]

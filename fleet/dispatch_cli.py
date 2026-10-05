@@ -132,12 +132,15 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
             relaunch_code, message = lc.relaunch(t, settings, warn)
             code = code or relaunch_code
             emit(message)
+            if relaunch_code == 0:
+                push_notes.baseline(t)
     # Overnight queue: finish prep agents that stopped before the review pass looks at their
     # tickets, and start the next prep pass after it has moved new tickets into review.
     _prep_quietly(lambda: prep.finish(settings, clock.now(), emit, warn), warn)
-    if checks is not None:
-        checks(emit, warn)
+    if checks is not None:   # --watch only
+        # Notes first: an agent that has just finished must still get what the human added.
         push_notes.push(tk.list_tickets(), emit, warn)
+        checks(emit, warn)
     _prep_quietly(lambda: prep.maybe_start(settings, clock.now(), emit, warn, reserve), warn)
     lines, held = dp.ensure_investigations(tk.list_tickets(), warn)
     for line in lines:
@@ -157,6 +160,8 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
                 oncall_code, message = 1, f"{d.ticket['id']}  on-call launch failed: {exc}"
             code = code or oncall_code
             emit(message)
+            if oncall_code == 0:
+                push_notes.baseline(d.ticket)
             tickets = tk.list_tickets()   # the on-call ticket is claimed now: it holds its branch
             break
     # Investigations are read-only and don't compete with build work: one of
@@ -171,6 +176,8 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
             research_code, message = lc.launch_research(d, settings, warn)
             code = code or research_code
             emit(message)
+            if research_code == 0:
+                push_notes.baseline(d.ticket)
             started = True
             break
     decisions = dp.decide([t for t in tickets if t["id"] not in held], settings)
@@ -181,6 +188,8 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
                 return code
             build_code, message = lc.launch(d, settings, warn)
             emit(message)
+            if build_code == 0:
+                push_notes.baseline(d.ticket)
             return code or build_code
     if started:
         return code
