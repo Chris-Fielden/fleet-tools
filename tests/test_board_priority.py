@@ -35,6 +35,16 @@ def priority(tid: str) -> str:
 
 # --- ticket priority ----------------------------------------------------------
 
+def test_priority_command_accepts_any_case_id(kaneo):
+    tid = new_ticket()
+    for typed in (tid.lower(), tid.swapcase(), f" {tid.lower()} "):
+        r = run("priority", typed, "urgent")
+        assert r.returncode == 0, r.stderr
+        assert priority(tid) == "urgent"
+        assert run("priority", typed, "normal").returncode == 0
+        assert priority(tid) == "normal"
+
+
 def test_priority_command_sets_it_keeps_the_id_and_moves_the_card(kaneo):
     tid = new_ticket()
     r = run("priority", tid, "urgent")

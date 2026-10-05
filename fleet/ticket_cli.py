@@ -58,7 +58,7 @@ def _build_parser() -> argparse.ArgumentParser:
     approve.add_argument("id", type=tk.normalize_id)
 
     prio = sub.add_parser("priority", help="make an unfinished ticket urgent or normal (humans only)")
-    prio.add_argument("id")
+    prio.add_argument("id", type=tk.normalize_id)
     prio.add_argument("priority", choices=tk.PRIORITIES)
 
     close = sub.add_parser("close", help="close an open, claimed or in-review ticket (humans only)")
