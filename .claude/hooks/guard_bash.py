@@ -74,7 +74,7 @@ ENV_WRITE = re.compile(r"(>|>>|tee\s+(-a\s+)?)\s*\S*\.env(\.\S+)?(\s|$)")
 # settings or a path like bin/ or ~/.local/bin/.
 _CMD_START = r"(?:^|[;&|(\n`]|\$\()\s*(?:\w+=\S*\s+)*(?:\S*/)?"
 FLEET_HUMAN_ONLY = re.compile(_CMD_START + r"(idea|alert|dispatch|ship)(?=\s|$|[;&|)`])")
-TICKET_HUMAN_ONLY = re.compile(_CMD_START + r"(?:fleet\s+)?ticket\s+(close|approve|sync)\b")
+TICKET_HUMAN_ONLY = re.compile(_CMD_START + r"(?:fleet\s+)?ticket\s+(close|approve|sync|priority)\b")
 # Verbs of the `fleet` umbrella command that only the human runs: the old
 # human-only commands under their new names, plus everything that runs or
 # changes the fleet itself.
@@ -88,7 +88,7 @@ FLEET_PATH = re.compile(r"(^|[^\w.-])\.fleet(/|$|[\s'\";|&)])")
 
 
 HUMAN_ONLY_NAMES = {"idea", "alert", "dispatch", "ship"}
-TICKET_HUMAN_ONLY_SUBCOMMANDS = {"close", "approve", "sync"}
+TICKET_HUMAN_ONLY_SUBCOMMANDS = {"close", "approve", "sync", "priority"}
 # Programs that run another program: `env dispatch`, `command ship`, `sudo -u me idea`.
 WRAPPERS = {"env", "command", "exec", "nohup", "time", "setsid", "stdbuf", "sudo",
             "doas", "nice", "ionice", "timeout", "xargs", "builtin", "chronic", "unbuffer"}
