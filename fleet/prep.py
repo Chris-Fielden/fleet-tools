@@ -331,9 +331,12 @@ def holds_ping(t: dict, tickets: list[dict], settings: dict, now: datetime) -> b
     tip = tip_of(_repo(t, settings), t["branch"])
     if t["id"] in _busy(state) or f"{t['id']}:{tip}" in state["covered"]:
         return True
-    if _plan(tickets, settings, state, now)[0] and _can_launch(settings, state, now):
+    # Judge as if a running pass had finished: its tickets are waiting again, and a newcomer
+    # would then make the next pass due, which would lock it.
+    after = dict(state, jobs=[j for j in state["jobs"] if j["kind"] != "prep"])
+    if _plan(tickets, settings, after, now)[0] and _can_launch(settings, state, now):
         return True
-    return (not _past_prep_time(settings, now) and len(_waiting(tickets, settings, state)) >= 2
+    return (not _past_prep_time(settings, now) and len(_waiting(tickets, settings, after)) >= 2
             and _can_launch(settings, state, now))
 
 

@@ -162,3 +162,13 @@ def test_the_launch_limit_day_is_the_local_day_not_the_utc_day(q, env):
     state["limit_day"] = dp.local_day(evening, settings["timezone"])
     assert not prep._can_launch(settings, state, evening)
     assert prep._can_launch(settings, state, morning)              # the budget reset at local midnight
+
+
+def test_one_ticket_arriving_while_a_pass_runs_is_not_pinged_before_the_next_pass(q, herdr_log, env, ntfy, monkeypatch):
+    ready(q, monkeypatch, "task/one", {"one.txt": "1"})
+    ready(q, monkeypatch, "task/two", {"two.txt": "2"})
+    watch_cycle(THREE_PM)
+    assert agent_names(herdr_log) == ["prep"]
+    ready(q, monkeypatch, "task/late", {"late.txt": "x"})
+    watch_cycle(THREE_PM)
+    assert titles(ntfy) == []                                  # the two covered tickets plus this one make a pass
