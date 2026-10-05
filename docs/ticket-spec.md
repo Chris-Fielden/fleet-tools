@@ -144,6 +144,7 @@ ticket new --type TYPE --repo REPO --branch BRANCH --title TITLE
 ticket list [--status STATUS] [--repo REPO] [--json]
 ticket show ID [--json]
 ticket approve ID
+ticket priority ID normal|urgent
 ticket note ID TEXT
 ticket risk [ID] [--diff BASE...BRANCH] [--dir REPO]
 ticket risk ID --raise low|medium|high
@@ -242,6 +243,11 @@ alert REPO TEXT
   branch `task/alert-TIMESTAMP`, title and body as for `idea`. Its id is
   `EM-n`, and it starts `open`.
 - TEXT is all the remaining arguments joined with spaces.
+
+- `ticket priority ID normal|urgent` (humans only) sets the priority of a
+  proposed, open, claimed or in-review ticket. The id never changes (an `EM-`
+  prefix is only given at creation). Setting the priority a ticket already has
+  changes nothing. The card is mirrored to Kaneo afterwards.
 
 ## Dispatcher order
 

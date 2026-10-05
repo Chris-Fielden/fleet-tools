@@ -69,6 +69,10 @@ class Tracker(ABC):
         """Raise the stored risk level (never lowers it; humans only)."""
 
     @abstractmethod
+    def set_priority(self, ticket_id: str, priority: str) -> dict:
+        """urgent or normal, on an unfinished ticket (humans only)."""
+
+    @abstractmethod
     def close(self, ticket_id: str, outcome: str, note: str | None = None) -> dict:
         """done, failed or cancelled (humans only)."""
 
@@ -120,6 +124,9 @@ class LocalTracker(Tracker):
 
     def set_risk(self, ticket_id, level):
         return self._mirrored(tk.raise_risk(ticket_id, level))
+
+    def set_priority(self, ticket_id, priority):
+        return self._mirrored(tk.set_priority(ticket_id, priority))
 
     def close(self, ticket_id, outcome, note=None):
         return self._mirrored(tk.close_ticket(ticket_id, outcome, note))

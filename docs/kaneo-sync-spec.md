@@ -5,8 +5,9 @@ in the right column, so the human can watch the fleet in a browser.
 
 This is a **one-way mirror**. The local ticket store (`$FLEET_HOME/tickets`)
 stays the single source of truth, because that's where validation happens.
-Kaneo is a view. Nothing is ever read back from Kaneo into a ticket in this
-phase.
+Kaneo is a view. The one thing read back is priority: the watcher reads the
+Urgent column (see "Moving a card into Urgent" below). Nothing else is ever
+read back from Kaneo into a ticket.
 
 ## Ground rules
 
@@ -95,3 +96,18 @@ A later phase adds hook rules that block agents from reading anything under
 - `scripts/review.sh` has run and its verdict is PASS (fix any MUST FIX).
 - A short summary for the human: what was built, how it was tested, the
   review verdict, and the known gap above.
+
+## Moving a card into Urgent
+
+Each `--watch` cycle of the dispatcher, before it mirrors anything, reads the
+card of every proposed or open ticket. A human who dragged a card into Urgent
+makes that ticket's `priority` urgent; one who dragged an urgent open ticket's
+card out of Urgent makes it `normal` (the same as `ticket priority ID
+urgent|normal`; the ticket id is unchanged). The sync then mirrors the ticket,
+which moves the card to the column its status calls for.
+
+A card counts as dragged only if it is not in the column the last sync put it
+in (saved in `$FLEET_HOME/kaneo-placed.json`, ticket id to column slug). So a
+card the sync has not caught up with, because Kaneo was down when a priority was
+set, is never read as a drag. Kaneo trouble is a warning; `--once` and
+`--reconcile` never read the board.

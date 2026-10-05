@@ -179,7 +179,9 @@ Settings (see Settings above for the rest):
 
 ### `dispatch --watch`
 
-Repeats the `--once` steps every `watch_interval_seconds` until Ctrl+C, which
+Each cycle first reads the Kaneo board for cards a human dragged into or out
+of Urgent, and sets those tickets' priority (see docs/kaneo-sync-spec.md).
+Then it repeats the `--once` steps every `watch_interval_seconds` until Ctrl+C, which
 ends it cleanly with exit 0. It holds the single-instance lock for the whole
 time, so `--once` and a second `--watch` print the usual "another dispatch is
 already running" message and exit 0.

@@ -582,6 +582,28 @@ def approve_ticket(ticket_id: str) -> dict:
     return ticket
 
 
+def set_priority(ticket_id: str, priority: str) -> dict:
+    """Make an unfinished ticket urgent or normal. Humans only. The id (and its
+    prefix) never changes. Setting the priority it already has changes nothing."""
+    creator = current_creator()
+    if creator != "human":
+        raise TicketError(f"only a human can set a ticket's priority (running as {creator})")
+    if priority not in PRIORITIES:
+        raise TicketInvalid([f"priority must be one of: {', '.join(PRIORITIES)}"])
+    if not ID_RE.fullmatch(ticket_id):
+        raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
+    with _locked():
+        ticket = load_ticket(ticket_id)
+        if ticket["status"] not in ACTIVE_STATUSES:
+            raise TicketError(f"{ticket_id} is {ticket['status']}; its priority can no longer change")
+        if ticket.get("priority", "normal") == priority:
+            return ticket
+        ticket["priority"] = priority
+        ticket["updated_at"] = _now()
+        _write_atomic(_ticket_path(ticket_id), ticket)
+    return ticket
+
+
 _KEEP = object()
 
 
