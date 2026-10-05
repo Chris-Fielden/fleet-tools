@@ -187,3 +187,15 @@ def test_a_reconciled_ticket_is_not_pinged_when_a_pass_over_it_and_a_waiting_tic
     set_agent_status(env, f"prep-{b['id'].lower()}", "idle")
     finish_prep(dp.load_settings())
     assert titles(ntfy) == []
+
+
+def test_no_pass_is_predicted_for_waiting_tickets_that_an_earlier_pass_already_covered(q, herdr_log, env, ntfy, monkeypatch):
+    for name in ("one", "two"):
+        ready(q, monkeypatch, f"task/{name}", {f"{name}.txt": name})
+    settings = dp.load_settings()
+    state = prep._load()
+    before_prep_time = datetime(2026, 10, 3, 17, 0, tzinfo=timezone.utc)   # 10:00 Pacific
+    tickets = tk.list_tickets()
+    assert prep._pass_follows(tickets, settings, state, before_prep_time)  # two fresh tickets: a pass is coming
+    state["covered"] = [f"{t['id']}:{prep.tip_of(q, t['branch'])}" for t in tickets if t["status"] == "review"]
+    assert not prep._pass_follows(tickets, settings, state, before_prep_time)   # all covered: none will follow
