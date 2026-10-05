@@ -47,7 +47,7 @@ from . import ticket as tk
 from . import webconf
 
 ROOT = Path(__file__).resolve().parent.parent
-PATH_RE = re.compile(r"/(approve|ship)/(" + tk.ID_RE.pattern + r")", re.IGNORECASE)
+PATH_RE = re.compile(r"/(approve|ship)/((?i:" + tk.ID_RE.pattern + r"))")
 MAX_FORM = 4096
 WHOIS_TIMEOUT = 10
 

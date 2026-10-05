@@ -103,8 +103,10 @@ elif [[ "$risk" == "high" ]]; then
   echo "HIGH RISK change."
   echo "Type the ticket id ($confirm_word) to merge $branch into $base:"
   read -r answer
-  # Case does not matter: 'Bd-36' confirms BD-36.
-  [[ "${answer^^}" == "${confirm_word^^}" ]] || { echo "Cancelled. Nothing changed."; exit 0; }
+  # Case and surrounding spaces do not matter: 'Bd-36' confirms BD-36. (tr, not ${x^^}: macOS bash is 3.2.)
+  typed="$(printf '%s' "$answer" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
+  wanted="$(printf '%s' "$confirm_word" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
+  [[ "$typed" == "$wanted" ]] || { echo "Cancelled. Nothing changed."; exit 0; }
 else
   read -r -p "Merge $branch into $base? [y/N] " answer
   [[ "$answer" =~ ^[Yy]$ ]] || { echo "Cancelled. Nothing changed."; exit 0; }

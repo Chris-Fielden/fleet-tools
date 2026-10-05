@@ -438,3 +438,8 @@ def test_web_paths_accept_any_case_of_the_ticket_id(endpoint, rig):
     reviewed(rig.wt, rig.repo)
     status, page = call(endpoint, f"/ship/{rig.t['id'].lower()}")
     assert status == 200 and rig.t["id"] in page
+
+
+def test_web_action_word_stays_case_sensitive(endpoint, rig):
+    status, _ = call(endpoint, f"/SHIP/{rig.t['id']}")
+    assert status == 404
