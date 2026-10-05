@@ -4,6 +4,8 @@ Tools for the agent fleet: tickets and the dispatcher.
 
 ## One command: `fleet <verb>`
 
+`ship ID` at a terminal asks every confirmation first (at high risk, the ticket ID, in any letter case), then runs the checks, merge and push as a detached background job that survives the terminal closing or the laptop sleeping. The terminal shows the job's log while it stays open; the log is `$FLEET_HOME/ship/ID.log`, `ship --status ID` shows progress or the result later, one ntfy ping reports shipped or why not, and a second ship of the same ticket is refused while one runs. Without a terminal, `ship` runs in the foreground as before.
+
 `fleet help` lists every verb. Besides the ones below, `fleet ship ID`, `fleet ticket ARGS`, `fleet approve ID` (same as `ticket approve`), `fleet alert REPO TEXT` and `fleet idea TEXT` do exactly what `ship`, `ticket`, `alert` and `idea` do; those four keep working unchanged as aliases. Agents are blocked from the human-only verbs by the guard hook under both names (`fleet ship`, `fleet approve`, `fleet ticket approve|close|sync`, `fleet alert`, `fleet idea`, `fleet start|stop|restart|autostart|launcher|ops`).
 
 - `fleet ops`: opens or reattaches a persistent tmux session named `fleet` with two windows: `ops` (a shell for fleet commands; its prompt starts with a bright red `[LOIC ops]` so it cannot be mistaken for the Mac or an agent tab) and `herdr` (herdr attached read-only, for watching; it runs in a detached `fleet-herdr` tmux session and the window attaches with `tmux attach -r`, which ignores keys). Agents are spoken to only through ticket notes (`ticket note`), never by typing into herdr. Needs tmux; if it is missing, run `sudo apt install -y tmux` (it is not installed for you).
