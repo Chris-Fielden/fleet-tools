@@ -175,7 +175,7 @@ def test_other_node_with_confirmation_ships_in_the_background_and_pings(endpoint
     status, body = confirm(endpoint, f"/ship/{rig.t['id']}")
     assert status == 202 and "close this page" in body
     assert wait_for(lambda: tk.load_ticket(rig.t["id"])["status"] == "done")
-    assert rig.log.read_text().strip() == f"{rig.repo.resolve()}|demo|y"
+    assert rig.log.read_text().strip() == f"{rig.repo.resolve()}|demo --ticket {rig.t['id']}|y"
     assert list((Path(os.environ["FLEET_HOME"]) / "web").glob(f"ship-{rig.t['id']}-*.log"))
     assert wait_for(lambda: len(ntfy.requests) == 1)
     (ping,) = ntfy.requests
@@ -206,7 +206,7 @@ def test_high_risk_needs_the_typed_id(endpoint, rig, ntfy):
     assert confirm(endpoint, path, typed=rig.t["id"].lower())[0] == 202   # case-insensitive
     assert wait_for(lambda: tk.load_ticket(rig.t["id"])["status"] == "done")
     # finish-task's own prompt is answered with the ticket id, as at a terminal
-    assert rig.log.read_text().strip().endswith(f"|demo|{rig.t['id']}")
+    assert rig.log.read_text().strip().endswith(f"|demo --ticket {rig.t['id']}|{rig.t['id']}")
 
 
 def test_high_risk_with_only_one_reviewer_refuses(endpoint, rig):

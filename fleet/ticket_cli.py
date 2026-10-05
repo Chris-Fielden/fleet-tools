@@ -15,6 +15,7 @@ from . import notify
 from . import risk as rk
 from . import settings as st
 from . import ticket as tk
+from . import ticketcost as tc
 from . import tracker as tr
 
 
@@ -56,6 +57,10 @@ def _build_parser() -> argparse.ArgumentParser:
     approve = sub.add_parser("approve", help="approve a proposed ticket (humans only)")
     approve.add_argument("id", type=tk.normalize_id)
 
+    prio = sub.add_parser("priority", help="make an unfinished ticket urgent or normal (humans only)")
+    prio.add_argument("id")
+    prio.add_argument("priority", choices=tk.PRIORITIES)
+
     close = sub.add_parser("close", help="close an open, claimed or in-review ticket (humans only)")
     close.add_argument("id", type=tk.normalize_id)
     outcome = close.add_mutually_exclusive_group(required=True)
@@ -92,7 +97,9 @@ def _build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--dir", default=".", help="the git repo (default: here)")
     gate.add_argument("--repo", help="only tickets filed against this repo name count")
     gate.add_argument("--worktree", required=True, help="the task worktree holding .reviews/")
-    gate.add_argument("--field", choices=("risk", "confirm", "ok", "reviews"),
+    gate.add_argument("--ticket", help="the ticket being shipped: it must be on this branch, and its id "
+                                       "is the word to type")
+    gate.add_argument("--field", choices=("risk", "confirm", "ok", "reviews", "others"),
                       help="print just one value instead of the report")
 
     sub.add_parser("dupes", help="list likely duplicate tickets: shared branch or similar title")
@@ -186,6 +193,14 @@ def _cmd_list(args) -> int:
     return 0
 
 
+def _usage_line(t: dict) -> str:
+    """Token use from the local session files; never stops `ticket show`."""
+    try:
+        return tc.usage_line(tc.for_ticket(t))
+    except Exception:   # noqa: BLE001 - informational only
+        return "unavailable"
+
+
 def _cmd_show(args) -> int:
     t = _tracker().show(args.id)
     if args.json:
@@ -196,6 +211,7 @@ def _cmd_show(args) -> int:
                  "created_by", "assignee", "verdict", "close_note", "base_commit", "created_at", "updated_at"):
         value = tk.verdict_line(t.get(name)) if name == "verdict" else t.get(name)
         print(f"  {name + ':':<12} {'-' if value is None else value}")
+    print(f"  {'usage:':<12} {_usage_line(t)}")
     print()
     print(t["body"])
     for n in t.get("notes", []):
@@ -207,6 +223,12 @@ def _cmd_show(args) -> int:
 def _cmd_approve(args) -> int:
     t = _tracker().approve(args.id)
     print(f"{t['id']} approved (now {t['status']})")
+    return 0
+
+
+def _cmd_priority(args) -> int:
+    t = _tracker().set_priority(args.id, args.priority)
+    print(f"{t['id']} priority is {t.get('priority', 'normal')}")
     return 0
 
 
@@ -328,12 +350,25 @@ def _gate(args) -> dict:
     full = rk._git(args.dir, "rev-parse", "--verify", f"{args.branch}^{{commit}}").strip()
     reviews = rk.latest_reviews(Path(args.worktree) / ".reviews", full)
     problems = rk.check_reviews(reviews, level)
-    # The ticket whose id is typed to confirm: the highest-risk one on the branch.
+    # The ticket whose id is typed to confirm: the one being shipped, else the highest-risk one
+    # on the branch.
     best = max((t for t in tickets if t["id"] in ids),
                key=lambda t: rk.rank(rk.stored_level(t, rules)), default=None)
+    others = []
+    if args.ticket:
+        mine = next((t for t in tickets if t["id"] == args.ticket), None)
+        if mine is None:
+            raise tk.TicketError(f"no such ticket: {args.ticket}")
+        if mine["branch"] != args.branch or (args.repo and mine["repo"] != args.repo):
+            raise tk.TicketError(f"{mine['id']} is on {mine['repo']} {mine['branch']}, "
+                                 f"not {args.branch}")
+        best = mine
+        others = [t for t in tickets if t["id"] in ids and t["id"] != mine["id"]
+                  and t["status"] != "done"]
     return {"level": level, "diff_level": diff_level, "stored": stored, "ids": ids, "rows": rows,
             "commit": full, "reviews": reviews, "problems": problems,
-            "confirm": best["id"] if best else args.branch.removeprefix("task/")}
+            "confirm": best["id"] if best else args.branch.removeprefix("task/"),
+            "others": [f"{t['id']} ({t['status']}) {t['title']}" for t in others]}
 
 
 def _cmd_gate(args) -> int:
@@ -342,6 +377,8 @@ def _cmd_gate(args) -> int:
         print(g["level"])
     elif args.field == "confirm":
         print(g["confirm"])
+    elif args.field == "others":
+        print("\n".join(g["others"]))
     elif args.field == "ok":
         print("yes" if not g["problems"] else "no")
     elif args.field == "reviews":
@@ -380,7 +417,7 @@ def _cmd_sync(args) -> int:
 def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
     handler = {"new": _cmd_new, "list": _cmd_list, "show": _cmd_show, "approve": _cmd_approve,
-               "close": _cmd_close, "note": _cmd_note, "review-result": _cmd_review_result, "risk": _cmd_risk, "gate": _cmd_gate,
+               "priority": _cmd_priority, "close": _cmd_close, "note": _cmd_note, "review-result": _cmd_review_result, "risk": _cmd_risk, "gate": _cmd_gate,
                "dupes": _cmd_dupes, "sync": _cmd_sync}
     try:
         return handler[args.command](args)

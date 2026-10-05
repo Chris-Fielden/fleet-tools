@@ -74,14 +74,21 @@ ENV_WRITE = re.compile(r"(>|>>|tee\s+(-a\s+)?)\s*\S*\.env(\.\S+)?(\s|$)")
 # settings or a path like bin/ or ~/.local/bin/.
 _CMD_START = r"(?:^|[;&|(\n`]|\$\()\s*(?:\w+=\S*\s+)*(?:\S*/)?"
 FLEET_HUMAN_ONLY = re.compile(_CMD_START + r"(idea|alert|dispatch|ship)(?=\s|$|[;&|)`])")
-TICKET_HUMAN_ONLY = re.compile(_CMD_START + r"ticket\s+(close|approve|sync)\b")
+TICKET_HUMAN_ONLY = re.compile(_CMD_START + r"(?:fleet\s+)?ticket\s+(close|approve|sync|priority)\b")
+# Verbs of the `fleet` umbrella command that only the human runs: the old
+# human-only commands under their new names, plus everything that runs or
+# changes the fleet itself.
+FLEET_HUMAN_VERBS = {"ship", "approve", "alert", "idea", "dispatch", "start", "stop", "restart",
+                     "autostart", "launcher", "ops", "status-serve"}
+FLEET_VERB_HUMAN_ONLY = re.compile(
+    _CMD_START + r"fleet\s+(" + "|".join(sorted(FLEET_HUMAN_VERBS)) + r")(?=\s|$|[;&|)`])")
 # Any mention of the .fleet folder as a path: ~/.fleet, $HOME/.fleet,
 # /home/<you>/.fleet, or a bare .fleet when standing in the home folder.
 FLEET_PATH = re.compile(r"(^|[^\w.-])\.fleet(/|$|[\s'\";|&)])")
 
 
 HUMAN_ONLY_NAMES = {"idea", "alert", "dispatch", "ship"}
-TICKET_HUMAN_ONLY_SUBCOMMANDS = {"close", "approve", "sync"}
+TICKET_HUMAN_ONLY_SUBCOMMANDS = {"close", "approve", "sync", "priority"}
 # Programs that run another program: `env dispatch`, `command ship`, `sudo -u me idea`.
 WRAPPERS = {"env", "command", "exec", "nohup", "time", "setsid", "stdbuf", "sudo",
             "doas", "nice", "ionice", "timeout", "xargs", "builtin", "chronic", "unbuffer"}
@@ -218,7 +225,7 @@ def _is_ancestor_of_fleet(path):
 
 MAX_PLACES = 16  # more possible folders than this and we stop guessing
 MAX_DEPTH = 6
-FLEET_WORDS = re.compile(r"\b(idea|alert|dispatch|ship|ticket)\b|\.fleet")
+FLEET_WORDS = re.compile(r"\b(idea|alert|dispatch|ship|ticket|fleet)\b|\.fleet")
 _SUB = re.compile("\x01(\\d+)\x01")
 
 
@@ -366,13 +373,19 @@ def scan_command(command, places, depth=0, cwd_known=True):
             if reason:
                 return reason
             continue
+        prefix = ""
+        if name == "fleet" and args:   # `fleet <verb>` is `<verb>`, `fleet ticket close` is `ticket close`
+            if args[0] in FLEET_HUMAN_VERBS:
+                return ("human", f"fleet {args[0]}")
+            if args[0] == "ticket":
+                name, args, prefix = "ticket", args[1:], "fleet "
         if name in HUMAN_ONLY_NAMES:
             return ("human", name)
         if name == "ticket" and args and args[0] in TICKET_HUMAN_ONLY_SUBCOMMANDS:
-            return ("human", f"ticket {args[0]}")
+            return ("human", f"{prefix}ticket {args[0]}")
         if name == "ticket" and args and args[0] == "risk" and any(
                 a.startswith("--rai") for a in args[1:]):
-            return ("human", "ticket risk --raise")
+            return ("human", f"{prefix}ticket risk --raise")
         if name in ("cd", "pushd"):
             rest = list(args)
             while rest and rest[0].startswith("-") and rest[0] != "-" and not (
@@ -467,9 +480,11 @@ def main():
         deny("Don't write .env files. Secrets never go in the repo; ask the human "
              "to put real values in place.")
     found = scan_command(command, [cwd])
-    m = FLEET_HUMAN_ONLY.search(command) or TICKET_HUMAN_ONLY.search(command)
+    m = (FLEET_HUMAN_ONLY.search(command) or TICKET_HUMAN_ONLY.search(command)
+         or FLEET_VERB_HUMAN_ONLY.search(command))
     if (found and found[0] == "human") or m:
         what = found[1] if found and found[0] == "human" else (
+            f"fleet {m.group(1)}" if m.re is FLEET_VERB_HUMAN_ONLY else
             m.group(1) if m.re is FLEET_HUMAN_ONLY else f"ticket {m.group(1)}")
         deny(f"Only the human runs `{what}`. If you have an idea or found an urgent "
              "problem, say so in your summary, or file a proposal with `ticket new`. "

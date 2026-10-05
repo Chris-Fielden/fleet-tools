@@ -14,6 +14,7 @@ from . import kaneo
 from . import launch as lc
 from . import notify
 from . import prep
+from . import push_notes
 from . import review_watch
 from . import ticket as tk
 
@@ -53,6 +54,27 @@ def _cmd_dry_run(settings: dict) -> int:
         else:
             dp.log("DECISION", d.line())
     return 0
+
+
+def _pull_board_priorities(emit, warn) -> None:
+    """A human dragged a card into (or out of) Urgent on the Kaneo board: make the
+    ticket urgent (or normal) and mirror it. Kaneo trouble is only a warning."""
+    try:
+        moves = list(kaneo.pull_priorities(tk.list_tickets()))
+    except kaneo.NotConfigured:
+        return
+    except (kaneo.KaneoError, tk.TicketError, tk.TicketInvalid, OSError) as exc:
+        warn(f"board priorities not read: {exc}")
+        return
+    for ticket_id, priority in moves:
+        try:
+            t = tk.set_priority(ticket_id, priority)
+        except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+            warn(f"{ticket_id} priority not set from the board: {exc}")
+            continue
+        emit(f"{ticket_id}  priority {priority} (moved on the board)")
+        dp.log("PRIORITY", f"{ticket_id} {priority} from the board")
+        kaneo.mirror_quietly(t, warn)
 
 
 def _reconcile(settings: dict, emit, warn) -> None:
@@ -111,13 +133,21 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     the alert pings. `clock` is the time source for the prep pass (default: real time)."""
     code = 0
     clock = clock or dp.Clock()
+    if checks is not None:   # --watch only; before anything mirrors, or a mirror would undo the drag
+        _pull_board_priorities(emit, warn)
     _reconcile(settings, emit, warn)
     if retry_tabs is not None:
         done = {t["id"] for t in tk.list_tickets() if t["status"] == "done"}
         kept = [i for i in retry_tabs.poll() if i in done]
         for ticket_id, reason in lc.retry_kept_tabs(kept, settings, warn):
             emit(f"{ticket_id}  tab closed: {reason}")
-    for t in lc.finish_investigations(tk.list_tickets(), warn):
+    prompted: set[str] = set()
+    if checks is not None:   # --watch only
+        # Notes go first, before anything below decides that an idle agent has finished.
+        prompted = push_notes.push(tk.list_tickets(), emit, warn)
+    for ticket_id, reason in lc.sweep_tabs(settings, warn):
+        emit(f"{ticket_id}  stale tab swept: {reason}")
+    for t in lc.finish_investigations([t for t in tk.list_tickets() if t["id"] not in prompted], warn):
         emit(f"{t['id']}  investigation {t['status']}")
         kaneo.mirror_quietly(t, warn)
         notify.notify_quietly(t, "failed" if t["status"] == "failed" else "investigated", warn)
@@ -133,8 +163,11 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     # tickets, and start the next prep pass after it has moved new tickets into review.
     _prep_quietly(lambda: prep.finish(settings, clock.now(), emit, warn), warn)
     if checks is not None:
-        checks(emit, warn)
+        checks(emit, warn, prompted)
     _prep_quietly(lambda: prep.maybe_start(settings, clock.now(), emit, warn, reserve), warn)
+    lines, held = dp.ensure_investigations(tk.list_tickets(), warn)
+    for line in lines:
+        emit(line)
     tickets = tk.list_tickets()
     # The on-call agent has its own slot: it starts at once, whatever the normal
     # queue is doing, and never counts against the daily launch limit.
@@ -150,6 +183,8 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
                 oncall_code, message = 1, f"{d.ticket['id']}  on-call launch failed: {exc}"
             code = code or oncall_code
             emit(message)
+            if oncall_code == 0:
+                push_notes.baseline(d.ticket)
             tickets = tk.list_tickets()   # the on-call ticket is claimed now: it holds its branch
             break
     # Investigations are read-only and don't compete with build work: one of
@@ -164,9 +199,11 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
             research_code, message = lc.launch_research(d, settings, warn)
             code = code or research_code
             emit(message)
+            if research_code == 0:
+                push_notes.baseline(d.ticket)
             started = True
             break
-    decisions = dp.decide(tickets, settings)
+    decisions = dp.decide([t for t in tickets if t["id"] not in held], settings)
     for d in decisions:
         if d.eligible:
             if reserve is not None and not reserve():
@@ -174,6 +211,8 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
                 return code
             build_code, message = lc.launch(d, settings, warn)
             emit(message)
+            if build_code == 0:
+                push_notes.baseline(d.ticket)
             return code or build_code
     if started:
         return code
@@ -259,8 +298,8 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None) -> int:
         while True:
             lines: list[str] = []
             try:
-                def checks(emit, warn):
-                    review_watch.check(settings, clock.now(), emit, warn)
+                def checks(emit, warn, skip=frozenset()):
+                    review_watch.check(settings, clock.now(), emit, warn, skip)
                 _cycle(settings, lines.append, lambda m: lines.append(f"warning: {m}"), reserve=reserve,
                        retry_tabs=kept_tabs, checks=checks, clock=clock)
             except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:

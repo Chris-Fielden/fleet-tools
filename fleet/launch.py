@@ -784,6 +784,49 @@ def _close_tab_in(ticket_id: str, tabs: list[dict], agents: list[dict],
     return True, f"tab {tab['tab_id']} (agent {state})", tab["tab_id"]
 
 
+SWEEP_STATUSES = ("done", "failed", "cancelled")
+SWEEP_SKIP_WORKSPACES = ("fleet-tools",)   # the dispatch tab lives there (service.TOOLS_WORKSPACE)
+
+
+def sweep_tabs(settings: dict, warn=lambda m: None) -> list[tuple[str, str]]:
+    """Close the stale tabs of the agents workspace: the tab holding the own agent
+    (named after the ticket) of a ticket that is done, failed or cancelled (a done
+    investigation included), found through a tab labelled with the ticket id, even a
+    focused one. Never a tab of a claimed, open or in-review ticket, a tab that is not
+    labelled with a ticket id (the workspace's base tab), a tab that only carries the
+    label with no such agent in it (it may be a human's), a tab with an agent still
+    working or blocked, or anything outside herdr_workspace (never fleet-tools).
+    Returns (ticket id, reason) per tab closed and logs TAB_SWEPT for each."""
+    if settings["herdr_workspace"] in SWEEP_SKIP_WORKSPACES:
+        return []
+    status = {t["id"]: t["status"] for t in tk.list_tickets()}
+    if not any(s in SWEEP_STATUSES for s in status.values()):
+        return []   # nothing could be stale: do not bother herdr
+    try:
+        tabs, agents = _herdr_tabs(settings)
+    except LaunchError as exc:
+        warn(f"tab sweep: herdr could not be asked ({exc})")
+        return []
+    swept = []
+    for tab in list(tabs):
+        label = tab.get("label")
+        if not isinstance(label, str) or status.get(label) not in SWEEP_STATUSES:
+            continue
+        if swept:   # a tab closed before this one may have been the focus target: ask again
+            try:
+                tabs, agents = _herdr_tabs(settings)
+            except LaunchError as exc:
+                warn(f"tab sweep: herdr could not be asked ({exc})")
+                break
+        # Ownership is the ticket's own agent living in the tab: a tab that only carries
+        # the label (a human's shell or editor reusing it) is never closed.
+        closed, reason, _ = _close_tab_in(label, tabs, agents, by_label=False)
+        if closed:
+            _safe_log("TAB_SWEPT", f"{label} ({status[label]}) {reason}")
+            swept.append((label, reason))
+    return swept
+
+
 def lost_agents(tickets: list[dict], warn) -> list[dict]:
     """Claimed build or fix tickets whose herdr agent is no longer listed: the
     tab died and the ticket stays claimed, blocking the queue. If herdr cannot
@@ -800,13 +843,15 @@ def lost_agents(tickets: list[dict], warn) -> list[dict]:
     return [t for t in sorted(claimed, key=tk.oldest_first_key) if t["id"].lower() not in names]
 
 
-def relaunch(t: dict, settings: dict, warn) -> tuple[int, str]:
-    """Start a new agent for a claimed ticket in its existing task folder. The
-    ticket stays claimed whether or not this works."""
+def relaunch(t: dict, settings: dict, warn, prompt: str | None = None, why: str = "") -> tuple[int, str]:
+    """Start a new agent for a claimed ticket in its existing task folder, with
+    the standard prompt or the given one. The ticket stays claimed whether or
+    not this works. `why` is added to the RELAUNCHED log line."""
     repo = settings["projects_dir"] / t["repo"]
     name = t["branch"].removeprefix("task/")
     d = dp.Decision(ticket=t, name=name, repo_path=repo, agent=t["assignee"],
-                    model=settings["models"].get(t["assignee"]), oncall=bool(t.get("oncall")))
+                    model=settings["models"].get(t["assignee"]), oncall=bool(t.get("oncall")),
+                    prompt=prompt)
     folder = repo / ".worktrees" / name
     try:
         if repo.resolve().parent != settings["projects_dir"].resolve():
@@ -814,6 +859,10 @@ def relaunch(t: dict, settings: dict, warn) -> tuple[int, str]:
         if not folder.exists():
             raise LaunchError(f"task folder {d.worktree} is gone")
         check_reusable(d, folder)
+        try:
+            read_by_agent = tk.load_ticket(t["id"])   # before the start: a later note must still be sent
+        except (tk.TicketError, tk.TicketInvalid):
+            read_by_agent = t
         tab = start_agent(d, folder, ensure_workspace(settings["herdr_workspace"]), warn)
     except AgentMayBeRunning as exc:
         _safe_log("RELAUNCH_FAILED", f"{t['id']} {exc}")
@@ -821,5 +870,7 @@ def relaunch(t: dict, settings: dict, warn) -> tuple[int, str]:
     except (LaunchError, OSError, subprocess.TimeoutExpired) as exc:
         _safe_log("RELAUNCH_FAILED", f"{t['id']} {exc}")
         return 1, f"{t['id']}  relaunch failed: {exc}; ticket stays claimed"
-    _safe_log("RELAUNCHED", f"{t['id']} {d.agent} ({d.model or 'default'}) tab {tab} in {d.worktree}")
+    from . import push_notes   # here, not at the top: push_notes imports this module
+    push_notes.baseline(read_by_agent, overwrite=True)   # the new agent read every note up to here
+    _safe_log("RELAUNCHED", f"{t['id']} {d.agent} ({d.model or 'default'}) tab {tab} in {d.worktree}{why}")
     return 0, f"{t['id']}  relaunched {d.agent} ({d.model or 'default'}) in tab {tab}"

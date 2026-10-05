@@ -2,7 +2,12 @@
 # HUMAN ONLY. Merge a finished task into main, then clean up.
 # (Agents are blocked from running this by .claude/hooks/guard_bash.py.)
 #
-# Usage:  scripts/finish-task.sh <task-name>
+# Usage:  scripts/finish-task.sh <task-name> [--ticket ID] [--emergency "reason"]
+#
+# --ticket ID (which `ship` always passes): the ticket being merged. It must be on
+# this branch, its id is what you type at the HIGH RISK prompt, and any other
+# unfinished tickets sharing the branch are listed first, because merging the
+# branch merges their work too. Without it the highest-risk ticket on the branch is asked for.
 #
 # Steps: re-run the checks in the task worktree, check the risk level and that
 # the exact commit has a PASS review (high risk: from both Codex and Claude),
@@ -18,18 +23,22 @@ set -euo pipefail
 
 name=""
 emergency=""
+ticket=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --emergency)
       [[ -n "${2:-}" ]] || { echo "--emergency needs a reason in quotes."; exit 1; }
       emergency="$2"; shift 2 ;;
+    --ticket)
+      [[ -n "${2:-}" ]] || { echo "--ticket needs a ticket id."; exit 1; }
+      ticket="$2"; shift 2 ;;
     -*) echo "Unknown option $1"; exit 1 ;;
     *) [[ -z "$name" ]] || { echo "Only one task name, please."; exit 1; }
        name="$1"; shift ;;
   esac
 done
 if [[ -z "$name" ]]; then
-  echo "Usage: scripts/finish-task.sh <task-name> [--emergency \"reason\"]"
+  echo "Usage: scripts/finish-task.sh <task-name> [--ticket ID] [--emergency \"reason\"]"
   exit 1
 fi
 # The ticket tool: FLEET_TICKET if set, else `ticket` on PATH.
@@ -68,6 +77,20 @@ tip="$(git rev-parse --verify "$branch^{commit}")"
 gate_args=(gate --base "$base" --branch "$branch" --dir "$root" --worktree "$wt" --repo "$(basename "$root")")
 override_reason=""
 gate_ok=1
+if [[ -n "$ticket" ]]; then
+  gate_args+=(--ticket "$ticket")
+  # A ticket that is not on this branch is never merged, emergency or not: the gate says why.
+  others_err="$($ticket_cmd "${gate_args[@]}" --field others 2>&1 >/dev/null || true)"
+  if [[ -n "$others_err" ]]; then
+    echo "NOT MERGING: $others_err"
+    exit 1
+  fi
+  others="$($ticket_cmd "${gate_args[@]}" --field others 2>/dev/null || true)"
+  if [[ -n "$others" ]]; then
+    echo "WARNING: merging $branch also merges the work of these unfinished tickets on it:"
+    while IFS= read -r line; do echo "  $line"; done <<< "$others"
+  fi
+fi
 $ticket_cmd "${gate_args[@]}" || gate_ok=0
 risk="$($ticket_cmd "${gate_args[@]}" --field risk 2>/dev/null || true)"
 confirm_word="$($ticket_cmd "${gate_args[@]}" --field confirm 2>/dev/null || true)"

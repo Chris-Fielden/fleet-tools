@@ -50,7 +50,7 @@ def test_merges_through_finish_task_and_marks_done(shipping, monkeypatch, capsys
     monkeypatch.setenv("FAKE_MERGE", "1")
     assert ship_main([t["id"]]) == 0
     # run from the repo's main checkout, with the task name and nothing else
-    assert log.read_text().strip() == f"{repo.resolve()}|demo"
+    assert log.read_text().strip() == f"{repo.resolve()}|demo --ticket {t['id']}"
     assert tk.load_ticket(t["id"])["status"] == "done"
     assert f"{t['id']} merged and marked done" in capsys.readouterr().out
 
@@ -358,3 +358,12 @@ def test_ship_accepts_a_lowercase_or_mixed_case_id(shipping, monkeypatch, capsys
 def test_ship_lowercase_unknown_id_is_still_refused(shipping, capsys):
     assert ship_main(["zz-999"]) == 1
     assert "no such ticket: ZZ-999" in capsys.readouterr().err
+
+
+def test_ship_passes_its_own_ticket_when_several_share_the_branch(shipping, monkeypatch):
+    repo, t, log = shipping
+    newer = [mk(title=f"Newer {w}")["id"] for w in ("quartz harbour", "mellow zebra")]
+    monkeypatch.setenv("FAKE_MERGE", "1")
+    assert ship_main([t["id"]]) == 0
+    assert log.read_text().strip().endswith(f"|demo --ticket {t['id']}")
+    assert t["id"] not in newer
