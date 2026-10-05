@@ -86,6 +86,20 @@ def cards_path() -> Path:
     return tk.fleet_home() / "kaneo-cards.json"
 
 
+def placed_path() -> Path:
+    """Where the sync last put each card (ticket id -> column slug), so a card a
+    human dragged somewhere else can be told apart from one we have not moved yet."""
+    return tk.fleet_home() / "kaneo-placed.json"
+
+
+def _load_placed() -> dict:
+    try:
+        data = json.loads(placed_path().read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def card_url(ticket_id: str) -> str | None:
     """The browser address of a ticket's Kaneo card, as saved by the last sync
     that touched it; None when there is no card yet. Holds no secret."""
@@ -298,6 +312,7 @@ class _Board:
         self._projects: dict[str, str | None] = {}
         self._columns: dict[str, dict[str, dict]] = {}
         self.card_urls: dict[str, str] = {}   # ticket id -> card address seen this run
+        self.placed: dict[str, str] = {}      # ticket id -> column slug the card is in after this run
 
     def note_card(self, ticket_id: str, project_id: str, task_id: str) -> None:
         # The path Kaneo's web app opens a card at.
@@ -420,6 +435,7 @@ def _mirror_card(t: dict, board: _Board, tasks: dict, dry_run: bool) -> str:
             "title": title, "description": desc, "priority": card_priority(t), "status": slug})
         tasks[t["id"]] = made["id"]
         board.note_card(t["id"], pid, made["id"])
+        board.placed[t["id"]] = slug
         return "created"
 
     board.note_card(t["id"], pid, tasks[t["id"]])
@@ -427,6 +443,7 @@ def _mirror_card(t: dict, board: _Board, tasks: dict, dry_run: bool) -> str:
             and existing.get("title") == title
             and existing.get("description") == desc and existing.get("status") == slug
             and existing.get("priority") == card_priority(t)):
+        board.placed[t["id"]] = slug
         return "unchanged"
     if dry_run:
         return verb("update")
@@ -435,6 +452,7 @@ def _mirror_card(t: dict, board: _Board, tasks: dict, dry_run: bool) -> str:
         "priority": card_priority(t),
         "status": slug, "projectId": pid,
         "position": existing.get("position") or 0})
+    board.placed[t["id"]] = slug
     return "updated"
 
 
@@ -539,6 +557,56 @@ def _save_card_urls(found: dict) -> None:
         pass
 
 
+def _save_placed(found: dict) -> None:
+    """Remember each card's column after a sync. Best effort, under the sync lock."""
+    if not found:
+        return
+    try:
+        have = _load_placed()
+        merged = {**have, **found}
+        if merged != have:
+            tk._write_atomic(placed_path(), merged)
+    except OSError:
+        pass
+
+
+def pull_priorities(tickets: list[dict]):
+    """Read the board back for priorities (the one thing a human may change
+    there). Yields (ticket_id, new_priority) for each proposed or open ticket
+    whose card a human dragged into Urgent (it becomes urgent), or out of Urgent
+    (an urgent open ticket becomes normal). A card counts as moved only if it is
+    not where the last sync put it, so a card the sync has not caught up with
+    (Kaneo was down) is never read as a drag. Read-only: the caller sets the
+    priority and mirrors. Raises NotConfigured / KaneoError for setup problems."""
+    client = Client(load_config())
+    board = _Board(client, create=False)
+    with _map_locked():
+        tasks = _load_map()
+        placed = _load_placed()
+    for t in tickets:
+        task_id = tasks.get(t["id"])
+        if task_id is None or t["status"] not in ("proposed", "open"):
+            continue
+        try:
+            pid = board.project_id(t["repo"])
+            urgent = None if pid is None else board._columns_of(pid).get("urgent")
+            card = client.request("GET", f"/task/{task_id}", query={"view": "detail"})
+            if urgent is None or card.get("projectId") != pid:
+                continue
+            slug, last = card.get("status"), placed.get(t["id"])
+            if slug == last:
+                continue
+            if slug == urgent["slug"] and not is_urgent(t):
+                yield t["id"], "urgent"
+            elif last == urgent["slug"] and is_urgent(t) and t["status"] == "open":
+                yield t["id"], "normal"
+        except KaneoError as exc:
+            if "HTTP 404" not in str(exc):
+                raise
+        except (KeyError, TypeError, AttributeError):
+            raise KaneoError("Kaneo sent a reply in an unexpected shape") from None
+
+
 def sync(tickets: list[dict], dry_run: bool = False):
     """Mirror tickets. Yields (ticket_id, outcome) where outcome is one of
     created/updated/unchanged (or 'would ...' on a dry run) or 'error: ...'.
@@ -570,6 +638,7 @@ def sync(tickets: list[dict], dry_run: bool = False):
         board.prune()
         if not dry_run:
             _save_card_urls(board.card_urls)
+            _save_placed(board.placed)
 
 
 def mirror_quietly(ticket: dict, warn) -> None:

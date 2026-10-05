@@ -57,6 +57,10 @@ def _build_parser() -> argparse.ArgumentParser:
     approve = sub.add_parser("approve", help="approve a proposed ticket (humans only)")
     approve.add_argument("id")
 
+    prio = sub.add_parser("priority", help="make an unfinished ticket urgent or normal (humans only)")
+    prio.add_argument("id")
+    prio.add_argument("priority", choices=tk.PRIORITIES)
+
     close = sub.add_parser("close", help="close an open, claimed or in-review ticket (humans only)")
     close.add_argument("id")
     outcome = close.add_mutually_exclusive_group(required=True)
@@ -219,6 +223,12 @@ def _cmd_show(args) -> int:
 def _cmd_approve(args) -> int:
     t = _tracker().approve(args.id)
     print(f"{t['id']} approved (now {t['status']})")
+    return 0
+
+
+def _cmd_priority(args) -> int:
+    t = _tracker().set_priority(args.id, args.priority)
+    print(f"{t['id']} priority is {t.get('priority', 'normal')}")
     return 0
 
 
@@ -407,7 +417,7 @@ def _cmd_sync(args) -> int:
 def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
     handler = {"new": _cmd_new, "list": _cmd_list, "show": _cmd_show, "approve": _cmd_approve,
-               "close": _cmd_close, "note": _cmd_note, "review-result": _cmd_review_result, "risk": _cmd_risk, "gate": _cmd_gate,
+               "priority": _cmd_priority, "close": _cmd_close, "note": _cmd_note, "review-result": _cmd_review_result, "risk": _cmd_risk, "gate": _cmd_gate,
                "dupes": _cmd_dupes, "sync": _cmd_sync}
     try:
         return handler[args.command](args)

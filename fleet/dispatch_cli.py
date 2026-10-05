@@ -56,6 +56,27 @@ def _cmd_dry_run(settings: dict) -> int:
     return 0
 
 
+def _pull_board_priorities(emit, warn) -> None:
+    """A human dragged a card into (or out of) Urgent on the Kaneo board: make the
+    ticket urgent (or normal) and mirror it. Kaneo trouble is only a warning."""
+    try:
+        moves = list(kaneo.pull_priorities(tk.list_tickets()))
+    except kaneo.NotConfigured:
+        return
+    except (kaneo.KaneoError, tk.TicketError, tk.TicketInvalid, OSError) as exc:
+        warn(f"board priorities not read: {exc}")
+        return
+    for ticket_id, priority in moves:
+        try:
+            t = tk.set_priority(ticket_id, priority)
+        except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+            warn(f"{ticket_id} priority not set from the board: {exc}")
+            continue
+        emit(f"{ticket_id}  priority {priority} (moved on the board)")
+        dp.log("PRIORITY", f"{ticket_id} {priority} from the board")
+        kaneo.mirror_quietly(t, warn)
+
+
 def _reconcile(settings: dict, emit, warn) -> None:
     """Mark merged tickets done, then close the tab of each if its agent has
     stopped."""
@@ -112,6 +133,8 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     the alert pings. `clock` is the time source for the prep pass (default: real time)."""
     code = 0
     clock = clock or dp.Clock()
+    if checks is not None:   # --watch only; before anything mirrors, or a mirror would undo the drag
+        _pull_board_priorities(emit, warn)
     _reconcile(settings, emit, warn)
     if retry_tabs is not None:
         done = {t["id"] for t in tk.list_tickets() if t["status"] == "done"}
