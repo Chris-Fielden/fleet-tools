@@ -220,13 +220,13 @@ def usage_line(c: dict) -> str:
             f" [{', '.join(models)}]")
 
 
-def _root(by_id: dict, t: dict) -> str:
-    """The ticket an on-call fix reports to: follow oncall parents up to the original."""
-    seen = {t["id"]}
-    while t.get("oncall") and t.get("parent") in by_id and t["parent"] not in seen:
+def _chain(by_id: dict, t: dict) -> set[str]:
+    """The ticket and, for an on-call fix, the tickets above it: whose cards its runs count towards."""
+    out = {t["id"]}
+    while t.get("oncall") and t.get("parent") in by_id and t["parent"] not in out:
         t = by_id[t["parent"]]
-        seen.add(t["id"])
-    return t["id"]
+        out.add(t["id"])
+    return out
 
 
 def card_usage(targets: list[dict], home: Path | None = None) -> dict[str, str]:
@@ -238,14 +238,14 @@ def card_usage(targets: list[dict], home: Path | None = None) -> dict[str, str]:
     every = tk.list_tickets()
     by_id = {t["id"]: t for t in every}
     wanted = {t["id"] for t in targets}
-    root = {t["id"]: _root(by_id, t) for t in every}
-    created = [_ts(t.get("created_at")) for t in every if root[t["id"]] in wanted]
+    chain = {t["id"]: _chain(by_id, t) for t in every}
+    created = [_ts(t.get("created_at")) for t in every if wanted & chain[t["id"]]]
     start = min((c for c in created if c), default=datetime.now(timezone.utc) - WEEK)
     rows = [s for s in attribute(every, sessions(home, start - timedelta(minutes=1)))
-            if root.get(s["ticket"]) in wanted]
+            if wanted & chain[s["ticket"]]]
     out: dict[str, str] = {}
     for tid in wanted:
-        mine = [s for s in rows if root[s["ticket"]] == tid]
+        mine = [s for s in rows if tid in chain[s["ticket"]]]
         total = sum(s["tokens"] for s in mine)
         if total <= 0:
             continue

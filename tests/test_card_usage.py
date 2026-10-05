@@ -118,3 +118,72 @@ def test_card_usage_ignores_zero_and_unknown(env):
     assert tc.card_usage([t]) == {}
     assert tc.card_usage([]) == {}
     assert "Usage" not in kn.card_description(tk.load_ticket(t["id"]))
+
+
+def make_oncall(tid):
+    return tk.create_ticket({"type": "fix", "repo": "fleet-tools", "branch": "task/oc-fix",
+                             "title": "On-call: fix", "body": "Fix it.", "parent": tid}, oncall=True)
+
+
+def test_oncall_card_shows_its_own_usage_and_parent_includes_it(kaneo, env):
+    tid = new_ticket()
+    oc = make_oncall(tid)
+    claude_session(env, "a", "task/demo", "Do the work", [(1000, 500)])
+    claude_session(env, "b", "task/oc-fix", "Fix it", [(2000, 1000)])
+    lines = tc.card_usage([tk.load_ticket(tid), tk.load_ticket(oc["id"])])
+    assert lines[oc["id"]].startswith("3,000 tokens:")
+    assert lines[tid].startswith("4,500 tokens (including on-call)")
+
+
+def test_mirroring_an_oncall_ticket_also_refreshes_its_parent(kaneo, env):
+    tid = new_ticket()
+    run("sync")
+    oc = make_oncall(tid)
+    claude_session(env, "b", "task/oc-fix", "Fix it", [(2000, 1000)])
+    kn.mirror_quietly(tk.load_ticket(oc["id"]), lambda m: None)
+    descs = {t["title"].split("]")[0][1:]: t["description"] for t in kaneo.tasks.values()}
+    assert "including on-call" in descs[tid]
+    assert "**Usage:**" in descs[oc["id"]]
+
+
+def test_refresh_usage_only_touches_active_cards(kaneo, env):
+    tid = new_ticket()
+    other = new_ticket(branch="task/other", title="Something else entirely", body="Other work.")
+    run("sync")
+    claude_session(env, "a", "task/demo", "Do the work", [(1000, 500)])
+    claude_session(env, "b", "task/other", "Do the work", [(1000, 500)])
+    path = tk_home() / "tickets" / f"{tid}.json"
+    data = json.loads(path.read_text())
+    data["status"] = "claimed"
+    path.write_text(json.dumps(data))
+    kn.refresh_usage(tk.list_tickets(), lambda m: None)
+    descs = {t["title"].split("]")[0][1:]: t["description"] for t in kaneo.tasks.values()}
+    assert "**Usage:**" in descs[tid]
+    assert "Usage" not in descs[other]
+
+
+def test_refresh_usage_without_config_or_with_kaneo_down_only_warns(env):
+    tid = new_ticket()
+    warnings = []
+    path = tk_home() / "tickets" / f"{tid}.json"
+    data = json.loads(path.read_text())
+    data["status"] = "claimed"
+    path.write_text(json.dumps(data))
+    kn.refresh_usage(tk.list_tickets(), warnings.append)   # no kaneo.json: sync is off
+    assert warnings == []
+
+
+def test_failed_usage_calculation_keeps_the_card_line(kaneo, env, monkeypatch, capsys):
+    new_ticket()
+    claude_session(env, "a", "task/demo", "Do the work", [(1000, 500)])
+    run("sync")
+    line = card(kaneo)["description"]
+    assert "**Usage:**" in line
+
+    def boom(_targets, home=None):
+        raise ValueError("bad session file")
+    monkeypatch.setattr(tc, "card_usage", boom)
+    for _tid, outcome in kn.sync(tk.list_tickets()):
+        assert outcome == "unchanged"
+    assert "card usage not calculated" in capsys.readouterr().err
+    assert card(kaneo)["description"] == line

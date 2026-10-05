@@ -33,6 +33,7 @@ import json
 import os
 import re
 import stat
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -273,6 +274,10 @@ def card_title(t: dict) -> str:
     return f"[{t['id']}] {t['title']}{suffix}"
 
 
+_KEEP = "keep the card's current usage line"
+_USAGE_LINE = re.compile(r"^\*\*Usage:\*\* (.*)$", re.M)
+
+
 def card_description(t: dict, usage: str | None = None) -> str:
     def val(name):
         return "-" if t[name] is None else t[name]
@@ -428,6 +433,9 @@ def _mirror_card(t: dict, board: _Board, tasks: dict, dry_run: bool, usage: str 
     if pid is None:
         return verb("create")
     slug = board.column_slug(pid, t)
+    if usage is _KEEP:   # usage could not be calculated: leave the line as the card has it
+        m = _USAGE_LINE.search((existing or {}).get("description") or "")
+        usage = m.group(1) if m else None
     title, desc = card_title(t), card_description(t, usage)
 
     if existing is None:
@@ -630,17 +638,20 @@ def sync(tickets: list[dict], dry_run: bool = False):
     board = _Board(client, create=not dry_run)
     with _map_locked():
         tasks = _load_map()
-        try:   # informational: a failure just leaves the usage line off the cards
+        try:
             usage = tc.card_usage(tickets)
-        except Exception:   # noqa: BLE001
-            usage = {}
+        except Exception as exc:   # noqa: BLE001 - informational: keep what the cards show now
+            print(f"warning: card usage not calculated ({type(exc).__name__}); "
+                  "cards keep their last usage line", file=sys.stderr)
+            usage = None
         for t in tickets:
             try:
                 before = dict(tasks)
                 try:
                     # Re-read under the lock: the snapshot may be stale if another
                     # command changed this ticket while we waited.
-                    outcome = _mirror(tk.load_ticket(t["id"]), board, tasks, dry_run, usage.get(t["id"]))
+                    outcome = _mirror(tk.load_ticket(t["id"]), board, tasks, dry_run,
+                                     _KEEP if usage is None else usage.get(t["id"]))
                 finally:
                     # Save a new card's id even if the label step failed after
                     # it, or the retry would make a duplicate card.
@@ -665,8 +676,12 @@ def mirror_quietly(ticket: dict, warn) -> None:
     for Kaneo trouble: the ticket is saved locally and the next `ticket sync`
     catches up. `warn` receives a one-line message."""
     try:
-        for tid, outcome in sync([ticket]):
-            if outcome.startswith("error: "):
+        batch = [ticket]
+        if ticket.get("oncall") and ticket.get("parent"):   # the original's card totals its on-call runs
+            with contextlib.suppress(tk.TicketError, tk.TicketInvalid, OSError):
+                batch.append(tk.load_ticket(ticket["parent"]))
+        for tid, outcome in sync(batch):
+            if outcome.startswith("error: ") and tid == ticket["id"]:
                 warn(f"warning: {tid} saved, but not shown on Kaneo ({outcome[7:]}); "
                      "run `ticket sync` later")
     except NotConfigured:
@@ -680,6 +695,11 @@ def refresh_usage(tickets: list[dict], warn) -> None:
     usage line on each follows its runs. A card that already shows the right usage
     is left alone (no write). Kaneo trouble is only a warning, like mirror_quietly."""
     active = [t for t in tickets if t["status"] in ("claimed", "review")]
+    by_id = {t["id"]: t for t in tickets}
+    for t in list(active):   # the original of a running on-call fix totals its runs
+        parent = by_id.get(t["parent"]) if t.get("oncall") and t.get("parent") else None
+        if parent is not None and parent not in active:
+            active.append(parent)
     if not active:
         return
     try:
