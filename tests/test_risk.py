@@ -841,3 +841,66 @@ def test_both_reviewers_get_the_same_bar(task, env):
     assert run_review(task, env / "bin", REVIEWER="both").returncode == 0
     bar = lambda t: t[t.index("The MUST FIX bar"):t.index("SUMMARY: two")]
     assert bar(logs["codex"].read_text()) == bar(logs["claude"].read_text())
+
+
+# --- several tickets share one branch (BD-45) --------------------------------
+
+def shared_branch_tickets(n=3):
+    """Tickets sharing task/demo: the duplicate guard stops `ticket new` now, but old ones exist."""
+    from fleet import ticket as tk
+    f = {"type": "build", "repo": "repo", "branch": "task/demo", "body": "Details."}
+    return [tk.create_ticket({**f, "title": t})["id"]
+            for t in ["Alpha widget", "Quartz harbour", "Mellow zebra crossing"][:n]]
+
+
+def test_high_risk_confirm_word_is_the_ticket_given(task, repo):
+    first, _, newest = shared_branch_tickets()
+    commit_in(task, "k8s/app.yaml")
+    pass_review(task, "codex"); pass_review(task, "claude")
+    r = finish(repo, f"{newest}\n", "--ticket", first)
+    assert f"({first})" in r.stdout and "Cancelled" in r.stdout and not merged(repo)
+    r = finish(repo, f"{first}\n", "--ticket", first)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert merged(repo)
+
+
+def test_other_unfinished_tickets_on_the_branch_are_listed_first(task, repo):
+    first, second, third = shared_branch_tickets()
+    commit_in(task, "docs/a.md")
+    pass_review(task)
+    r = finish(repo, "n\n", "--ticket", first)
+    assert "WARNING" in r.stdout and second in r.stdout and third in r.stdout
+    assert r.stdout.index("WARNING") < r.stdout.index("== 3/5")
+    assert f"  {first} (" not in r.stdout.split("WARNING")[1].split("==")[0]
+
+
+def test_a_ticket_on_another_branch_is_refused(task, repo):
+    mine = file_ticket()
+    other = file_ticket(branch="task/elsewhere", title="Quartz harbour")
+    commit_in(task, "docs/a.md")
+    pass_review(task)
+    r = finish(repo, "y\n", "--ticket", other)
+    assert r.returncode == 1 and "NOT MERGING" in r.stdout and "task/elsewhere" in r.stdout
+    assert not merged(repo)
+    # an emergency override does not get round it
+    r = finish(repo, "OVERRIDE\n", "--ticket", other, "--emergency", "why")
+    assert r.returncode == 1 and not merged(repo)
+    assert finish(repo, "y\n", "--ticket", mine).returncode == 0
+
+
+def test_an_unknown_ticket_is_refused(task, repo):
+    commit_in(task, "docs/a.md")
+    pass_review(task)
+    r = finish(repo, "y\n", "--ticket", "BD-999")
+    assert r.returncode == 1 and "no such ticket" in r.stdout and not merged(repo)
+
+
+def test_finished_tickets_on_the_branch_are_not_warned_about(task, repo):
+    from fleet import ticket as tk
+    first, second = shared_branch_tickets(2)
+    tk.set_status(second, "claimed", allowed_from=("open",))
+    tk.set_status(second, "done", allowed_from=("claimed",))
+    commit_in(task, "docs/a.md")
+    pass_review(task)
+    r = finish(repo, "n\n", "--ticket", first)
+    assert "WARNING" not in r.stdout
