@@ -95,14 +95,16 @@ with no padding: `BD-1`, `BD-2`, `FX-1`, `EM-1`.
 
 ### Duplicate guard
 
-Filing a ticket (`fleet/dupes.py`) compares it with the proposed, open,
+Filing a ticket with `ticket new`, `idea` or `alert` (`fleet/dupes.py`; the
+leftovers and on-call tickets the tools file themselves are not checked) compares it with the proposed, open,
 claimed and in-review tickets of the same repo:
 
 - A branch one of those tickets already uses is refused, naming the ticket.
-  `--force` does not override this. A ticket may share its parent's branch.
+  `--force` does not override this. A ticket may share the branch (and a title) of an ancestor: its parent, that
+  ticket's parent and so on.
 - A title with a difflib ratio of 0.8 or more (lowercased, punctuation
   removed) asks a human at a terminal to confirm, or passes with `--force`
-  (`ticket new`). An agent, or a run without a terminal, is refused with the
+  (`ticket new`; humans only). An agent, or a run without a terminal, is refused with the
   matching ticket id: add a note to that ticket instead.
 - `ticket dupes` lists likely duplicate pairs among those tickets: shared
   branch and/or similar title, with the similarity.

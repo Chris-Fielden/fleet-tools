@@ -205,3 +205,16 @@ def test_daily_watch_check_quiet_without_dupes(env):
     lines = []
     dispatch_cli.check_dupes_daily("2026-10-04", lines.append, lines.append)
     assert lines == [] and not dp.log_path().exists()
+
+
+def test_underscores_count_as_punctuation():
+    assert dupes.similarity("fix_the_bug", "Fix the bug") == 1.0
+
+
+def test_a_chain_of_fixes_may_share_the_branch(env, monkeypatch):
+    human_env(monkeypatch)
+    root = mk(branch="task/x", title="Root job")
+    fix1 = mk(type="fix", parent=root["id"], branch="task/x", title="Root job")
+    r = new(repo="app", type="fix", parent=fix1["id"], branch="task/x", title="Root job")
+    assert r.returncode == 0, r.stderr
+    assert dupes.pairs(tk.list_tickets()) == []

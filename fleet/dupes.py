@@ -12,7 +12,7 @@ THRESHOLD = 0.8
 
 def normalize(title: str) -> str:
     """Lowercase, punctuation removed, spaces collapsed."""
-    return " ".join(re.sub(r"[^\w\s]", "", title.lower()).split())
+    return " ".join(re.sub(r"[\W_]+", " ", title.lower()).split())
 
 
 def similarity(a: str, b: str) -> float:
@@ -26,22 +26,29 @@ def _live(tickets: list[dict], repo: str) -> list[dict]:
     return [t for t in tickets if t["repo"] == repo and t["status"] in tk.ACTIVE_STATUSES]
 
 
-def _follow_up(new: dict, other: dict) -> bool:
-    """A ticket may share the branch and a title with its parent (a fix, a review or a
-    build that follows up another ticket)."""
-    return new.get("parent") == other["id"]
+def _follow_up(new: dict, other: dict, tickets: list[dict]) -> bool:
+    """A ticket may share the branch and a title with an ancestor: its parent, that
+    ticket's parent and so on (a chain of fixes, a review, a follow-up build)."""
+    by_id = {t["id"]: t for t in tickets}
+    seen, parent = set(), new.get("parent")
+    while parent and parent not in seen:
+        if parent == other["id"]:
+            return True
+        seen.add(parent)
+        parent = by_id.get(parent, {}).get("parent")
+    return False
 
 
 def branch_conflicts(fields: dict, tickets: list[dict]) -> list[dict]:
     """Unfinished tickets in the same repo that already use this branch."""
     return [t for t in _live(tickets, fields["repo"])
-            if t["branch"] == fields["branch"] and not _follow_up(fields, t)]
+            if t["branch"] == fields["branch"] and not _follow_up(fields, t, tickets)]
 
 
 def similar_titles(fields: dict, tickets: list[dict]) -> list[tuple[dict, float]]:
     """Unfinished tickets in the same repo with a very similar title, best first."""
     found = [(t, similarity(fields["title"], t["title"])) for t in _live(tickets, fields["repo"])
-             if not _follow_up(fields, t)]
+             if not _follow_up(fields, t, tickets)]
     return sorted(((t, r) for t, r in found if r >= THRESHOLD), key=lambda p: -p[1])
 
 
@@ -53,7 +60,7 @@ def pairs(tickets: list[dict]) -> list[dict]:
     out = []
     for i, a in enumerate(live):
         for b in live[i + 1:]:
-            if a["repo"] != b["repo"] or b.get("parent") == a["id"] or a.get("parent") == b["id"]:
+            if a["repo"] != b["repo"] or _follow_up(b, a, tickets) or _follow_up(a, b, tickets):
                 continue
             ratio = similarity(a["title"], b["title"])
             shared = a["branch"] == b["branch"]
