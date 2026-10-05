@@ -751,7 +751,11 @@ def _finish_prep(job: dict, settings: dict, now: datetime, emit, warn) -> None:
         st["covered"] = _covered(st, settings) + [f"{t['id']}:{tip_of(_repo(t, settings), t['branch'])}" for t in ok]
     dp.log("PREP_DONE", f"{len(lines)} ready, {len(failed)} failed, {len(gone)} cancelled")
     emit(f"prep pass done: {len(lines)} ready to ship, list written")
-    if lines:
+    try:   # a follow-up pass (over tickets that arrived meanwhile) would lock these: its ping speaks for them
+        follows = _pass_follows(tk.list_tickets(), settings, _load(), now)
+    except OSError:
+        follows = False
+    if lines and not follows:
         stub = {"id": "list", "type": "build", "status": "review", "title": "ship list"}
         notify.notify_quietly(stub, "ship_list", warn, f"{len(lines)} ready to ship, list ready")
 

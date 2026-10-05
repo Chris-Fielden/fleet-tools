@@ -199,3 +199,18 @@ def test_no_pass_is_predicted_for_waiting_tickets_that_an_earlier_pass_already_c
     assert prep._pass_follows(tickets, settings, state, before_prep_time)  # two fresh tickets: a pass is coming
     state["covered"] = [f"{t['id']}:{prep.tip_of(q, t['branch'])}" for t in tickets if t["status"] == "review"]
     assert not prep._pass_follows(tickets, settings, state, before_prep_time)   # all covered: none will follow
+
+
+def test_the_list_ping_waits_when_a_follow_up_pass_over_late_tickets_will_lock_the_listed_ones(
+        q, herdr_log, env, ntfy, monkeypatch):
+    a = ready(q, monkeypatch, "task/one", {"one.txt": "1"})
+    b = ready(q, monkeypatch, "task/two", {"two.txt": "2"})
+    watch_cycle(THREE_PM)
+    assert agent_names(herdr_log) == ["prep"]
+    ready(q, monkeypatch, "task/late", {"late.txt": "x"})
+    set_agent_status(env, "prep", "idle")
+    report(dp.load_settings(), order=[a["id"], b["id"]], tickets={}, duplicates=[])
+    watch_cycle(THREE_PM)
+    prep.wait_checks()
+    watch_cycle(THREE_PM)
+    assert titles(ntfy) == []                                  # the next pass locks all three; its ping comes after
