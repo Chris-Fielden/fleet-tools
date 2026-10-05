@@ -14,6 +14,7 @@ from . import kaneo
 from . import launch as lc
 from . import notify
 from . import prep
+from . import push_notes
 from . import review_watch
 from . import ticket as tk
 
@@ -117,9 +118,13 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
         kept = [i for i in retry_tabs.poll() if i in done]
         for ticket_id, reason in lc.retry_kept_tabs(kept, settings, warn):
             emit(f"{ticket_id}  tab closed: {reason}")
+    prompted: set[str] = set()
+    if checks is not None:   # --watch only
+        # Notes go first, before anything below decides that an idle agent has finished.
+        prompted = push_notes.push(tk.list_tickets(), emit, warn)
     for ticket_id, reason in lc.sweep_tabs(settings, warn):
         emit(f"{ticket_id}  stale tab swept: {reason}")
-    for t in lc.finish_investigations(tk.list_tickets(), warn):
+    for t in lc.finish_investigations([t for t in tk.list_tickets() if t["id"] not in prompted], warn):
         emit(f"{t['id']}  investigation {t['status']}")
         kaneo.mirror_quietly(t, warn)
         notify.notify_quietly(t, "failed" if t["status"] == "failed" else "investigated", warn)
@@ -135,7 +140,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     # tickets, and start the next prep pass after it has moved new tickets into review.
     _prep_quietly(lambda: prep.finish(settings, clock.now(), emit, warn), warn)
     if checks is not None:
-        checks(emit, warn)
+        checks(emit, warn, prompted)
     _prep_quietly(lambda: prep.maybe_start(settings, clock.now(), emit, warn, reserve), warn)
     lines, held = dp.ensure_investigations(tk.list_tickets(), warn)
     for line in lines:
@@ -155,6 +160,8 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
                 oncall_code, message = 1, f"{d.ticket['id']}  on-call launch failed: {exc}"
             code = code or oncall_code
             emit(message)
+            if oncall_code == 0:
+                push_notes.baseline(d.ticket)
             tickets = tk.list_tickets()   # the on-call ticket is claimed now: it holds its branch
             break
     # Investigations are read-only and don't compete with build work: one of
@@ -169,6 +176,8 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
             research_code, message = lc.launch_research(d, settings, warn)
             code = code or research_code
             emit(message)
+            if research_code == 0:
+                push_notes.baseline(d.ticket)
             started = True
             break
     decisions = dp.decide([t for t in tickets if t["id"] not in held], settings)
@@ -179,6 +188,8 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
                 return code
             build_code, message = lc.launch(d, settings, warn)
             emit(message)
+            if build_code == 0:
+                push_notes.baseline(d.ticket)
             return code or build_code
     if started:
         return code
@@ -264,8 +275,8 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None) -> int:
         while True:
             lines: list[str] = []
             try:
-                def checks(emit, warn):
-                    review_watch.check(settings, clock.now(), emit, warn)
+                def checks(emit, warn, skip=frozenset()):
+                    review_watch.check(settings, clock.now(), emit, warn, skip)
                 _cycle(settings, lines.append, lambda m: lines.append(f"warning: {m}"), reserve=reserve,
                        retry_tabs=kept_tabs, checks=checks, clock=clock)
             except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
