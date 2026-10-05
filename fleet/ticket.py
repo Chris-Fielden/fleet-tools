@@ -629,6 +629,7 @@ def fix_titles() -> list[dict]:
 def set_priority(ticket_id: str, priority: str) -> dict:
     """Make an unfinished ticket urgent or normal. Humans only. The id (and its
     prefix) never changes. Setting the priority it already has changes nothing."""
+    ticket_id = normalize_id(ticket_id)
     creator = current_creator()
     if creator != "human":
         raise TicketError(f"only a human can set a ticket's priority (running as {creator})")
@@ -692,6 +693,7 @@ def attach_investigation(ticket_id: str, investigation_id: str) -> dict:
     """Make `investigation_id` the investigation a build or fix ticket waits for: a build
     ticket's parent, a fix ticket's `investigation` field. Dispatcher only, and only
     while the ticket is open and has none yet."""
+    ticket_id, investigation_id = normalize_id(ticket_id), normalize_id(investigation_id)
     if current_creator() != "human":
         raise TicketError(f"only the dispatcher can attach an investigation (running as {current_creator()})")
     with _locked():

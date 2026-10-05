@@ -99,7 +99,7 @@ def _build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--dir", default=".", help="the git repo (default: here)")
     gate.add_argument("--repo", help="only tickets filed against this repo name count")
     gate.add_argument("--worktree", required=True, help="the task worktree holding .reviews/")
-    gate.add_argument("--ticket", help="the ticket being shipped: it must be on this branch, and its id "
+    gate.add_argument("--ticket", type=tk.normalize_id, help="the ticket being shipped: it must be on this branch, and its id "
                                        "is the word to type")
     gate.add_argument("--field", choices=("risk", "confirm", "ok", "reviews", "others"),
                       help="print just one value instead of the report")

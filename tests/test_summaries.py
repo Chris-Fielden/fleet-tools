@@ -313,3 +313,12 @@ def test_merge_gate_ignores_the_ticket_verdict(task, env):
     fake_tool(env / "bin", "codex")
     assert run_review(task, env / "bin", REVIEWER="codex").returncode == 0
     assert run(*base, "--field", "ok").stdout.strip() == "yes"
+
+
+def test_gate_ticket_flag_accepts_any_case_id(task, env):
+    tid = new_ticket(repo="repo")
+    commit_in(task, "fleet/x.py")
+    base = ["gate", "--base", "main", "--branch", "task/demo", "--dir", str(task),
+            "--repo", "repo", "--worktree", str(task), "--field", "confirm"]
+    assert run(*base, "--ticket", tid).stdout.strip() == tid
+    assert run(*base, "--ticket", tid.lower()).stdout.strip() == tid

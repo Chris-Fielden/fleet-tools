@@ -692,3 +692,12 @@ def test_normalize_id():
     assert tk.normalize_id(None) is None
     with pytest.raises(tk.TicketInvalid):
         tk.load_ticket("not-an-id")
+
+
+def test_attach_investigation_and_set_priority_normalize_ids(monkeypatch):
+    inv = make(type="investigate", repo="ideas", branch="task/inv-a")["id"]
+    build = make()["id"]
+    monkeypatch.setattr(tk, "current_creator", lambda: "human")
+    t = tk.attach_investigation(build.lower(), inv.lower())
+    assert t["id"] == build and t["parent"] == inv
+    assert tk.set_priority(build.lower(), "urgent")["id"] == build
