@@ -510,6 +510,7 @@ def test_watch_retry_closes_once(projects, herdr_log, env, monkeypatch):
 
 
 def test_watch_retry_leaves_a_tab_that_reconcile_never_kept_alone(projects, herdr_log, env, monkeypatch):
+    monkeypatch.setattr(dispatch_cli.lc, "sweep_tabs", lambda *a, **k: [])   # these test the kept-tab retry alone
     t = merged_claimed(projects)
     assert dispatch_main(["--reconcile"]) == 0   # no tab at all: "no tab found"
     world(env, monkeypatch, t["id"])             # a tab appears later (reused by the human)
@@ -552,6 +553,7 @@ def test_watch_retry_keeps_an_ambiguous_label(projects, herdr_log, env, monkeypa
 # --- hardened tab retry ---------------------------------------------------------
 
 def test_watch_retry_does_not_fall_back_to_the_label(projects, herdr_log, env, monkeypatch):
+    monkeypatch.setattr(dispatch_cli.lc, "sweep_tabs", lambda *a, **k: [])   # these test the kept-tab retry alone
     """Reconcile kept the agent's tab; later the agent is gone and a tab with the
     same label (the human's) must not be closed."""
     t = merged_claimed(projects)
@@ -566,6 +568,7 @@ def test_watch_retry_does_not_fall_back_to_the_label(projects, herdr_log, env, m
 
 
 def test_watch_gives_up_on_a_tab_kept_for_too_long(projects, herdr_log, env, monkeypatch):
+    monkeypatch.setattr(dispatch_cli.lc, "sweep_tabs", lambda *a, **k: [])   # these test the kept-tab retry alone
     t = merged_claimed(projects)
     w = world(env, monkeypatch, t["id"], tab_focused=True)
     assert dispatch_main(["--reconcile"]) == 0

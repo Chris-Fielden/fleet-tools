@@ -29,9 +29,10 @@ from . import webconf
 
 TIMEOUT = 4  # seconds per socket operation (not DNS); use an IP url for a firm limit
 TITLE_MAX = 60
-# blocked, review_failed and stalled are no longer sent (a stopped, stalled or
-# blocked agent now brings in an on-call agent instead); the names stay valid
-# so an older "priorities" setting in notify.json keeps loading.
+# DEPRECATED_EVENTS (blocked, review_failed, stalled) are no longer sent (a stopped,
+# stalled or blocked agent now brings in an on-call agent instead); the names stay
+# valid only so an older "priorities" setting in notify.json keeps loading.
+DEPRECATED_EVENTS = ("blocked", "review_failed", "stalled")
 EVENTS = ("ready", "urgent", "failed", "proposed", "investigated", "ship", "blocked",
           "review_failed", "review_unrecorded", "stalled", "oncall", "needs_human",
           "shipped", "ship_failed", "dispatcher_down", "ship_list")

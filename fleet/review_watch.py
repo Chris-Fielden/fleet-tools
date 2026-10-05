@@ -8,7 +8,7 @@
   back to claimed.
 * A claimed ticket TRULY FAILS when its agent sat idle on a failed commit for
   5 minutes, it has `fail_rounds_threshold` (default 8) FAIL verdicts on different commits, its agent was blocked
-  for 20 minutes, or it had no activity for 45 minutes. It is then closed as
+  for 20 minutes, or it had no activity for 45 minutes while its agent was idle or waiting. It is then closed as
   failed and an on-call fix ticket is filed (launched by the dispatch cycle in
   its own slot); see _fail_ticket. A mid-loop FAIL verdict never pings.
 * The only ping here besides "ready to ship" is a review that ran but could
@@ -49,9 +49,12 @@ from . import ticket as tk
 
 BLOCKED_AFTER = 20 * 60   # seconds an agent waits for input before the ticket fails
 STALL_AFTER = 45 * 60     # seconds with no commit, note or log output before the ticket fails
+STALL_STATES = ("idle", "done", "blocked", "waiting")   # herdr states in which a stall counts; never "working"
 STOPPED_AFTER = 5 * 60    # seconds an agent sits idle on a failed tip before the ticket fails
 UNRECORDED_GRACE = 2 * 60  # seconds review.sh gets to record a review it just saved
 LOG_TAIL = 256 * 1024
+MUST_FIX_PART = 500       # characters of a review's MUST FIX section per part of the on-call body
+MUST_FIX_PARTS = 8        # parts kept per review (the body as a whole is capped by ONCALL_BODY_MAX)
 # Dispatcher log kinds that show a ticket's work moving. (RECONCILE_SKIP and
 # DECISION lines repeat every cycle and say nothing about the agent.)
 ACTIVITY_LOG_KINDS = ("LAUNCHED", "RELAUNCHED", "REVIEW_READY", "REVIEW_BACK")
@@ -235,7 +238,8 @@ def _unrecorded_pings(t: dict, repo: Path, tip: str, state: dict, now: datetime,
 #     verdict still being a FAIL (going in circles); or
 #   * its agent has waited for input for BLOCKED_AFTER seconds (permission
 #     prompts are never answered); or
-#   * nothing has happened for STALL_AFTER seconds.
+#   * nothing has happened for STALL_AFTER seconds while its agent is idle or
+#     waiting (never while herdr shows it working).
 # Then the ticket is closed as failed and an on-call agent is filed (see _fail_ticket).
 
 def fail_rounds(t: dict) -> int:
@@ -293,10 +297,12 @@ def _failure_reason(t: dict, repo: Path, tip: str, agent: dict | None, state: di
             reason = f"the agent was blocked waiting for input for {int(waited // 60)} min"
     else:
         state["blocked_since"].pop(tid, None)
-    # 4. Nothing has happened for a long time.
+    # 4. Nothing has happened for a long time. Only while herdr shows the agent idle,
+    # done or waiting: a working agent can be silent for hours. The clock restarts when
+    # the agent's status changes, so it counts from when the agent stopped working.
     last = _last_activity(t, repo, tip, agent, state, now)
     idle = (now - last).total_seconds()
-    if reason is None and idle >= STALL_AFTER:
+    if reason is None and idle >= STALL_AFTER and agent_state in STALL_STATES:
         reason = f"stalled: no commit, note, log output or agent change for {int(idle // 60)} min"
     return reason
 
@@ -304,6 +310,26 @@ def _failure_reason(t: dict, repo: Path, tip: str, agent: dict | None, state: di
 def _clip(text: str, limit: int) -> str:
     text = text.strip()
     return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _split(text: str, limit: int) -> list[str]:
+    """Cut text into pieces of at most `limit` characters, at line ends where it can
+    (and in the middle of a line only when one line is longer than `limit`)."""
+    pieces, cur = [], ""
+    for line in text.strip().splitlines():
+        while len(line) > limit:
+            if cur:
+                pieces.append(cur)
+                cur = ""
+            pieces.append(line[:limit])
+            line = line[limit:]
+        if cur and len(cur) + 1 + len(line) > limit:
+            pieces.append(cur)
+            cur = ""
+        cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        pieces.append(cur)
+    return pieces
 
 
 def _log_tail(tid: str, lines: int = 12) -> str:
@@ -343,13 +369,22 @@ def _oncall_body(t: dict, detail: str, tip: str, repo: Path) -> str:
         except (OSError, UnicodeDecodeError):
             continue
         if must:
-            parts.append(f"MUST FIX from the latest {info['reviewer']} review ({reviewed[:7]}):\n"
-                         + _clip(must, 500))
+            chunks = _split(must, MUST_FIX_PART)[:MUST_FIX_PARTS]
+            for i, chunk in enumerate(chunks, 1):
+                part = f" (part {i}/{len(chunks)})" if len(chunks) > 1 else ""
+                parts.append(f"MUST FIX from the latest {info['reviewer']} review ({reviewed[:7]}){part}:\n{chunk}")
     tail = _log_tail(t["id"])
     if tail:
         parts.append("DISPATCHER LOG TAIL:\n" + _clip(tail, 600))
     parts.append(f"FAILED TICKET SPEC (whole):\n{t['body']}")
     return _clip("\n\n".join(parts), tk.ONCALL_BODY_MAX)
+
+
+def _squash(text: str) -> str:
+    """Whitespace normalised (runs of spaces and tabs to one space, trailing space and
+    blank-line runs gone), so a stored note and the piece it was cut from compare equal."""
+    lines = (re.sub(r"[ \t\r\f\v]+", " ", line).strip() for line in text.strip().splitlines())
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
 
 
 def _copy_notes(oc_id: str, t: dict, warn) -> None:
@@ -361,10 +396,11 @@ def _copy_notes(oc_id: str, t: dict, warn) -> None:
     pieces = []
     for n in t.get("notes", []):
         text = f"Note on {t['id']} by {n['by']} at {n['at']}:\n{n['text']}"
+        text = _squash(text)
         pieces += [text[i:i + tk.NOTE_MAX] for i in range(0, len(text), tk.NOTE_MAX)]
-    have = {n["text"] for n in tk.load_ticket(oc_id).get("notes", [])}
+    have = {_squash(n["text"]) for n in tk.load_ticket(oc_id).get("notes", [])}
     for piece in pieces[:room]:
-        if piece not in have:
+        if _squash(piece) not in have:
             _note(oc_id, piece, warn)
     over = f"{len(pieces) - room} more pieces of {t['id']}'s notes are not copied: a ticket holds {tk.NOTES_LIMIT} notes."
     if len(pieces) > room and over not in have:
@@ -486,7 +522,7 @@ def _recover(rec: dict, settings: dict, state: dict, now: datetime, emit, warn) 
         t = tk.set_status(tid, "failed", allowed_from=("claimed", "open"),
                           close_note=_clip(f"Failed: {detail}", tk.CLOSE_NOTE_MAX))
         kaneo.mirror_quietly(t, warn)
-        emit(f"{tid}  failed: {detail}; its agent's herdr tab is left open (close it by hand if it is still there)")
+        emit(f"{tid}  failed: {detail}")
         lc._safe_log("FAILED", f"{tid} {_clip(detail, 200)}")
     elif t["status"] != "failed":
         path.unlink(missing_ok=True)   # it went another way (done, cancelled, in review): nothing failed
@@ -512,6 +548,10 @@ def _recover(rec: dict, settings: dict, state: dict, now: datetime, emit, warn) 
             _note_once(tid, "Needs a human:", f"Needs a human: {why}. {detail}.", warn)
             lc._safe_log("NEEDS_HUMAN", tid)
             ping = (tid, "needs_human", None)
+    # 2b. its herdr tab, now the on-call ticket (or the reason there is none) is on record.
+    # Never while its agent still runs: the sweep of finished tabs retries later.
+    closed, why_tab = lc.close_finished_tab(tid, settings)
+    emit(f"{tid}  tab {'closed' if closed else 'kept'}: {why_tab}")
     # 3. queue the one ping (saved to disk; a send that fails is retried every cycle)
     _queue_ping(ping[0], ping[1], state, warn, ping[2])
     path.unlink(missing_ok=True)

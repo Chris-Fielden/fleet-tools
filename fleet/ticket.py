@@ -39,6 +39,7 @@ OPTIONAL_FIELDS = ("close_note", "base_commit", "seq", "priority", "risk", "note
 # fail_commits: every commit that got a recorded FAIL, oldest first (a verdict
 # only keeps the latest, and "going in circles" counts rounds).
 CLOSE_NOTE_MAX = 500
+FAIL_COMMITS_MAX = 50   # fail_commits keeps the newest this many (the going-in-circles threshold is far lower)
 NOTE_MAX = 4000
 REVIEW_KINDS = ("codex", "claude")
 VERDICT_RESULTS = ("PASS", "FAIL")
@@ -307,8 +308,8 @@ def validate_stored(data) -> list[str]:
         errors.append("oncall_base must be a full commit id, on an on-call ticket")
     fails = data.get("fail_commits")
     if "fail_commits" in data and not (
-            isinstance(fails, list) and all(_is_str(c) and re.fullmatch(r"[0-9a-f]{40}", c) for c in fails)):
-        errors.append("fail_commits must be a list of full commit ids")
+            isinstance(fails, list) and len(fails) <= FAIL_COMMITS_MAX and all(_is_str(c) and re.fullmatch(r"[0-9a-f]{40}", c) for c in fails)):
+        errors.append(f"fail_commits must be a list of at most {FAIL_COMMITS_MAX} full commit ids")
     if "started_at" in data and not _is_time(data["started_at"]):
         errors.append("started_at must be a UTC ISO 8601 time like 2025-01-01T00:00:00Z")
     if "notes" in data:
@@ -718,7 +719,7 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
             t["verdict"] = {"result": "FAIL" if failed else "PASS",
                             "commit": commit, "reviewer": reviewer, "at": now, "reviews": reviews}
             if failed and commit not in t.get("fail_commits", []):
-                t["fail_commits"] = t.get("fail_commits", []) + [commit]
+                t["fail_commits"] = (t.get("fail_commits", []) + [commit])[-FAIL_COMMITS_MAX:]
             t["updated_at"] = now
             _write_atomic(_ticket_path(t["id"]), t)
             changed.append(t)

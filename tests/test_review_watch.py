@@ -415,7 +415,7 @@ def test_blocked_over_twenty_minutes_fails_the_ticket_with_one_low_ping(rig, ntf
 
 
 def test_stalled_for_forty_five_minutes_fails_the_ticket_with_one_low_ping(rig, ntfy):
-    rig.set_agent("working", revision=1)
+    rig.set_agent("idle", revision=1)
     rig.cycle(0)
     rig.cycle(44)
     assert ntfy.requests == [] and rig.get()["status"] == "claimed"
@@ -426,9 +426,9 @@ def test_stalled_for_forty_five_minutes_fails_the_ticket_with_one_low_ping(rig, 
 
 
 def test_herdr_activity_resets_the_stall_clock(rig, ntfy):
-    rig.set_agent("working", revision=1)
+    rig.set_agent("idle", revision=1)
     rig.cycle(0)
-    rig.set_agent("working", revision=2)
+    rig.set_agent("idle", revision=2)
     rig.cycle(30)
     rig.cycle(60)
     assert ntfy.requests == [] and rig.get()["status"] == "claimed"
@@ -437,7 +437,7 @@ def test_herdr_activity_resets_the_stall_clock(rig, ntfy):
 
 
 def test_a_note_or_a_commit_resets_the_stall_clock(rig, ntfy):
-    rig.set_agent("working", revision=1)
+    rig.set_agent("idle", revision=1)
     rig.cycle(0)
     # a note saved "30 minutes from now" is the latest sign of life
     when = (rig.now + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -449,7 +449,7 @@ def test_a_note_or_a_commit_resets_the_stall_clock(rig, ntfy):
 
 
 def test_dispatcher_log_lines_for_the_ticket_count_but_repeating_ones_do_not(rig, ntfy):
-    rig.set_agent("working", revision=1)
+    rig.set_agent("idle", revision=1)
     rig.cycle(0)
     dp.log("RECONCILE_SKIP", f"{rig.id} task/demo not merged")   # logged every cycle: no sign of life
     rig.cycle(46)

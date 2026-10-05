@@ -221,7 +221,7 @@ def test_a_stopped_agent_closes_the_ticket_and_launches_one_on_call_at_once(rig,
 
 
 @pytest.mark.parametrize("kind, minutes, stop, agent", [
-    ("stall", 15, 5, {"agent_status": "working", "revision": 1}),
+    ("stall", 15, 5, {"agent_status": "idle", "revision": 1}),
     ("block", 10, 4, {"agent_status": "blocked"})])
 def test_stall_and_block_launch_the_on_call_agent_too(rig, ntfy, herdr_log, kind, minutes, stop, agent):
     other = claim(mk(branch="task/other"))
