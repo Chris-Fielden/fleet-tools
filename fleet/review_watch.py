@@ -620,7 +620,10 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
         # Leave it alone if herdr cannot be asked; a vanished agent is not busy.
         busy = agents_known and agent is not None and not stopped
         if earned and not busy:
-            _ready_ping(t, tip, settings, now, state, warn)
+            if moved is not None:
+                moved.append((t, tip))   # like a ticket that just moved: judged after every move of the cycle
+            else:
+                _ready_ping(t, tip, settings, now, state, warn)
             _end_spells(t["id"], state)
             _unrecorded_pings(t, repo, tip, state, now, emit, warn)
             return

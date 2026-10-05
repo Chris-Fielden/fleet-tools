@@ -129,3 +129,15 @@ def test_two_tickets_finishing_in_one_cycle_get_no_ping_before_the_pass_that_loc
     assert [tk.load_ticket(i)["status"] for i in ids] == ["review", "review"]
     assert agent_names(herdr_log) == ["prep"] and titles(ntfy) == []   # not "ready" for a ship that would be refused
     assert ship_main([ids[0]]) == 1
+
+
+def test_an_older_review_ticket_is_not_pinged_before_a_ticket_that_moves_in_the_same_cycle(
+        q, herdr_log, env, ntfy, monkeypatch):
+    a = ready(q, monkeypatch, "task/one", {"one.txt": "1"})     # in review, ping not sent yet
+    b = ready(q, monkeypatch, "task/two", {"two.txt": "2"})
+    tk.set_status(b["id"], "claimed", allowed_from=("review",))
+    (env / "world.json").write_text(json.dumps({"workspaces": [{"workspace_id": "w1", "label": "fleet"}], "tabs": [],
+                                                "agents": [{"name": b["id"].lower(), "agent_status": "idle"}]}))
+    watch_cycle(THREE_PM)
+    assert agent_names(herdr_log) == ["prep"] and titles(ntfy) == []
+    assert ship_main([a["id"]]) == 1
