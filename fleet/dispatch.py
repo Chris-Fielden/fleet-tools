@@ -287,19 +287,26 @@ def has_design(inv: dict) -> bool:
     return any(DESIGN_RE.search(n["text"]) for n in inv.get("notes", []))
 
 
+def needs_investigation(t: dict, rules: dict) -> bool:
+    return t["type"] in LAUNCH_TYPES and not t.get("oncall") and bool(rk.high_paths(t["body"], rules))
+
+
 def investigation_gate(t: dict, by_id: dict, rules: dict) -> tuple[str, str]:
     """Is this ticket free to launch? ('ok' | 'need' | 'wait' | 'blocked', why). A build or
     fix ticket whose body names high-risk paths (risk.high_paths) needs a done
     investigate ticket whose notes hold a design: 'need' means there is none yet (the
     dispatcher files one), 'wait' that it is still being worked, 'blocked' that it can't
     finish by itself (failed, cancelled, or done without a design)."""
-    if t["type"] not in LAUNCH_TYPES or t.get("oncall") or not rk.high_paths(t["body"], rules):
+    if not needs_investigation(t, rules):
         return "ok", ""
     inv_id = investigation_id(t)
-    inv = by_id.get(inv_id) if inv_id else None
-    if inv is None or inv["type"] != "investigate":
-        return ("need", "touches security-sensitive paths; an investigation comes first") if inv_id is None \
-            else ("blocked", f"investigation {inv_id} not found")
+    if inv_id is None:
+        return "need", "touches security-sensitive paths; an investigation comes first"
+    inv = by_id.get(inv_id)
+    if inv is None:
+        return "blocked", f"investigation {inv_id} not found"
+    if inv["type"] != "investigate":
+        return "blocked", f"{inv_id} is not an investigate ticket"
     if inv["status"] == "done":
         if has_design(inv):
             return "ok", ""
@@ -321,35 +328,41 @@ def _investigation_body(t: dict) -> str:
 
 def findings_note(inv: dict) -> str:
     head = FINDINGS_HEAD.format(id=inv["id"])
-    text = head + "\n" + "\n\n".join(n["text"] for n in inv["notes"])
+    notes = sorted(inv.get("notes", []), key=lambda n: not DESIGN_RE.search(n["text"]))  # the design survives a cut
+    text = head + "\n" + "\n\n".join(n["text"] for n in notes)
     return text if len(text) <= tk.NOTE_MAX else text[:tk.NOTE_MAX - 12] + "\n[cut]"
 
 
-def ensure_investigations(tickets: list[dict], warn=lambda m: None) -> list[str]:
+def ensure_investigations(tickets: list[dict], warn=lambda m: None) -> tuple[list[str], set[str]]:
     """Before launching: file the missing investigation of each open build or fix ticket
     that needs one (no human approval; it starts open), and append the findings of a done
-    one to the ticket as a note, once. Returns one line per change. Fails closed: if
-    something can't be read or saved, the ticket just stays gated."""
+    one to the ticket as a note, once. Returns (one line per change, ids of tickets to
+    hold back this run because that failed: fail closed)."""
     try:
         rules = rk.load_rules()
     except rk.RiskError as exc:
         warn(f"investigate-first: {exc}")
-        return []
+        return [], set()
     by_id = {t["id"]: t for t in tickets}
-    lines = []
+    lines, held = [], set()
     for t in sorted((t for t in tickets if t["status"] == "open" and t["type"] in LAUNCH_TYPES
                      and not t.get("oncall")), key=tk.oldest_first_key):
         state, _ = investigation_gate(t, by_id, rules)
+        branch = f"task/investigate-{t['id'].lower()}"
         try:
             if state == "need":
-                inv = tk.create_ticket({
-                    "type": "investigate", "repo": t["repo"], "branch": f"task/investigate-{t['id'].lower()}",
-                    "title": f"Investigate before building: {t['title']}"[:100],
-                    "body": _investigation_body(t)}, open_now=True)
+                # One filed earlier whose attaching failed is reused, not filed again.
+                inv = next((i for i in tickets if i["type"] == "investigate" and i["branch"] == branch
+                            and i["status"] not in ("failed", "cancelled")), None)
+                if inv is None:
+                    inv = tk.create_ticket({
+                        "type": "investigate", "repo": t["repo"], "branch": branch,
+                        "title": f"Investigate before building: {t['title']}"[:100],
+                        "body": _investigation_body(t)}, open_now=True)
+                    log("INVESTIGATION_FILED", f"{inv['id']} for {t['id']}")
+                    lines.append(f"{t['id']}  filed investigation {inv['id']}; it launches after that is done")
                 tk.attach_investigation(t["id"], inv["id"])
-                log("INVESTIGATION_FILED", f"{inv['id']} for {t['id']}")
-                lines.append(f"{t['id']}  filed investigation {inv['id']}; it launches after that is done")
-            elif state == "ok" and investigation_id(t):
+            elif state == "ok" and needs_investigation(t, rules):
                 inv = by_id[investigation_id(t)]
                 head = FINDINGS_HEAD.format(id=inv["id"])
                 if not any(n["text"].startswith(head) for n in t.get("notes", [])):
@@ -358,7 +371,8 @@ def ensure_investigations(tickets: list[dict], warn=lambda m: None) -> list[str]
                     lines.append(f"{t['id']}  findings of {inv['id']} added as a note")
         except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
             warn(f"investigate-first: {t['id']}: {exc}")
-    return lines
+            held.add(t["id"])
+    return lines, held
 
 
 def _judge(t: dict, tickets: dict, claimed: list[dict], settings: dict, holders: list[dict],

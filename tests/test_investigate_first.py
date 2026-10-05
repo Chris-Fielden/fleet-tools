@@ -88,8 +88,8 @@ def test_findings_note_is_added_once(projects, herdr_log):
     (inv,) = only("investigate")
     finish(inv["id"], "the design is X")
     tickets = tk.list_tickets()
-    assert len(dp.ensure_investigations(tickets)) == 1
-    assert dp.ensure_investigations(tk.list_tickets()) == []
+    assert len(dp.ensure_investigations(tickets)[0]) == 1
+    assert dp.ensure_investigations(tk.list_tickets()) == ([], set())
     assert len(tk.load_ticket(build["id"])["notes"]) == 1
 
 
@@ -179,3 +179,53 @@ def test_long_spec_is_cut_to_fit_and_points_back():
     t = {"id": "BD-9", "type": "build", "repo": "r", "body": body}
     out = dp._investigation_body(t)
     assert len(out) <= tk.BODY_MAX and "see BD-9" in out
+
+
+def test_low_risk_build_with_an_unfinished_parent_investigation_does_not_crash(projects, herdr_log):
+    real_repo(projects)
+    inv = mk(type="investigate", repo="ideas", branch="task/idea-1", title="idea", body="?")
+    build = mk(branch="task/plain", body="plain", parent=inv["id"])
+    tk.approve_ticket(build["id"])
+    assert dispatch_main(["--once"]) == 0
+    got = tk.load_ticket(build["id"])
+    assert got["status"] == "claimed" and "notes" not in got
+
+
+def test_failed_findings_note_holds_the_build_back(projects, herdr_log, monkeypatch):
+    real_repo(projects)
+    build = mk(branch="task/guard", body=RISKY)
+    assert dispatch_main(["--once"]) == 0
+    (inv,) = only("investigate")
+    finish(inv["id"], "design: steps")
+
+    def boom(*a, **k):
+        raise tk.TicketError("disk full")
+    real = tk.add_note
+    monkeypatch.setattr(tk, "add_note", boom)
+    assert dispatch_main(["--once"]) == 0
+    assert tk.load_ticket(build["id"])["status"] == "open"
+    monkeypatch.setattr(tk, "add_note", real)
+    assert dispatch_main(["--once"]) == 0
+    assert tk.load_ticket(build["id"])["status"] == "claimed"
+
+
+def test_an_unattached_investigation_is_reused_not_refiled(projects, herdr_log, monkeypatch):
+    real_repo(projects)
+    build = mk(branch="task/guard", body=RISKY)
+
+    def boom(*a, **k):
+        raise tk.TicketError("lock lost")
+    real = tk.attach_investigation
+    monkeypatch.setattr(tk, "attach_investigation", boom)
+    assert dispatch_main(["--once"]) == 0
+    assert len(only("investigate")) == 1 and tk.load_ticket(build["id"])["parent"] is None
+    monkeypatch.setattr(tk, "attach_investigation", real)
+    assert dispatch_main(["--once"]) == 0
+    (inv,) = only("investigate")
+    assert tk.load_ticket(build["id"])["parent"] == inv["id"]
+
+
+def test_findings_note_keeps_the_design_when_cut():
+    inv = {"id": "ID-1", "notes": [{"text": "x" * 3990}, {"text": "the design: y"}]}
+    assert "the design: y" in dp.findings_note(inv)
+    assert len(dp.findings_note(inv)) <= tk.NOTE_MAX
