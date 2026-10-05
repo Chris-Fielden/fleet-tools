@@ -82,7 +82,7 @@ def test_a_review_of_a_new_commit_replaces_the_verdict(env):
 def test_only_open_or_claimed_tickets_on_that_branch_and_repo_get_it(env):
     other_branch = new_ticket(branch="task/other")
     other_repo = new_ticket(repo="other-repo")
-    closed = new_ticket()
+    closed = new_ticket(branch="task/closed", title="Closed job")
     edit_ticket(closed, status="done")
     r = record(file=review_file(env, "a.md", SHA))
     assert "nothing recorded" in r.stdout and r.returncode == 0

@@ -9,6 +9,7 @@ import sys
 
 from pathlib import Path
 
+from . import dupes
 from . import kaneo
 from . import notify
 from . import risk as rk
@@ -39,6 +40,9 @@ def _build_parser() -> argparse.ArgumentParser:
     new.add_argument("--commit")
     new.add_argument("--parent")
     new.add_argument("--priority", choices=tk.PRIORITIES)
+    new.add_argument("--force", action="store_true",
+                     help="file it although a ticket with a very similar title exists (humans only; "
+                          "a branch already in use is always refused)")
 
     ls = sub.add_parser("list", help="list tickets, newest first (--status review: oldest first)")
     ls.add_argument("--status", choices=tk.STATUSES)
@@ -91,6 +95,8 @@ def _build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--field", choices=("risk", "confirm", "ok", "reviews"),
                       help="print just one value instead of the report")
 
+    sub.add_parser("dupes", help="list likely duplicate tickets: shared branch or similar title")
+
     sync = sub.add_parser("sync", help="mirror every ticket onto the Kaneo board")
     sync.add_argument("--dry-run", action="store_true",
                       help="show what would happen without changing Kaneo")
@@ -103,6 +109,38 @@ def _warn(message: str) -> None:
 
 def _tracker() -> tr.Tracker:
     return tr.get_tracker(_warn)
+
+
+def guard_duplicates(fields: dict, force: bool = False, prog: str = "ticket") -> None:
+    """Refuse a branch another unfinished ticket uses. For a very similar title, a
+    human at a terminal is asked (`force` skips the question); an agent, or no
+    terminal, gets a refusal naming the ticket: add a note there instead."""
+    tickets = tk.list_tickets()
+    for t in dupes.branch_conflicts(fields, tickets):
+        raise tk.TicketInvalid([f"branch {fields['branch']} is already used by {t['id']} "
+                                f"({t['status']}: {t['title']}); add a note to {t['id']} instead"])
+    similar = dupes.similar_titles(fields, tickets)
+    human = tk.current_creator() == "human"
+    if not similar or force and human:
+        return
+    named = ", ".join(f"{t['id']} ({r:.2f}: {t['title']})" for t, r in similar)
+    if human and sys.stdin.isatty():
+        print(f"{prog}: the title is very similar to {named}", file=sys.stderr)
+        print("File it anyway? [y/N] ", end="", file=sys.stderr, flush=True)
+        if sys.stdin.readline().strip().lower() in ("y", "yes"):
+            return
+        raise tk.TicketInvalid(["not filed"])
+    hint = "use --force to file it anyway" if human else f"add a note to {similar[0][0]['id']} instead"
+    raise tk.TicketInvalid([f"the title is very similar to {named}; {hint}"])
+
+
+def _cmd_dupes(args) -> int:
+    found = dupes.pairs(tk.list_tickets())
+    for p in found:
+        print(dupes.pair_line(p))
+    if not found:
+        print("no likely duplicates")
+    return 0
 
 
 def _cmd_new(args) -> int:
@@ -124,6 +162,7 @@ def _cmd_new(args) -> int:
         "title": args.title, "body": body,
         "commit": args.commit, "parent": args.parent, "priority": args.priority,
     }
+    guard_duplicates(fields, force=args.force)
     ticket = _tracker().create(fields)
     print(ticket["id"])
     notify.notify_quietly(ticket, notify.event_for_new(ticket), _warn)
@@ -341,7 +380,7 @@ def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
     handler = {"new": _cmd_new, "list": _cmd_list, "show": _cmd_show, "approve": _cmd_approve,
                "close": _cmd_close, "note": _cmd_note, "review-result": _cmd_review_result, "risk": _cmd_risk, "gate": _cmd_gate,
-               "sync": _cmd_sync}
+               "dupes": _cmd_dupes, "sync": _cmd_sync}
     try:
         return handler[args.command](args)
     except (rk.RiskError, st.SettingsError) as exc:

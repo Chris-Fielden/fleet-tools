@@ -71,7 +71,7 @@ def test_bad_settings_are_a_plain_error(given):
 def test_id_prefixes_come_from_settings():
     write_settings(id_prefixes={"build": "XB"}, emergency_prefix="XX")
     assert run("new", *new_args()).stdout.startswith("XB-")
-    assert run("new", *new_args(branch="task/two", priority="urgent")).stdout.startswith("XX-")
+    assert run("new", *new_args(branch="task/two", title="Another job", priority="urgent")).stdout.startswith("XX-")
 
 
 def test_bad_settings_stop_ticket_new_with_a_message():

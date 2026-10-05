@@ -6,6 +6,7 @@ import sys
 from datetime import datetime, timezone
 
 from . import notify
+from . import ticket_cli
 from . import settings as st
 from . import ticket as tk
 from . import tracker as tr
@@ -19,6 +20,7 @@ def _warn(message: str) -> None:
 
 def _file(prog: str, fields: dict) -> int:
     try:
+        ticket_cli.guard_duplicates(fields, prog=prog)
         ticket = tr.get_tracker(_warn).create(fields)
     except tk.TicketInvalid as exc:
         for line in exc.errors:

@@ -95,9 +95,9 @@ def test_alert_from_agent_is_open_and_urgent():
 
 def test_tickets_filed_back_to_back_get_different_branches():
     from fleet.shortcuts_cli import alert_main, idea_main
-    for main, args in ((alert_main, ["myrepo", "t"]), (idea_main, ["t"])):
-        for _ in range(3):
-            assert main(args) == 0
+    for main, args in ((alert_main, ["myrepo", "{}"]), (idea_main, ["{}"])):
+        for word in ("alpha", "quokka", "zebra"):  # different titles: the duplicate guard stays quiet
+            assert main([a.format(word * 3) for a in args]) == 0
     branches = [t["branch"] for t in tk.list_tickets()]
     assert len(branches) == 6 and len(set(branches)) == 6
     assert all(tk.BRANCH_RE.fullmatch(b) and len(b) - 5 <= 41 for b in branches)
