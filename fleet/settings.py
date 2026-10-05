@@ -16,6 +16,7 @@ import copy
 import json
 import re
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import ticket as tk
 
@@ -28,6 +29,8 @@ DEFAULTS = {
     "max_investigations_per_day": 3,
     "watch_interval_seconds": 120,
     "max_launches_per_day": 10,
+    # The daily caps (launches, on-call) reset at midnight in this IANA timezone.
+    "timezone": "America/Los_Angeles",
     # Overnight queue: at this time (HH:MM, America/Los_Angeles) the prep pass
     # runs over the tickets in review, if it has not already run.
     "prep_time": "06:00",
@@ -147,6 +150,16 @@ def _merge(settings: dict, given, path: Path) -> None:
             path, given, "watch_interval_seconds", MIN_WATCH_INTERVAL, f"{MIN_WATCH_INTERVAL} or more")
     if "max_launches_per_day" in given:
         settings["max_launches_per_day"] = _whole(path, given, "max_launches_per_day", 0, "0 or more")
+    if "timezone" in given:
+        value = given["timezone"]
+        try:
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError
+            ZoneInfo(value)
+        except (ValueError, ZoneInfoNotFoundError, OSError):
+            raise SettingsError(f"{path}: timezone must be an IANA timezone name like "
+                                "\"America/Los_Angeles\"") from None
+        settings["timezone"] = value
     if "prep_time" in given:
         value = given["prep_time"]
         if not isinstance(value, str) or not PREP_TIME_RE.fullmatch(value):

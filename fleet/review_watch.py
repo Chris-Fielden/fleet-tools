@@ -5,7 +5,9 @@
   the merge gate for the branch's exact tip, a SUMMARY note was recorded after
   that review, and its herdr agent is idle or done. One "ready to ship" ping.
   If that stops being true (the tip moved, the agent is busy again) it goes
-  back to claimed.
+  back to claimed. The ping waits for the prep pass that covers the ticket (prep.holds_ping):
+  a pass's one "N ready to ship, list ready" ping speaks for its tickets; a ticket no pass
+  will touch is pinged at once.
 * A claimed ticket TRULY FAILS when its agent sat idle on a failed commit for
   5 minutes, it has `fail_rounds_threshold` (default 8) FAIL verdicts on different commits, its agent was blocked
   for 20 minutes, or it had no activity for 45 minutes while its agent was idle or waiting. It is then closed as
@@ -178,6 +180,20 @@ def _ping(t: dict, event: str, key: str, state: dict, warn, detail: str | None =
         state["sent"].append(key)
         return True
     return False
+
+
+def _ready_ping(t: dict, tip: str, settings: dict, now: datetime, state: dict, warn) -> None:
+    """The "ready to ship" ping, once the prep pass that will cover this ticket is out of the way:
+    while an agent holds the ticket, a pass is due or running, or the pass already covered it
+    (its one "N ready to ship, list ready" ping speaks for it), nothing is sent here. Asked every
+    cycle, so a held ping goes out as soon as no pass will touch the ticket."""
+    try:
+        if prep.holds_ping(t, tk.list_tickets(), settings, now):
+            return
+    except OSError as exc:
+        warn(f"prep state unreadable ({exc}); the ready ping of {t['id']} waits")
+        return
+    _ping(t, "ship", f"{t['id']}:ship:{tip}", state, warn)  # a send that failed is retried
 
 
 def _queue_ping(ticket_id: str, event: str, state: dict, warn, detail: str | None = None) -> None:
@@ -507,7 +523,7 @@ def _oncall_for(t: dict, rec: dict, detail: str, repo: Path, settings: dict, now
     if mine:
         return None, "an on-call attempt was already made for it"
     cap = settings["max_oncall_per_day"]
-    if dp.oncall_today(tickets, now) >= cap:
+    if dp.oncall_today(tickets, now, settings["timezone"]) >= cap:
         return None, f"the daily on-call limit ({cap}) is reached"
     oc = _file_oncall(t, detail, rec["commit"], repo, warn)
     if oc is None:
@@ -589,7 +605,7 @@ def _move(t: dict, status: str, allowed_from: tuple, warn):
 
 
 def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
-               now: datetime, state: dict, emit, warn) -> None:
+               now: datetime, state: dict, emit, warn, moved: list | None = None) -> None:
     repo = settings["projects_dir"] / t["repo"]
     if repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir():
         return
@@ -604,7 +620,10 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
         # Leave it alone if herdr cannot be asked; a vanished agent is not busy.
         busy = agents_known and agent is not None and not stopped
         if earned and not busy:
-            _ping(t, "ship", f"{t['id']}:ship:{tip}", state, warn)  # a send that failed is retried
+            if moved is not None:
+                moved.append((t, tip))   # like a ticket that just moved: judged after every move of the cycle
+            else:
+                _ready_ping(t, tip, settings, now, state, warn)
             _end_spells(t["id"], state)
             _unrecorded_pings(t, repo, tip, state, now, emit, warn)
             return
@@ -630,7 +649,10 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             # tab (never a focused one; a kept tab is closed when the ticket is done).
             closed, reason = lc.close_finished_tab(t["id"], settings)
             emit(f"{t['id']}  tab {'closed' if closed else 'kept'}: {reason}")
-            _ping(new, "ship", f"{t['id']}:ship:{tip}", state, warn)
+            if moved is not None:
+                moved.append((new, tip))   # pinged by check() once every ticket of this cycle has moved
+            else:
+                _ready_ping(new, tip, settings, now, state, warn)
             _end_spells(t["id"], state)
             _unrecorded_pings(new, repo, tip, state, now, emit, warn)
         return
@@ -687,13 +709,19 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
     except lc.LaunchError as exc:
         warn(f"cannot check agents for review status or alerts: {exc}")
         agents, known = {}, False
+    moved: list[tuple[dict, str]] = []
     for t in tickets:
         if not known and t["status"] == "claimed":
             continue  # nothing here can be decided without herdr
         try:
-            _check_one(t, agents.get(t["id"].lower()), known, settings, now, state, emit, warn)
+            _check_one(t, agents.get(t["id"].lower()), known, settings, now, state, emit, warn, moved)
         except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
             warn(f"{t['id']}: {exc}")
+    for new, tip in moved:   # judged against the final set of waiting tickets, not one at a time
+        try:
+            _ready_ping(new, tip, settings, now, state, warn)
+        except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
+            warn(f"{new['id']}: {exc}")
     try:
         _flag_stuck_oncall(settings, warn)
     except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:

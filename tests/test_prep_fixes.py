@@ -32,7 +32,7 @@ def test_the_prep_agent_leaves_out_tickets_a_reconcile_agent_holds(q, herdr_log,
     assert ship_main([a["id"]]) == 0
     assert ship_main([b["id"]]) == 1                           # a reconcile agent holds beta
     c, _ = in_review(q, "task/gamma", {"g.txt": "g"})
-    settings, _, _ = start_prep()
+    settings, _, _ = start_prep(force=True)
     assert prep.locked_ids() == {b["id"], c["id"]}
     manifest = json.loads((lc.research_folder(prep.FOLDER_ID, settings) / "manifest-prep.json").read_text())
     assert [t["id"] for t in manifest["tickets"]] == [c["id"]]
@@ -49,7 +49,7 @@ def test_a_reconcile_agent_needs_the_same_builder_as_the_prep_agent(q, herdr_log
 
 def test_a_long_running_agent_keeps_its_locks(q, herdr_log, env):
     a, _ = in_review(q, "task/one", {"one.txt": "1"})
-    settings, _, _ = start_prep()
+    settings, _, _ = start_prep(force=True)
     with prep._state() as st:
         st["jobs"][0]["started"] = "2026-10-03T10:00:00Z"
     _, warns = finish_prep(settings, now=datetime(2026, 10, 3, 18, 0, tzinfo=timezone.utc))   # 8 hours later
@@ -68,7 +68,7 @@ def test_the_starting_tips_are_recorded_before_the_agent_exists(q, herdr_log, en
         commit(a_wt, {"fast.txt": "an agent this fast"})    # the agent writes the moment it starts
         return real(*args, **kw)
     monkeypatch.setattr(lc, "start_agent", spy)
-    settings, _, _ = start_prep()
+    settings, _, _ = start_prep(force=True)
     assert seen["job"]["tips"] == {a["id"]: tip} and seen["job"]["ready"] is False
     report(settings, order=[a["id"]])
     set_agent_status(env, "prep", "idle")
@@ -93,7 +93,7 @@ def test_a_keeper_that_fails_its_recheck_does_not_cancel_the_duplicate(q, herdr_
 @pytest.mark.parametrize("bad", [[], {}, 5, None, [["x"]]])
 def test_odd_report_fields_are_ignored_not_fatal(q, herdr_log, env, bad):
     a, _ = in_review(q, "task/one", {"one.txt": "1"})
-    settings, _, _ = start_prep()
+    settings, _, _ = start_prep(force=True)
     report(settings, order=bad, tickets=bad, duplicates=[{"keep": bad, "cancel": bad}, bad])
     set_agent_status(env, "prep", "idle")
     _, warns = finish_prep(settings)
@@ -102,7 +102,7 @@ def test_odd_report_fields_are_ignored_not_fatal(q, herdr_log, env, bad):
 
 def test_a_half_launched_job_with_a_busy_agent_keeps_its_tickets(q, herdr_log, env):
     a, _ = in_review(q, "task/one", {"one.txt": "1"})
-    settings, _, _ = start_prep()
+    settings, _, _ = start_prep(force=True)
     with prep._state() as st:
         st["jobs"][0].update(ready=False, started="2026-10-03T10:00:00Z")
     finish_prep(settings, now=datetime(2026, 10, 3, 18, 0, tzinfo=timezone.utc))
@@ -126,7 +126,7 @@ def test_a_reconciled_ticket_shipped_alone_before_gets_a_list_line(q, herdr_log,
 
 def test_uncommitted_edits_left_by_the_agent_keep_a_ticket_off_the_list(q, herdr_log, env):
     a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
-    settings, _, _ = start_prep()
+    settings, _, _ = start_prep(force=True)
     (a_wt / "one.txt").write_text("edited but not committed")
     set_agent_status(env, "prep", "idle")
     finish_prep(settings)
@@ -138,7 +138,7 @@ def test_a_ticket_being_shipped_is_left_out_of_the_prep_agent(q, herdr_log, env,
     b, _ = in_review(q, "task/two", {"two.txt": "2"})
     assert prep.reserve_shipping(a["id"]) is None
     assert prep.locked_ids() == {a["id"]}
-    settings, _, _ = start_prep()
+    settings, _, _ = start_prep(force=True)
     manifest = json.loads((lc.research_folder(prep.FOLDER_ID, settings) / "manifest-prep.json").read_text())
     assert [t["id"] for t in manifest["tickets"]] == [b["id"]]
 
@@ -181,7 +181,7 @@ def test_an_unreadable_prep_state_fails_closed(q, env, capsys):
 
 def test_a_half_launched_job_that_stopped_is_still_validated(q, herdr_log, env):
     a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
-    settings, _, _ = start_prep()
+    settings, _, _ = start_prep(force=True)
     with prep._state() as st:
         st["jobs"][0].update(ready=False, started="2026-10-03T10:00:00Z")
     (a_wt / "stray.txt").write_text("left behind by the agent")   # uncommitted work
@@ -216,7 +216,7 @@ def test_two_ships_into_one_repo_never_run_together(q, herdr_log, env, capsys):
 
 def test_giving_up_on_a_job_is_a_loud_warning(q, herdr_log, env, monkeypatch):
     a, _ = in_review(q, "task/one", {"one.txt": "1"})
-    settings, _, _ = start_prep()
+    settings, _, _ = start_prep(force=True)
     set_agent_status(env, "prep", "idle")
     monkeypatch.setattr(prep, "_finish_prep", lambda *x: (_ for _ in ()).throw(OSError("disk full")))
     warns = []
@@ -228,7 +228,7 @@ def test_giving_up_on_a_job_is_a_loud_warning(q, herdr_log, env, monkeypatch):
 
 def test_the_recheck_runs_the_branch_scripts_with_an_agent_identity(q, herdr_log, env, monkeypatch):
     a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
-    settings, _, _ = start_prep()
+    settings, _, _ = start_prep(force=True)
     commit(a_wt, {"more.txt": "changed by the prep agent"})
     seen = []
     real = prep._run
@@ -250,7 +250,7 @@ def test_the_recheck_runs_the_branch_scripts_with_an_agent_identity(q, herdr_log
 def test_a_slow_recheck_does_not_block_the_cycle(q, herdr_log, env, monkeypatch):
     import threading
     a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
-    settings, _, _ = start_prep()
+    settings, _, _ = start_prep(force=True)
     commit(a_wt, {"more.txt": "changed by the prep agent"})
     gate, started = threading.Event(), threading.Event()
     real = prep.validate
@@ -277,7 +277,7 @@ def test_a_slow_recheck_does_not_block_the_cycle(q, herdr_log, env, monkeypatch)
 
 def test_a_branch_sent_back_by_the_prep_pass_gets_an_agent_again(q, herdr_log, env, monkeypatch):
     a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
-    settings, _, _ = start_prep()
+    settings, _, _ = start_prep(force=True)
     commit(a_wt, {"more.txt": "changed by the prep agent"})
     monkeypatch.setenv("FAKE_REVIEW_FAIL", "task/one")
     set_agent_status(env, "prep", "idle")
@@ -290,7 +290,7 @@ def test_a_branch_sent_back_by_the_prep_pass_gets_an_agent_again(q, herdr_log, e
 def test_a_sent_back_ticket_that_cannot_get_an_agent_says_so_once(q, herdr_log, env, ntfy, monkeypatch):
     from test_prep import sent
     a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
-    settings, _, _ = start_prep()
+    settings, _, _ = start_prep(force=True)
     commit(a_wt, {"more.txt": "changed by the prep agent"})
     monkeypatch.setenv("FAKE_REVIEW_FAIL", "task/one")
     monkeypatch.setattr(lc, "relaunch", lambda t, s, w: (1, f"{t['id']}  relaunch failed: no room"))
@@ -315,7 +315,7 @@ def test_claude_p_starts_with_claudecode_set():
 
 def test_the_recheck_runs_as_the_agent_that_built_it_so_the_other_model_reviews(q, herdr_log, env, monkeypatch):
     a, a_wt = in_review(q, "task/one", {"one.txt": "1"})
-    settings, _, _ = start_prep()
+    settings, _, _ = start_prep(force=True)
     settings["builder"] = "codex"
     commit(a_wt, {"more.txt": "changed by a codex prep agent"})
     seen = []

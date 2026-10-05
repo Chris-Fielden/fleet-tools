@@ -591,6 +591,41 @@ def approve_ticket(ticket_id: str) -> dict:
     return ticket
 
 
+def _lines(text: str) -> list[str]:
+    return text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
+def first_line_title(text: str) -> str:
+    """The first non-blank line of text, trimmed to the 100-character title limit."""
+    for line in _lines(text):
+        if line.strip():
+            return line.strip()[:100].strip()
+    return ""
+
+
+def fix_titles() -> list[dict]:
+    """Retitle unfinished tickets whose title is the body with its newlines turned
+    into spaces (how alert used to title them) to the body's first line. Titles
+    anyone set by hand are left alone. Humans only. Returns the tickets changed."""
+    creator = current_creator()
+    if creator != "human":
+        raise TicketError(f"only a human can retitle tickets (running as {creator})")
+    changed = []
+    with _locked():
+        for ticket in list_tickets():
+            if ticket["status"] not in ACTIVE_STATUSES:
+                continue
+            body = ticket.get("body", "")
+            squashed = " ".join(_lines(body))[:100].strip()
+            title = first_line_title(body)
+            if title and title != ticket["title"] and ticket["title"] == squashed:
+                ticket["title"] = title
+                ticket["updated_at"] = _now()
+                _write_atomic(_ticket_path(ticket["id"]), ticket)
+                changed.append(ticket)
+    return changed
+
+
 def set_priority(ticket_id: str, priority: str) -> dict:
     """Make an unfinished ticket urgent or normal. Humans only. The id (and its
     prefix) never changes. Setting the priority it already has changes nothing."""

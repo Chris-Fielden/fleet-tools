@@ -164,7 +164,9 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     _prep_quietly(lambda: prep.finish(settings, clock.now(), emit, warn), warn)
     if checks is not None:
         checks(emit, warn, prompted)
+        kaneo.refresh_usage(tk.list_tickets(), warn)   # --watch: each run's tokens reach the card
     _prep_quietly(lambda: prep.maybe_start(settings, clock.now(), emit, warn, reserve), warn)
+    _prep_quietly(lambda: prep.flush_pings(settings, clock.now(), warn), warn)
     lines, held = dp.ensure_investigations(tk.list_tickets(), warn)
     for line in lines:
         emit(line)
@@ -260,18 +262,49 @@ def _cmd_once(settings: dict) -> int:
     # A one-shot run has no next cycle: wait for the prep re-checks started above and finish the job.
     prep.wait_checks()
     _prep_quietly(lambda: prep.finish(settings, dp.Clock().now(), print, _warn), _warn)
+    _prep_quietly(lambda: prep.flush_pings(settings, dp.Clock().now(), _warn), _warn)   # owed pings
     return code
 
 
-def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None) -> int:
+def _reload_settings(settings: dict, reload, last_error: str | None) -> str | None:
+    """Re-read the settings file at the start of a cycle. A good file replaces `settings`
+    in place (SETTINGS_RELOADED lists the changed keys); a bad one keeps the last good
+    values, and SETTINGS_INVALID is logged and pinged once per distinct problem.
+    Returns the problem now being reported (None if the file is fine)."""
+    try:
+        fresh = reload()
+    except dp.SettingsError as exc:
+        problem = str(exc)
+        if problem != last_error:
+            lc._safe_log("SETTINGS_INVALID", f"keeping the last good settings: {problem}")
+            try:
+                notify.send_alert("settings_invalid", "Fleet settings invalid",
+                                  f"dispatch kept the last good settings: {problem}")
+            except notify.NotConfigured:
+                pass
+            except Exception as exc2:   # best effort: the log line is what counts
+                lc._safe_log("SETTINGS_INVALID", f"could not send the ping ({type(exc2).__name__})")
+        return problem
+    changed = sorted(k for k in fresh if fresh[k] != settings.get(k))
+    if changed:
+        settings.clear()
+        settings.update(fresh)
+        lc._safe_log("SETTINGS_RELOADED", f"changed: {', '.join(changed)}")
+    return None
+
+
+def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None, reload=None) -> int:
     """Run the --once steps every watch_interval_seconds until Ctrl+C, printing
     a line only when it was not printed by the cycle before. At most
-    max_launches_per_day launches are attempted per UTC day; after that it only
-    reconciles. If HEAD of the checkout this code runs from (`head()`) changes,
+    max_launches_per_day launches are attempted per day (midnight in the `timezone`
+    setting); after that it only reconciles. `reload()` (main passes
+    dp.load_settings) is called at the start of every cycle to pick up changes to
+    the settings file; `settings` is updated in place. If HEAD of the checkout this code runs from (`head()`) changes,
     it logs WATCH_RESTART and raises WatchRestart: main re-executes after
     releasing the lock, so the new code runs."""
     clock = clock or dp.Clock()
     interval, cap = settings["watch_interval_seconds"], settings["max_launches_per_day"]
+    invalid = None
     print(f"watching every {interval}s, at most {cap} launches a day (Ctrl+C to stop)", flush=True)
     lc._safe_log("WATCH_START", f"every {interval}s, max {cap} launches a day")
     previous: set[str] = set()
@@ -281,7 +314,7 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None) -> int:
     kept_tabs = lc.KeptTabs(clock.now)
 
     def today() -> str:
-        return clock.now().strftime("%Y-%m-%d")
+        return dp.local_day(clock.now(), settings["timezone"])
 
     def reserve() -> bool:
         """Count a launch before it starts, so an interruption or a later error
@@ -289,7 +322,7 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None) -> int:
         began: a cycle can cross midnight. A count that cannot be read or saved
         raises, which refuses the launch."""
         day = today()
-        if dp.launches_today(day) >= cap:
+        if dp.launches_today(day) >= settings["max_launches_per_day"]:
             return False
         dp.add_launches(day)
         return True
@@ -297,6 +330,9 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None) -> int:
     try:
         while True:
             lines: list[str] = []
+            if reload is not None:
+                invalid = _reload_settings(settings, reload, invalid)
+            interval, cap = settings["watch_interval_seconds"], settings["max_launches_per_day"]
             try:
                 def checks(emit, warn, skip=frozenset()):
                     review_watch.check(settings, clock.now(), emit, warn, skip)
@@ -317,7 +353,7 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None) -> int:
             if reached and announced != day:
                 announced = day
                 message = (f"daily launch limit reached ({cap} on {day}); still reconciling, "
-                           "launching nothing until tomorrow (UTC)")
+                           f"launching nothing until midnight ({settings['timezone']})")
                 print(message, flush=True)
                 lc._safe_log("LAUNCH_CAP", message)
             clock.sleep(interval)
@@ -354,7 +390,7 @@ def main(argv=None) -> int:
             if args.dry_run:
                 return _cmd_dry_run(settings)
             if args.watch:
-                return _cmd_watch(settings)
+                return _cmd_watch(settings, reload=dp.load_settings)
             return _cmd_once(settings) if args.once else _cmd_reconcile(settings)
     except dp.WatchRestart:
         pass   # the lock is released by now: re-execute below

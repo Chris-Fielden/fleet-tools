@@ -190,14 +190,14 @@ already running" message and exit 0.
   a ticket that stays "at capacity" is reported once. It never asks a
   question. Warnings go to the same output. An error in one cycle (disk, git,
   ticket store) is printed and the next cycle runs.
-- **Safety cap.** At most `max_launches_per_day` launches are attempted per UTC
+- **Safety cap.** At most `max_launches_per_day` launches are attempted per local
   day (build, fix and investigation launches together). Each launch is counted
   and saved before it starts, so an interruption or a later error cannot leave
   it uncounted, and if the count cannot be saved the launch is refused. A failed
   attempt counts, so a broken setup cannot loop forever. The count is kept in
   `$FLEET_HOME/dispatch-launches.json` so restarting the watcher does not
   reset it. Once the cap is reached it keeps reconciling, closing tabs and
-  checking agents, launches nothing until the next UTC day, and says so once
+  checking agents, launches nothing until the next local day (midnight in `timezone`), and says so once
   per day (log `LAUNCH_CAP`). If the count file is unreadable it launches
   nothing and says so. The cap applies to `--watch` only; `--once` is a
   deliberate human action.
@@ -408,12 +408,22 @@ launch puts the ticket back to the status it had.
 A ticket in review no longer fills a `max_running` slot, so the queue keeps building
 all night while finished work waits. In the morning the human ships from one list.
 
-**When it runs.** Every cycle (`--once` and `--watch`), if some ticket in review was not
-covered by an earlier prep pass at its current tip, the dispatcher launches ONE prep
-agent over all tickets in review when either nothing is left to build (nothing claimed,
-nothing open that could start or is only waiting its turn) or it is `prep_time`
-(default `06:00`) America/Los_Angeles or later. A pass covers the tickets it saw, so it
-runs once unless new tickets reach review (or a ticket returns with a new tip) after it.
+**When it runs.** Every cycle (`--once` and `--watch`), if at least TWO tickets wait in
+review and one of them was not covered by an earlier prep pass at its current tip, the
+dispatcher launches ONE prep agent over all tickets in review when either nothing is left
+to build (nothing claimed, nothing open that could start or is only waiting its turn) or it
+is the first look at or after `prep_time` (default `06:00`) America/Los_Angeles today (once
+a day). One ticket alone has nothing to reconcile: it gets no prep agent and its ready ping
+at once. A pass covers the tickets it saw, so it runs again only when new tickets reach
+review (or a ticket returns with a new tip) and nothing is left to build.
+
+**The ready ping.** "Ready to ship" is sent per ticket only when no prep pass will touch it:
+it waits while an agent holds the ticket, a pass is due now or at today's `prep_time` (two or
+more waiting), or a pass already covered it. A pass's one "N ready to ship, list ready" ping
+speaks for its tickets, so a ready ping is never followed by a refusal because an agent holds
+the ticket. `ship --list` prints on stderr every ticket in review that is not on the list
+(it reached review after the list was written) and does not ship it.
+
 Only one prep agent runs at a time, at most 3 launch attempts a day, and it counts as a
 launch against `max_launches_per_day`. It needs `builder` claude, like investigations
 (it works from `<research_dir>/PREP`, with the guard hooks, and never touches the ticket
@@ -457,3 +467,12 @@ merge main into the branch, keep what both sides needed) and exits 1. When that 
 the dispatcher re-checks and re-reviews the branch like in the prep pass; a pass leaves the
 ticket in review and the review watch sends the usual `ready to ship` ping. No conflict means
 no agent.
+
+### Settings reload (`--watch`)
+
+`settings.json` is re-read at the start of every cycle, so a change takes effect on
+the next cycle without a restart. Changed keys are logged as `SETTINGS_RELOADED`
+(`changed: max_running, ...`). If the new file is invalid, the last good settings
+stay in force, `SETTINGS_INVALID` is logged and one low-priority ping
+(`settings_invalid`) is sent, once per distinct problem until the file is valid
+again.

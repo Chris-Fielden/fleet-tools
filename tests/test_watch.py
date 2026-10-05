@@ -128,8 +128,8 @@ def test_watch_cap_stops_launching_says_so_once_and_resets_next_day(projects, he
     assert out.count("launched claude") == 1
     assert tk.load_ticket(two["id"])["status"] == "open"
     assert [x[:2] for x in calls(herdr_log)].count(["tab", "create"]) == 1
-    # Next UTC day: the count starts again, and the limit is announced again.
-    assert watch(over, FakeClock(2, start=datetime(2026, 10, 3, 0, 5, tzinfo=timezone.utc))) == 0
+    # Next local day: the count starts again, and the limit is announced again.
+    assert watch(over, FakeClock(2, start=datetime(2026, 10, 3, 7, 5, tzinfo=timezone.utc))) == 0
     out = capsys.readouterr().out
     assert out.count("launched claude") == 1
     assert out.count("daily launch limit reached (") == 1
@@ -179,7 +179,7 @@ def test_watch_unreadable_count_file_launches_nothing(projects, herdr_log, capsy
 def test_watch_counts_a_launch_on_the_day_it_starts_when_the_cycle_crosses_midnight(projects, herdr_log, monkeypatch):
     real_repo(projects)
     mk(branch="task/one")
-    clock = FakeClock(1, start=datetime(2026, 10, 2, 23, 59, 50, tzinfo=timezone.utc))
+    clock = FakeClock(1, start=datetime(2026, 10, 3, 6, 59, 50, tzinfo=timezone.utc))
 
     def slow_step(tickets, warn):
         clock.t += timedelta(seconds=30)   # reconcile and friends take a while
