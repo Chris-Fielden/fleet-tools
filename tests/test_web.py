@@ -432,3 +432,9 @@ def test_shipped_ping_carries_the_result(projects, ntfy):
     body = ntfy.requests[0]["body"]
     assert body["title"] == f"Ship refused: {t['id']}"
     assert "no review of this exact commit" in body["message"] and body["priority"] == 4
+
+
+def test_web_paths_accept_any_case_of_the_ticket_id(endpoint, rig):
+    reviewed(rig.wt, rig.repo)
+    status, page = call(endpoint, f"/ship/{rig.t['id'].lower()}")
+    assert status == 200 and rig.t["id"] in page

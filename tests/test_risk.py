@@ -610,6 +610,24 @@ def test_high_risk_needs_the_ticket_id_not_y(task, repo):
     assert merged(repo) and (repo / "k8s" / "app.yaml").exists()
 
 
+@pytest.mark.parametrize("fold", [str.lower, str.swapcase, str.capitalize])
+def test_high_risk_confirmation_ignores_case(task, repo, fold):
+    tid = file_ticket()
+    commit_in(task, "k8s/app.yaml")
+    pass_review(task, "codex"); pass_review(task, "claude")
+    r = finish(repo, f"{fold(tid)}\n")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert merged(repo)
+
+
+def test_high_risk_wrong_id_still_cancels(task, repo):
+    file_ticket()
+    commit_in(task, "k8s/app.yaml")
+    pass_review(task, "codex"); pass_review(task, "claude")
+    r = finish(repo, "bd-9999\n")
+    assert "Cancelled" in r.stdout and not merged(repo)
+
+
 def test_high_risk_without_a_ticket_types_the_task_name(task, repo):
     commit_in(task, "scripts/check.sh", "#!/usr/bin/env bash\n# changed\nexit 0\n")
     pass_review(task, "codex"); pass_review(task, "claude")

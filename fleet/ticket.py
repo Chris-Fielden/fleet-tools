@@ -56,6 +56,13 @@ CALLER_FIELDS = ("type", "repo", "branch", "title", "body", "commit", "parent", 
 ID_RE = re.compile(r"T-\d{8}-\d{3,}|[A-Z]{2}-[1-9]\d*")
 ID_EXAMPLE = "BD-12 or T-20250101-001"
 
+
+def normalize_id(ticket_id):
+    """A ticket id as a human typed it, in the stored (uppercase) form: 'bd-36' and
+    'Bd-36' both mean BD-36. Anything that is not a string comes back unchanged,
+    for the caller's own validation to refuse."""
+    return ticket_id.strip().upper() if isinstance(ticket_id, str) else ticket_id
+
 # Id prefix by ticket type. Add a type here (and to TYPES) and it gets its
 # prefix. EMERGENCY_PREFIX wins over the type for any ticket whose priority
 # field is "urgent"; tickets without a priority field never get it.
@@ -362,6 +369,7 @@ def _write_atomic(path: Path, data: dict) -> None:
 
 
 def load_ticket(ticket_id: str) -> dict:
+    ticket_id = normalize_id(ticket_id)
     if not ID_RE.fullmatch(ticket_id):
         raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
     return _load_path(_ticket_path(ticket_id), ticket_id)
@@ -554,6 +562,7 @@ def create_ticket(fields: dict, *, needs_approval: bool = False, oncall: bool = 
 
 def approve_ticket(ticket_id: str) -> dict:
     """Turn a proposed ticket (build or investigate) into an open one. Humans only."""
+    ticket_id = normalize_id(ticket_id)
     creator = current_creator()
     if creator != "human":
         raise TicketError(f"only a human can approve tickets (running as {creator})")
@@ -580,6 +589,7 @@ def set_status(ticket_id: str, status: str, *, allowed_from, assignee=_KEEP,
                started_at: str | None = None) -> dict:
     """Move a ticket to `status` atomically, under the store lock. Refuses
     unless its current status is in `allowed_from`. Returns the new ticket."""
+    ticket_id = normalize_id(ticket_id)
     if status not in STATUSES:
         raise TicketError(f"unknown status: {status}")
     if assignee is not _KEEP and assignee is not None and assignee not in AGENTS:
@@ -615,6 +625,7 @@ def finish_investigation(ticket_id: str) -> dict:
     """A claimed investigation's agent has stopped: done if it recorded notes,
     failed if not. Decided from the notes as stored right now, under the lock,
     so findings saved a moment ago count."""
+    ticket_id = normalize_id(ticket_id)
     with _locked():
         ticket = load_ticket(ticket_id)
         if ticket["status"] != "claimed" or ticket["type"] != "investigate":
@@ -632,6 +643,7 @@ def finish_investigation(ticket_id: str) -> dict:
 def add_note(ticket_id: str, text: str) -> dict:
     """Append a note (findings, a remark) to a ticket. Anyone may add one, so
     it is checked for secrets and kept small."""
+    ticket_id = normalize_id(ticket_id)
     if not ID_RE.fullmatch(ticket_id):
         raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
     if not _is_str(text) or not 1 <= len(text) <= NOTE_MAX:
@@ -656,6 +668,7 @@ def append_to_body(ticket_id: str, heading: str, items: str) -> dict | None:
     """Add the lines of `items` that the ticket body does not already hold,
     under `heading`. Returns the ticket, or None when nothing new was added.
     The check and the write happen under one lock."""
+    ticket_id = normalize_id(ticket_id)
     if not ID_RE.fullmatch(ticket_id):
         raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
     with _locked():
@@ -730,6 +743,7 @@ def close_ticket(ticket_id: str, outcome: str, note: str | None = None) -> dict:
     creator = current_creator()
     if creator != "human":
         raise TicketError(f"only a human can close tickets (running as {creator})")
+    ticket_id = normalize_id(ticket_id)
     if not ID_RE.fullmatch(ticket_id):
         raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
     if outcome not in CLOSE_OUTCOMES:
@@ -752,6 +766,7 @@ def raise_risk(ticket_id: str, level: str) -> dict:
     creator = current_creator()
     if creator != "human":
         raise TicketError(f"only a human can raise a ticket's risk level (running as {creator})")
+    ticket_id = normalize_id(ticket_id)
     if not ID_RE.fullmatch(ticket_id):
         raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
     if level not in rk.LEVELS:

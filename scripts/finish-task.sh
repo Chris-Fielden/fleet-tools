@@ -103,7 +103,8 @@ elif [[ "$risk" == "high" ]]; then
   echo "HIGH RISK change."
   echo "Type the ticket id ($confirm_word) to merge $branch into $base:"
   read -r answer
-  [[ "$answer" == "$confirm_word" ]] || { echo "Cancelled. Nothing changed."; exit 0; }
+  # Case does not matter: 'Bd-36' confirms BD-36.
+  [[ "${answer^^}" == "${confirm_word^^}" ]] || { echo "Cancelled. Nothing changed."; exit 0; }
 else
   read -r -p "Merge $branch into $base? [y/N] " answer
   [[ "$answer" =~ ^[Yy]$ ]] || { echo "Cancelled. Nothing changed."; exit 0; }

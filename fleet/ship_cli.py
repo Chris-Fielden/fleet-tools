@@ -341,7 +341,7 @@ def _ship_list() -> int:
 
 def main(argv=None) -> int:
     p = _Parser(prog="ship")
-    p.add_argument("id", nargs="?", help="ticket id, like BD-17")
+    p.add_argument("id", nargs="?", type=tk.normalize_id, help="ticket id, like BD-17 (any case)")
     p.add_argument("--list", action="store_true", help="ship every ticket on the ship list, in order")
     p.add_argument("--non-interactive", metavar="COMMIT", dest="expect",
                    help="used by the web endpoint: ship without a terminal, only if the branch is "

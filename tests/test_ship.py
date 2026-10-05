@@ -345,3 +345,16 @@ def test_ship_stops_when_the_gate_is_broken(real_task, env, monkeypatch, capsys,
     assert ship_main([t["id"]]) == 1
     assert "ticket gate --field reviews failed" in capsys.readouterr().err
     assert not (env / "finish.log").exists()
+
+
+def test_ship_accepts_a_lowercase_or_mixed_case_id(shipping, monkeypatch, capsys):
+    repo, t, log = shipping
+    monkeypatch.setenv("FAKE_MERGE", "1")
+    assert ship_main([t["id"].swapcase()]) == 0
+    assert tk.load_ticket(t["id"])["status"] == "done"
+    assert f"{t['id']} merged and marked done" in capsys.readouterr().out
+
+
+def test_ship_lowercase_unknown_id_is_still_refused(shipping, capsys):
+    assert ship_main(["zz-999"]) == 1
+    assert "no such ticket: ZZ-999" in capsys.readouterr().err
