@@ -313,11 +313,12 @@ def _plan(tickets: list[dict], settings: dict, state: dict, now: datetime) -> tu
 
 
 def _can_launch(settings: dict, state: dict, now: datetime) -> bool:
-    """The gates maybe_start applies before it starts an agent, without side effects."""
+    """Whether a prep pass can start today (the gates maybe_start applies, without side effects).
+    A pass that is running now does not count: the next one still follows it."""
     day = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
     attempts = state["attempts"]
-    return (not any(j["kind"] == "prep" for j in state["jobs"]) and not dp.research_problem(settings)
-            and state.get("limit_day") != day
+    return (not dp.research_problem(settings)
+            and state.get("limit_day") != dp.local_day(now, settings["timezone"])
             and not (attempts.get("day") == day and attempts.get("n", 0) >= MAX_ATTEMPTS_PER_DAY))
 
 
@@ -405,7 +406,7 @@ def maybe_start(settings: dict, now: datetime, emit, warn, reserve=None) -> None
         return
     if reserve is not None and not reserve():
         with _state() as st:   # holds_ping must not wait for a pass that cannot start today
-            st["limit_day"] = day
+            st["limit_day"] = dp.local_day(now, settings["timezone"])   # the budget resets at local midnight
         emit("prep pass not started: daily launch limit reached")
         return
     with _state() as st:   # count the attempt before it starts, like every launch

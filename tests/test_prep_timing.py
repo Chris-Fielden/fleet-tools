@@ -141,3 +141,24 @@ def test_an_older_review_ticket_is_not_pinged_before_a_ticket_that_moves_in_the_
     watch_cycle(THREE_PM)
     assert agent_names(herdr_log) == ["prep"] and titles(ntfy) == []
     assert ship_main([a["id"]]) == 1
+
+
+def test_tickets_arriving_while_a_pass_runs_are_not_pinged_before_the_next_pass(q, herdr_log, env, ntfy, monkeypatch):
+    ready(q, monkeypatch, "task/one", {"one.txt": "1"})
+    ready(q, monkeypatch, "task/two", {"two.txt": "2"})
+    watch_cycle(THREE_PM)
+    assert agent_names(herdr_log) == ["prep"]
+    for i in (1, 2):
+        ready(q, monkeypatch, f"task/late{i}", {f"late{i}.txt": "x"})
+    watch_cycle(THREE_PM)                                      # the first pass is still running
+    assert titles(ntfy) == []                                  # the next pass will lock these two
+
+
+def test_the_launch_limit_day_is_the_local_day_not_the_utc_day(q, env):
+    settings = dp.load_settings()
+    evening = datetime(2026, 10, 4, 2, 0, tzinfo=timezone.utc)     # 19:00 Pacific, 3 Oct
+    morning = datetime(2026, 10, 4, 8, 0, tzinfo=timezone.utc)     # 01:00 Pacific, 4 Oct: same UTC day
+    state = prep._load()
+    state["limit_day"] = dp.local_day(evening, settings["timezone"])
+    assert not prep._can_launch(settings, state, evening)
+    assert prep._can_launch(settings, state, morning)              # the budget reset at local midnight
