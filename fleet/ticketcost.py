@@ -48,13 +48,17 @@ def _text(content) -> str:
     return ""
 
 
-def _session(agent, where, model, first_user, times, since, tokens) -> dict | None:
-    """`times` are all the session's timestamps; only those since `since` count
-    towards the duration (tokens are already clipped by the caller)."""
+def _session(agent, where, model, first_user, times, counted, since, tokens) -> dict | None:
+    """`times` are all the session's timestamps; `counted` are those of the
+    events that carry tokens. A run is timed only up to its last counted event
+    and not at all before it has one, so every timed run also has its tokens
+    counted (a session still waiting for its first reply, or a stretch after the
+    last reply was logged, would otherwise grow in time with no tokens)."""
     inside = [t for t in times if t >= since]
-    if not inside or where is None:
+    counted = [t for t in counted if t >= since]
+    if not inside or not counted or where is None:
         return None
-    start, end = min(inside), max(inside)
+    start, end = min(inside), max(counted)
     return {
         "agent": agent, "model": model,
         "kind": "review" if first_user.strip().lower().startswith(REVIEW_MARK) else "build",
@@ -68,7 +72,7 @@ def _session(agent, where, model, first_user, times, since, tokens) -> dict | No
 def _claude_session(path: Path, unreadable, since) -> dict | None:
     where = model = None
     first_user = None
-    times, seen = [], set()
+    times, counted, seen = [], [], set()
     tot = [0, 0, 0]
     for obj in _lines(path, unreadable):
         ts = _ts(obj.get("timestamp"))
@@ -91,18 +95,19 @@ def _claude_session(path: Path, unreadable, since) -> dict | None:
             if key in seen:
                 continue
             seen.add(key)
+        counted.append(ts)
         if isinstance(msg.get("model"), str) and not msg["model"].startswith("<"):
             model = model or msg["model"]
         tot[0] += _int(usage.get("input_tokens")) + _int(usage.get("cache_creation_input_tokens"))
         tot[1] += _int(usage.get("output_tokens"))
         tot[2] += _int(usage.get("cache_read_input_tokens"))
-    return _session("claude", where, model, first_user or "", times, since, tot)
+    return _session("claude", where, model, first_user or "", times, counted, since, tot)
 
 
 def _codex_session(path: Path, unreadable, since) -> dict | None:
     where = model = None
     first_user = None
-    times = []
+    times, counted = [], []
     best = None  # the running total with the most tokens
     base = None  # the largest running total reached before `since`
     for obj in _lines(path, unreadable):
@@ -124,6 +129,8 @@ def _codex_session(path: Path, unreadable, since) -> dict | None:
             info = p.get("info")
             total = info.get("total_token_usage") if isinstance(info, dict) else None
             if p.get("type") == "token_count" and isinstance(total, dict):
+                if ts is not None:
+                    counted.append(ts)
                 if best is None or _int(total.get("total_tokens")) >= _int(best.get("total_tokens")):
                     best = total
                 if ts is not None and ts < since and (
@@ -137,7 +144,7 @@ def _codex_session(path: Path, unreadable, since) -> dict | None:
         cached = max(part(best, "cached_input_tokens") - part(base, "cached_input_tokens"), 0)
         fresh = (part(best, "input_tokens") - part(base, "input_tokens")) - cached
         tot = [max(fresh, 0), max(part(best, "output_tokens") - part(base, "output_tokens"), 0), cached]
-    return _session("codex", where, model, first_user or "", times, since, tot)
+    return _session("codex", where, model, first_user or "", times, counted, since, tot)
 
 
 def sessions(home: Path | None = None, since: datetime | None = None,
