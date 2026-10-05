@@ -2,6 +2,8 @@
 and the sweep of stale agent tabs (fake herdr with a world file, temp FLEET_HOME)."""
 import json
 
+import pytest
+
 from fleet import dispatch as dp
 from fleet import launch as lc
 from fleet import review_watch as rw
@@ -78,7 +80,7 @@ def test_copied_notes_are_not_duplicated_when_only_whitespace_differs(rig, ntfy)
     rig.cycle(46)
     (oc,) = [x for x in tk.list_tickets() if x.get("oncall")]
     before = [n["text"] for n in tk.load_ticket(oc["id"])["notes"]]
-    assert any("a b\n\nc d" in n for n in before)
+    assert any("a   b" in n for n in before)   # copied as written
     path = tk.tickets_dir() / f"{oc['id']}.json"
     data = json.loads(path.read_text())
     for n in data["notes"]:
@@ -154,3 +156,49 @@ def test_sweep_closes_only_stale_tabs_of_the_agents_workspace(rig):
 def test_sweep_asks_herdr_nothing_when_no_ticket_is_finished(rig, herdr_log):
     assert lc.sweep_tabs(rig.settings, lambda m: None) == []
     assert not [c for c in (calls(herdr_log) if herdr_log.exists() else []) if c[:1] == ["tab"]]
+
+
+def test_notes_are_copied_as_written_not_squashed(rig, ntfy):
+    rig.edit(notes=[{"at": "2026-10-04T10:00:00Z", "by": "claude", "text": "def f():\n    return  1"}])
+    rig.set_agent("idle", revision=1)
+    rig.cycle(0)
+    rig.cycle(46)
+    (oc,) = [x for x in tk.list_tickets() if x.get("oncall")]
+    assert any("def f():\n    return  1" in n["text"] for n in tk.load_ticket(oc["id"])["notes"])
+
+
+def test_a_long_context_never_clips_the_failed_tickets_spec(rig):
+    items = "\n".join(f"{i}. a.py: fix {i} " + "z" * 90 for i in range(1, 60))
+    d = rig.wt / ".reviews"
+    d.mkdir()
+    for kind in ("codex", "claude"):
+        (d / f"{kind}.md").write_text(f"Reviewer: {kind.title()}\nCommit: {rig.tip()}\n\nVERDICT: FAIL\n"
+                                      f"MUST FIX:\n{items}\nSHOULD FIX: none\nSUMMARY: x\n")
+    t = dict(rig.get(), body="S" * tk.BODY_MAX)
+    body = rw._oncall_body(t, "why", rig.tip(), rig.repo)
+    assert len(body) <= tk.ONCALL_BODY_MAX and body.endswith("S" * tk.BODY_MAX)
+
+
+def test_a_stored_ticket_with_a_long_fail_history_still_loads_and_is_capped_on_the_next_fail(rig):
+    shas = [f"{i:040x}" for i in range(1, tk.FAIL_COMMITS_MAX + 6)]
+    rig.edit(fail_commits=shas)
+    assert len(rig.get()["fail_commits"]) == len(shas)
+    tk.record_verdict("task/demo", "app", "FAIL", "f" * 40, "Codex")
+    assert rig.get()["fail_commits"] == (shas + ["f" * 40])[-tk.FAIL_COMMITS_MAX:]
+
+
+def test_the_fail_rounds_threshold_cannot_exceed_what_is_kept(env, projects):
+    (env / "fleet" / "dispatch.json").write_text(json.dumps(
+        {"projects_dir": str(projects), "fail_rounds_threshold": tk.FAIL_COMMITS_MAX + 1}))
+    with pytest.raises(dp.SettingsError, match="fail_rounds_threshold"):
+        dp.load_settings()
+
+
+def test_the_sweep_never_touches_the_tools_workspace_name():
+    from fleet import service
+    assert service.TOOLS_WORKSPACE in lc.SWEEP_SKIP_WORKSPACES
+
+
+def test_deprecated_event_names_stay_valid():
+    from fleet import notify
+    assert set(notify.DEPRECATED_EVENTS) <= set(notify.EVENTS)

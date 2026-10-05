@@ -54,7 +54,7 @@ STOPPED_AFTER = 5 * 60    # seconds an agent sits idle on a failed tip before th
 UNRECORDED_GRACE = 2 * 60  # seconds review.sh gets to record a review it just saved
 LOG_TAIL = 256 * 1024
 MUST_FIX_PART = 500       # characters of a review's MUST FIX section per part of the on-call body
-MUST_FIX_PARTS = 8        # parts kept per review (the body as a whole is capped by ONCALL_BODY_MAX)
+MUST_FIX_PARTS = 6        # parts kept per review; the context before the spec is clipped to leave the spec whole
 # Dispatcher log kinds that show a ticket's work moving. (RECONCILE_SKIP and
 # DECISION lines repeat every cycle and say nothing about the agent.)
 ACTIVITY_LOG_KINDS = ("LAUNCHED", "RELAUNCHED", "REVIEW_READY", "REVIEW_BACK")
@@ -376,8 +376,10 @@ def _oncall_body(t: dict, detail: str, tip: str, repo: Path) -> str:
     tail = _log_tail(t["id"])
     if tail:
         parts.append("DISPATCHER LOG TAIL:\n" + _clip(tail, 600))
-    parts.append(f"FAILED TICKET SPEC (whole):\n{t['body']}")
-    return _clip("\n\n".join(parts), tk.ONCALL_BODY_MAX)
+    spec = f"FAILED TICKET SPEC (whole):\n{t['body']}"
+    # The spec comes last and whole; if the context before it is too long, that is what is clipped.
+    head = _clip("\n\n".join(parts), max(0, tk.ONCALL_BODY_MAX - len(spec) - 2))
+    return _clip(f"{head}\n\n{spec}", tk.ONCALL_BODY_MAX)
 
 
 def _squash(text: str) -> str:
@@ -389,21 +391,21 @@ def _squash(text: str) -> str:
 
 def _copy_notes(oc_id: str, t: dict, warn) -> None:
     """Copy all of the failed ticket's notes onto the on-call ticket, in order, cut
-    into pieces that fit a note. Pieces already there are skipped, so a retry after
-    an interruption finishes the job. The store holds NOTES_LIMIT notes a ticket;
+    into pieces that fit a note. The text is copied as it is; whitespace is
+    normalised only to tell whether a piece is already there. Pieces already there
+    are skipped, so a retry after an interruption finishes the job. The store holds NOTES_LIMIT notes a ticket;
     room is kept for the dispatcher's own, and anything over says so."""
     room = tk.NOTES_LIMIT - 6
     pieces = []
     for n in t.get("notes", []):
         text = f"Note on {t['id']} by {n['by']} at {n['at']}:\n{n['text']}"
-        text = _squash(text)
         pieces += [text[i:i + tk.NOTE_MAX] for i in range(0, len(text), tk.NOTE_MAX)]
     have = {_squash(n["text"]) for n in tk.load_ticket(oc_id).get("notes", [])}
     for piece in pieces[:room]:
         if _squash(piece) not in have:
             _note(oc_id, piece, warn)
     over = f"{len(pieces) - room} more pieces of {t['id']}'s notes are not copied: a ticket holds {tk.NOTES_LIMIT} notes."
-    if len(pieces) > room and over not in have:
+    if len(pieces) > room and _squash(over) not in have:
         _note(oc_id, over, warn)
 
 

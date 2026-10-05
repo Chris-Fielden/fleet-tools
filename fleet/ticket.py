@@ -308,8 +308,8 @@ def validate_stored(data) -> list[str]:
         errors.append("oncall_base must be a full commit id, on an on-call ticket")
     fails = data.get("fail_commits")
     if "fail_commits" in data and not (
-            isinstance(fails, list) and len(fails) <= FAIL_COMMITS_MAX and all(_is_str(c) and re.fullmatch(r"[0-9a-f]{40}", c) for c in fails)):
-        errors.append(f"fail_commits must be a list of at most {FAIL_COMMITS_MAX} full commit ids")
+            isinstance(fails, list) and all(_is_str(c) and re.fullmatch(r"[0-9a-f]{40}", c) for c in fails)):
+        errors.append("fail_commits must be a list of full commit ids")
     if "started_at" in data and not _is_time(data["started_at"]):
         errors.append("started_at must be a UTC ISO 8601 time like 2025-01-01T00:00:00Z")
     if "notes" in data:
