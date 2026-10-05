@@ -183,6 +183,8 @@ def _merge(settings: dict, given, path: Path) -> None:
         settings["max_oncall_per_day"] = _whole(path, given, "max_oncall_per_day", 0, "0 or more")
     if "fail_rounds_threshold" in given:
         settings["fail_rounds_threshold"] = _whole(path, given, "fail_rounds_threshold", 1, "1 or more")
+        if settings["fail_rounds_threshold"] > tk.FAIL_COMMITS_MAX:   # only that many FAIL commits are kept
+            raise SettingsError(f"{path}: fail_rounds_threshold must be {tk.FAIL_COMMITS_MAX} or less")
     if "fresh_session_tokens" in given:
         settings["fresh_session_tokens"] = _whole(path, given, "fresh_session_tokens", 0,
                                                   "0 or more (0 turns it off)")
