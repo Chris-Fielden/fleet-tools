@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import risk as rk
 from . import ticket as tk
 from .settings import (  # noqa: F401  (re-exported: callers use dp.load_settings etc.)
     DEFAULTS, MIN_WATCH_INTERVAL, SettingsError, load_settings, settings_path)
@@ -26,6 +27,10 @@ LAUNCH_TYPES = ("build", "fix")
 MAIN_BRANCHES = ("main", "master")
 QUEUE_SKIPS = ("the on-call slot is busy", "waiting its turn")   # on-call skips that are just the queue
 TASK_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{1,40}")  # what scripts/new-task.sh accepts
+
+
+DESIGN_RE = re.compile(r"\bdesign\b", re.I)   # what a findings note must mention
+FINDINGS_HEAD = "Findings from investigation {id}:"
 
 
 class AlreadyRunning(Exception):
@@ -270,12 +275,121 @@ def oncall_slot_busy(tickets: list[dict], running: frozenset | set | None) -> st
     return None
 
 
-def _judge(t: dict, tickets: dict, claimed: list[dict], settings: dict, holders: list[dict]) -> Decision:
+# --- investigate first: security-sensitive build and fix tickets ---------------
+
+def investigation_id(t: dict) -> str | None:
+    """The investigation a build or fix ticket waits for: a build's parent, a fix's own field
+    (its parent is the ticket it fixes)."""
+    return t.get("parent") if t["type"] == "build" else t.get("investigation")
+
+
+def has_design(inv: dict) -> bool:
+    return any(DESIGN_RE.search(n["text"]) for n in inv.get("notes", []))
+
+
+def needs_investigation(t: dict, rules: dict) -> bool:
+    return t["type"] in LAUNCH_TYPES and not t.get("oncall") and bool(rk.high_paths(t["body"], rules))
+
+
+def investigation_gate(t: dict, by_id: dict, rules: dict) -> tuple[str, str]:
+    """Is this ticket free to launch? ('ok' | 'need' | 'wait' | 'blocked', why). A build or
+    fix ticket whose body names high-risk paths (risk.high_paths) needs a done
+    investigate ticket whose notes hold a design: 'need' means there is none yet (the
+    dispatcher files one), 'wait' that it is still being worked, 'blocked' that it can't
+    finish by itself (failed, cancelled, or done without a design)."""
+    if not needs_investigation(t, rules):
+        return "ok", ""
+    inv_id = investigation_id(t)
+    if inv_id is None:
+        return "need", "touches security-sensitive paths; an investigation comes first"
+    inv = by_id.get(inv_id)
+    if inv is None:
+        return "blocked", f"investigation {inv_id} not found"
+    if inv["type"] != "investigate":
+        return "blocked", f"{inv_id} is not an investigate ticket"
+    if inv["status"] == "done":
+        if has_design(inv):
+            return "ok", ""
+        return "blocked", f"investigation {inv['id']} is done but has no findings note with a design"
+    if inv["status"] in ("failed", "cancelled"):
+        return "blocked", f"investigation {inv['id']} is {inv['status']}; a human must decide"
+    return "wait", f"waiting for investigation {inv['id']} ({inv['status']})"
+
+
+def _investigation_body(t: dict) -> str:
+    head = (f"Investigate {t['id']} before it is built. Do not build anything. Record, with "
+            "`ticket note`, findings that contain a DESIGN (the approach, in steps) and the "
+            "FAILURE MODES a test must cover. The ticket's full spec follows.\n\n"
+            f"Spec of {t['id']} ({t['type']}, repo {t['repo']}):\n")
+    room = tk.BODY_MAX - len(head)
+    spec = t["body"] if len(t["body"]) <= room else t["body"][:room - 40] + f"\n[cut; see {t['id']}]"
+    return head + spec
+
+
+def findings_note(inv: dict) -> str:
+    head = FINDINGS_HEAD.format(id=inv["id"])
+    notes = sorted(inv.get("notes", []), key=lambda n: not DESIGN_RE.search(n["text"]))  # the design survives a cut
+    text = head + "\n" + "\n\n".join(n["text"] for n in notes)
+    return text if len(text) <= tk.NOTE_MAX else text[:tk.NOTE_MAX - 12] + "\n[cut]"
+
+
+def ensure_investigations(tickets: list[dict], warn=lambda m: None) -> tuple[list[str], set[str]]:
+    """Before launching: file the missing investigation of each open build or fix ticket
+    that needs one (no human approval; it starts open), and append the findings of a done
+    one to the ticket as a note, once. Returns (one line per change, ids of tickets to
+    hold back this run because that failed: fail closed)."""
+    try:
+        rules = rk.load_rules()
+    except rk.RiskError as exc:
+        warn(f"investigate-first: {exc}")
+        return [], set()
+    by_id = {t["id"]: t for t in tickets}
+    lines, held = [], set()
+    for t in sorted((t for t in tickets if t["status"] == "open" and t["type"] in LAUNCH_TYPES
+                     and not t.get("oncall")), key=tk.oldest_first_key):
+        state, _ = investigation_gate(t, by_id, rules)
+        branch = f"task/investigate-{t['id'].lower()}"
+        try:
+            if state == "need":
+                # One filed earlier whose attaching failed is reused, not filed again.
+                inv = next((i for i in tickets if i["type"] == "investigate" and i["branch"] == branch
+                            and i["status"] not in ("failed", "cancelled")), None)
+                if inv is None:
+                    inv = tk.create_ticket({
+                        "type": "investigate", "repo": t["repo"], "branch": branch,
+                        "title": f"Investigate before building: {t['title']}"[:100],
+                        "body": _investigation_body(t)}, open_now=True)
+                    log("INVESTIGATION_FILED", f"{inv['id']} for {t['id']}")
+                    lines.append(f"{t['id']}  filed investigation {inv['id']}; it launches after that is done")
+                tk.attach_investigation(t["id"], inv["id"])
+            elif state == "ok" and needs_investigation(t, rules):
+                inv = by_id[investigation_id(t)]
+                head = FINDINGS_HEAD.format(id=inv["id"])
+                if not any(n["text"].startswith(head) for n in t.get("notes", [])):
+                    tk.add_note(t["id"], findings_note(inv))
+                    log("FINDINGS_APPENDED", f"{inv['id']} -> {t['id']}")
+                    lines.append(f"{t['id']}  findings of {inv['id']} added as a note")
+        except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+            warn(f"investigate-first: {t['id']}: {exc}")
+            held.add(t["id"])
+    return lines, held
+
+
+def _judge(t: dict, tickets: dict, claimed: list[dict], settings: dict, holders: list[dict],
+           rules: dict | None = None) -> Decision:
     d = Decision(ticket=t, name=t["branch"].removeprefix("task/"))
 
     # 1. Type
     if t["type"] not in LAUNCH_TYPES:
         d.skip = "handled in phase 4"
+        return d
+    # 1b. Investigate first (security-sensitive paths); no rules to judge by: fail closed
+    if rules is None:
+        d.skip = "the risk rules could not be read, so investigate-first can't be checked"
+        return d
+    state, why = investigation_gate(t, tickets, rules)
+    if state != "ok":
+        d.skip = why if state != "need" else why + " (the dispatcher files one)"
         return d
     # 2. Capacity
     if len(claimed) >= settings["max_running"]:
@@ -330,13 +444,17 @@ def decide(tickets: list[dict], settings: dict) -> list[Decision]:
     # On-call fix tickets have their own slot (decide_oncall): they neither fill
     # the normal capacity nor wait in the normal queue, but they still hold their branch.
     holders, claimed = branch_holders(tickets), capacity_holders(tickets)
+    try:
+        rules = rk.load_rules()
+    except rk.RiskError:
+        rules = None
     decisions = []
     picked = False
     open_tickets = sorted((t for t in tickets if t["status"] == "open" and t["type"] != "investigate"
                            and not t.get("oncall")),
                           key=lambda t: (t.get("priority") != "urgent", *tk.oldest_first_key(t)))
     for t in open_tickets:
-        d = _judge(t, by_id, claimed, settings, holders)
+        d = _judge(t, by_id, claimed, settings, holders, rules)
         if d.eligible:
             if picked:
                 d.skip = "only one ticket is started per run"

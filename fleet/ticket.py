@@ -32,10 +32,12 @@ FIELDS = (
 )
 # Optional fields: may be absent from a stored ticket.
 OPTIONAL_FIELDS = ("close_note", "base_commit", "seq", "priority", "risk", "notes", "started_at",
-                   "oncall", "oncall_base", "fail_commits")
+                   "oncall", "oncall_base", "fail_commits", "investigation")
 # oncall: true on the fix ticket the dispatcher files for the on-call agent.
 # oncall_base: the failed branch's tip when the ticket failed; the on-call branch
 # starts from exactly that commit, however long it waits for the on-call slot.
+# investigation: on a fix ticket (whose parent is the ticket it fixes), the investigate
+# ticket whose findings must hold a design before it is launched. A build ticket uses its parent.
 # fail_commits: every commit that got a recorded FAIL, oldest first (a verdict
 # only keeps the latest, and "going in circles" counts rounds).
 CLOSE_NOTE_MAX = 500
@@ -310,6 +312,9 @@ def validate_stored(data) -> list[str]:
     if "fail_commits" in data and not (
             isinstance(fails, list) and all(_is_str(c) and re.fullmatch(r"[0-9a-f]{40}", c) for c in fails)):
         errors.append("fail_commits must be a list of full commit ids")
+    inv = data.get("investigation")
+    if "investigation" in data and not (_is_str(inv) and ID_RE.fullmatch(inv) and data["type"] == "fix"):
+        errors.append("investigation must be a ticket id, on a fix ticket")
     if "started_at" in data and not _is_time(data["started_at"]):
         errors.append("started_at must be a UTC ISO 8601 time like 2025-01-01T00:00:00Z")
     if "notes" in data:
@@ -485,10 +490,13 @@ def _check_agent_rate(creator: str) -> None:
 
 
 def create_ticket(fields: dict, *, needs_approval: bool = False, oncall: bool = False,
-                  oncall_base: str | None = None) -> dict:
+                  oncall_base: str | None = None, open_now: bool = False) -> dict:
     """Validate, check for secrets, assign an id and save. Returns the ticket.
-    `oncall` (the dispatcher only, a fix ticket) gives it the on-call prefix and flag."""
+    `oncall` (the dispatcher only, a fix ticket) gives it the on-call prefix and flag.
+    `open_now` (the dispatcher only, an investigate ticket) skips the approval step."""
     creator = current_creator()
+    if open_now and (creator != "human" or fields.get("type") != "investigate"):
+        raise TicketError("only the dispatcher can file an investigate ticket that starts open")
     if oncall and (creator != "human" or fields.get("type") != "fix"):
         raise TicketError("only the dispatcher can file an on-call fix ticket")
     if oncall_base is not None and not (oncall and re.fullmatch(r"[0-9a-f]{40}", oncall_base)):
@@ -506,7 +514,8 @@ def create_ticket(fields: dict, *, needs_approval: bool = False, oncall: bool = 
     # open (the human approves at merge). A build ticket that follows up an
     # investigation (it has a parent) also waits for approval.
     # needs_approval: the caller wants a human to approve it first.
-    status = ("proposed" if needs_approval or t == "investigate" or (t == "build" and fields.get("parent"))
+    status = ("open" if open_now else
+              "proposed" if needs_approval or t == "investigate" or (t == "build" and fields.get("parent"))
               else "open")
     try:
         start_risk = rk.starting_level(t, fields["repo"])
@@ -607,6 +616,28 @@ def set_status(ticket_id: str, status: str, *, allowed_from, assignee=_KEEP,
             ticket.pop("started_at", None)  # "" clears it
         elif started_at is not None:
             ticket["started_at"] = started_at
+        ticket["updated_at"] = _now()
+        _write_atomic(_ticket_path(ticket_id), ticket)
+    return ticket
+
+
+def attach_investigation(ticket_id: str, investigation_id: str) -> dict:
+    """Make `investigation_id` the investigation a build or fix ticket waits for: a build
+    ticket's parent, a fix ticket's `investigation` field. Dispatcher only, and only
+    while the ticket is open and has none yet."""
+    if current_creator() != "human":
+        raise TicketError(f"only the dispatcher can attach an investigation (running as {current_creator()})")
+    with _locked():
+        ticket = load_ticket(ticket_id)
+        inv = load_ticket(investigation_id)
+        if inv["type"] != "investigate":
+            raise TicketError(f"{investigation_id} is not an investigate ticket")
+        if ticket["status"] != "open" or ticket["type"] not in ("build", "fix"):
+            raise TicketError(f"{ticket_id} is not an open build or fix ticket")
+        field = "parent" if ticket["type"] == "build" else "investigation"
+        if ticket.get(field) is not None:
+            raise TicketError(f"{ticket_id} already has an investigation")
+        ticket[field] = investigation_id
         ticket["updated_at"] = _now()
         _write_atomic(_ticket_path(ticket_id), ticket)
     return ticket

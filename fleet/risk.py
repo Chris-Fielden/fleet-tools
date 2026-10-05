@@ -132,6 +132,30 @@ def classify_all(paths, rules: dict):
     return rows, overall or LEVELS[0]
 
 
+PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_.@~+*?-]+(?:/[A-Za-z0-9_.@~+*?-]*)*")
+EXTENSION_RE = re.compile(r"[A-Za-z0-9_-]\.[A-Za-z0-9]{1,6}$")
+
+
+def high_paths(text: str, rules: dict | None = None) -> list[str]:
+    """Path-like words in free text (a ticket body) that the rules rate high,
+    sorted. A word counts as a path when it has a '/' or a file extension
+    (CLAUDE.md, .env); each trailing run of its folders is tried too, so
+    /home/me/repo/.claude/hooks/x.py matches '.claude/**'."""
+    rules = rules or load_rules()
+    found = set()
+    for token in PATH_TOKEN_RE.findall(text):
+        token = token.rstrip(".,;:")
+        if not token or ("/" not in token and not EXTENSION_RE.search(token) and token != ".env"):
+            continue
+        parts = token.split("/")
+        for i in range(len(parts)):
+            candidate = "/".join(parts[i:])
+            if candidate and classify(candidate, rules)[0] == "high":
+                found.add(token)
+                break
+    return sorted(found)
+
+
 def starting_level(ticket_type: str, repo: str, rules: dict | None = None) -> str:
     """Level a new ticket starts at: its repo's if the repo has one, else its
     type's, else the default."""
