@@ -605,7 +605,7 @@ def _move(t: dict, status: str, allowed_from: tuple, warn):
 
 
 def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
-               now: datetime, state: dict, emit, warn) -> None:
+               now: datetime, state: dict, emit, warn, moved: list | None = None) -> None:
     repo = settings["projects_dir"] / t["repo"]
     if repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir():
         return
@@ -646,7 +646,10 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             # tab (never a focused one; a kept tab is closed when the ticket is done).
             closed, reason = lc.close_finished_tab(t["id"], settings)
             emit(f"{t['id']}  tab {'closed' if closed else 'kept'}: {reason}")
-            _ready_ping(new, tip, settings, now, state, warn)
+            if moved is not None:
+                moved.append((new, tip))   # pinged by check() once every ticket of this cycle has moved
+            else:
+                _ready_ping(new, tip, settings, now, state, warn)
             _end_spells(t["id"], state)
             _unrecorded_pings(new, repo, tip, state, now, emit, warn)
         return
@@ -703,13 +706,19 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
     except lc.LaunchError as exc:
         warn(f"cannot check agents for review status or alerts: {exc}")
         agents, known = {}, False
+    moved: list[tuple[dict, str]] = []
     for t in tickets:
         if not known and t["status"] == "claimed":
             continue  # nothing here can be decided without herdr
         try:
-            _check_one(t, agents.get(t["id"].lower()), known, settings, now, state, emit, warn)
+            _check_one(t, agents.get(t["id"].lower()), known, settings, now, state, emit, warn, moved)
         except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
             warn(f"{t['id']}: {exc}")
+    for new, tip in moved:   # judged against the final set of waiting tickets, not one at a time
+        try:
+            _ready_ping(new, tip, settings, now, state, warn)
+        except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
+            warn(f"{new['id']}: {exc}")
     try:
         _flag_stuck_oncall(settings, warn)
     except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:

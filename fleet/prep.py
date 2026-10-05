@@ -333,7 +333,7 @@ def holds_ping(t: dict, tickets: list[dict], settings: dict, now: datetime) -> b
     if _plan(tickets, settings, state, now)[0] and _can_launch(settings, state, now):
         return True
     return (not _past_prep_time(settings, now) and len(_waiting(tickets, settings, state)) >= 2
-            and dp.research_problem(settings) is None)
+            and _can_launch(settings, state, now))
 
 
 def _start_job(kind: str, tickets: list[dict], settings: dict, warn) -> dict:
@@ -772,6 +772,8 @@ def _finish_reconcile(job: dict, settings: dict, now: datetime, emit, warn) -> N
                 _write_list([line for _, line in read_list()]
                             + [_line(t, settings, {}, [], {t["id"]: t})], now)
             emit(f"{ticket_id}  reconciled with main and re-checked; ready to ship again")
+            # Its new tip is covered (no pass will touch it), so review_watch holds its ping: say it here.
+            notify.notify_quietly(t, "ship", warn)
             dp.log("PREP_DONE", f"{ticket_id} reconciled")
     with _state() as st:
         st["jobs"] = [j for j in st["jobs"] if j["name"] != job["name"]]

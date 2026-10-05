@@ -113,3 +113,19 @@ def test_ship_list_reports_a_ticket_that_reached_review_after_the_list_was_writt
     assert f"{late['id']} is in review but NOT on the ship list" in captured.err
     assert "reached review after the list was written" in captured.err
     assert tk.load_ticket(late["id"])["status"] == "review"
+
+
+def test_two_tickets_finishing_in_one_cycle_get_no_ping_before_the_pass_that_locks_them(
+        q, herdr_log, env, ntfy, monkeypatch):
+    ids = []
+    for name in ("one", "two"):
+        t = ready(q, monkeypatch, f"task/{name}", {f"{name}.txt": name})
+        tk.set_status(t["id"], "claimed", allowed_from=("review",))   # still claimed, its agent idle
+        ids.append(t["id"])
+    w = json.loads((env / "world.json").read_text())
+    w["agents"] = [{"name": i.lower(), "agent_status": "idle"} for i in ids]
+    (env / "world.json").write_text(json.dumps(w))
+    watch_cycle(THREE_PM)
+    assert [tk.load_ticket(i)["status"] for i in ids] == ["review", "review"]
+    assert agent_names(herdr_log) == ["prep"] and titles(ntfy) == []   # not "ready" for a ship that would be refused
+    assert ship_main([ids[0]]) == 1

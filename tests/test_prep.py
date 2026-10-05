@@ -490,7 +490,8 @@ def test_a_conflict_at_ship_time_launches_a_reconcile_agent_and_pings_when_ready
     assert not warns and prep.locked_ids() == set()
     assert tk.load_ticket(b["id"])["status"] == "review"
     assert log_lines(env, "review") == [str(b_wt)]
-    # the review watch now sends the usual "ready to ship" ping for the new tip
+    # the reconciled tip is covered, so the review watch holds its ping: the pass says it itself, once
+    assert [t for t, _, _ in sent(ntfy)] == [f"{b['id']} ready to ship"]
     from fleet import review_watch as rw
     ticket = tk.load_ticket(b["id"])
     assert rw.passed_for_tip(ticket, prep.tip_of(q, "task/beta")) and rw.has_summary_after_review(ticket)
