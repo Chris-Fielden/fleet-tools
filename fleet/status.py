@@ -81,7 +81,7 @@ def snapshot(now: datetime | None = None) -> dict:
     tickets = tk.list_tickets()
     running = sorted((t for t in tickets if t["status"] == "claimed"), key=lambda t: t["id"])
     settings = st.load_settings()
-    day = now.strftime("%Y-%m-%d")
+    day = dp.local_day(now, settings["timezone"])
     try:
         used = dp.launches_today(day)
     except OSError:
