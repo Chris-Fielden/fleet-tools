@@ -124,10 +124,19 @@ def in_review(repo, branch, files, **fields):
     return tk.load_ticket(t["id"]), wt
 
 
-def start_prep(settings_over=None, now=NIGHT):
+def start_prep(settings_over=None, now=NIGHT, force=False):
+    """One maybe_start. force=True is for tests about what happens AFTER a pass started, with fewer
+    than the two waiting tickets the trigger needs: it starts the pass the way maybe_start does."""
     settings = dp.load_settings()
     settings.update(settings_over or {})
     out, warns = [], []
+    if force:
+        try:
+            job = prep._start_job("prep", prep.review_tickets(tk.list_tickets()), settings, warns.append)
+            out.append(f"prep agent started over {len(job['ids'])} tickets in review (forced)")
+        except lc.LaunchError as exc:
+            out.append(f"prep pass not started: {exc}")
+        return settings, out, warns
     prep.maybe_start(settings, now, out.append, warns.append)
     return settings, out, warns
 
@@ -213,6 +222,7 @@ def test_prep_starts_when_nothing_is_left_to_build_and_only_once(q, herdr_log, e
 
 def test_prep_waits_for_prep_time_while_work_remains(q, herdr_log, env):
     in_review(q, "task/one", {"one.txt": "1"})
+    in_review(q, "task/two", {"two.txt": "2"})
     mk(branch="task/queued")     # still something to build
     start_prep(now=JUST_BEFORE)
     assert agent_names(herdr_log) == []
@@ -222,6 +232,7 @@ def test_prep_waits_for_prep_time_while_work_remains(q, herdr_log, env):
 
 def test_prep_time_setting_moves_the_hour(q, herdr_log):
     in_review(q, "task/one", {"one.txt": "1"})
+    in_review(q, "task/two", {"two.txt": "2"})
     mk(branch="task/queued")
     start_prep({"prep_time": "07:00"}, now=SIX)
     assert agent_names(herdr_log) == []
@@ -237,14 +248,14 @@ def test_nothing_in_review_means_no_prep(q, herdr_log):
 def test_a_builder_that_is_not_claude_is_refused(q, herdr_log, env):
     in_review(q, "task/one", {"one.txt": "1"})
     (env / "fleet" / "settings.json").write_text(json.dumps({"builder": "codex"}))
-    _, out, _ = start_prep()
+    _, out, _ = start_prep(force=True)
     assert agent_names(herdr_log) == [] and "not started" in out[0]
 
 
 def test_review_watch_leaves_locked_tickets_alone(q, herdr_log, env):
     from fleet import review_watch as rw
     a, wt = in_review(q, "task/one", {"one.txt": "1"})
-    settings, _, _ = start_prep()
+    settings, _, _ = start_prep(force=True)
     commit(wt, {"more.txt": "x"})        # the prep agent moves the tip: normally this sends it back to claimed
     rw.check(settings, NIGHT, lambda m: None, lambda m: None)
     assert tk.load_ticket(a["id"])["status"] == "review"
@@ -373,7 +384,7 @@ def test_an_unusable_report_still_rechecks_what_changed_and_lists_everything(q, 
 
 def test_a_working_agent_is_not_finished_and_its_tab_closes_afterwards(q, herdr_log, env):
     in_review(q, "task/one", {"one.txt": "1"})
-    settings, _, _ = start_prep()
+    settings, _, _ = start_prep(force=True)
     finish_prep(settings)
     assert prep.locked_ids() and not (env / "fleet" / "ship-list.txt").exists()
     set_agent_status(env, "prep", "idle")
@@ -386,6 +397,7 @@ def test_a_working_agent_is_not_finished_and_its_tab_closes_afterwards(q, herdr_
 
 def test_the_prep_agent_runs_once_a_day_unless_new_tickets_reach_review(q, herdr_log, env):
     in_review(q, "task/one", {"one.txt": "1"})
+    in_review(q, "task/two", {"two.txt": "2"})
     settings, _, _ = start_prep()
     set_agent_status(env, "prep", "idle")
     finish_prep(settings)
@@ -393,7 +405,7 @@ def test_the_prep_agent_runs_once_a_day_unless_new_tickets_reach_review(q, herdr
     for now in (NIGHT, SIX, datetime(2026, 10, 3, 23, 0, tzinfo=timezone.utc)):
         start_prep(now=now)
     assert agent_names(herdr_log) == ["prep"]                  # the same tickets: not again
-    in_review(q, "task/two", {"two.txt": "2"})                 # a new one reaches review
+    in_review(q, "task/three", {"three.txt": "3"})             # a new one reaches review
     start_prep(now=datetime(2026, 10, 3, 23, 0, tzinfo=timezone.utc))
     assert agent_names(herdr_log) == ["prep", "prep"]
 

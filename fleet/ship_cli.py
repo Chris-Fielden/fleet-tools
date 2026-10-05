@@ -342,7 +342,26 @@ def _ship_list() -> int:
             return _fail(f"stopped at {ticket_id}; the rest of the list was not shipped")
         shipped += 1
     print(f"ship: the list is done ({shipped} shipped)")
+    _report_unlisted({i for i, _ in entries})
     return 0
+
+
+def _report_unlisted(listed: set[str]) -> None:
+    """Say plainly which tickets are in review but were not on the list (they reached review after
+    it was written, e.g. bounced by the prep pass and back). They were not shipped: the list is
+    only what the prep pass reconciled, and a late ticket has not been reconciled against it."""
+    try:
+        late = [t for t in prep.review_tickets(tk.list_tickets()) if t["id"] not in listed]
+        locked = prep.locked_ids() if late else set()
+    except (OSError, tk.TicketError, tk.TicketInvalid) as exc:
+        print(f"ship: could not check for tickets missing from the list ({exc})", file=sys.stderr)
+        return
+    for t in late:
+        why = ("an agent is working on it now; wait for its ping" if t["id"] in locked else
+               "it reached review after the list was written, so it was not reconciled with the listed "
+               f"tickets; run `ship {t['id']}` (a conflict starts a reconcile agent) or wait for the next prep pass")
+        print(f"ship: {t['id']} is in review but NOT on the ship list, so it was not shipped: {why}",
+              file=sys.stderr)
 
 
 def main(argv=None) -> int:

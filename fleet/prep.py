@@ -1,8 +1,11 @@
 """The overnight queue's prep pass: one agent over every ticket waiting in review.
 
 Tickets in review wait for the human, so they no longer fill a build slot.
-When nothing is left to build (or at `prep_time`, Pacific time, whichever comes
-first) the dispatcher launches ONE prep agent over all of them. The agent only
+When nothing is left to build (or once a day at `prep_time`, Pacific time) and at
+least two tickets are waiting, the dispatcher launches ONE prep agent over all of
+them. One ticket alone has nothing to reconcile: it is not prepped and gets its own
+ready ping at once. A ticket's ready ping waits while a pass is due or running that
+covers it; the pass's single "N ready to ship, list ready" ping speaks for it. The agent only
 does the judgment work in git: it finds duplicates, reconciles conflicting
 branches and brings each branch up to date, then writes a small report. It
 never touches the ticket store. The dispatcher (a human's process) then:
@@ -109,7 +112,8 @@ def list_path() -> Path:
 
 
 def _empty() -> dict:
-    return {"covered": [], "jobs": [], "attempts": {"day": "", "n": 0}, "shipping": []}
+    return {"covered": [], "jobs": [], "attempts": {"day": "", "n": 0}, "shipping": [],
+            "prep_day": "", "limit_day": ""}
 
 
 def _load() -> dict:
@@ -131,6 +135,9 @@ def _load() -> dict:
             isinstance(r, dict) and isinstance(r.get("id"), str) and isinstance(r.get("pid"), int) for r in shipping)):
         raise OSError(f"{path} has an unexpected shape")
     data["shipping"] = shipping
+    for key in ("prep_day", "limit_day"):   # date strings; absent in older files
+        if not isinstance(data.get(key), str):
+            data[key] = ""
     return data
 
 
@@ -271,20 +278,62 @@ def _fresh(tickets: list[dict], settings: dict, state: dict) -> list[dict]:
     return fresh
 
 
-def due(tickets: list[dict], settings: dict, now: datetime) -> str | None:
-    """Why the prep pass should run now, or None. Either nothing is left to build (no ticket
-    claimed, none open that could start or is only waiting its turn), or it is `prep_time`
-    Pacific time or later today."""
+def _waiting(tickets: list[dict], settings: dict, state: dict) -> list[dict]:
+    """Tickets in review that a prep pass could take now: not locked, branch present."""
+    locked = _busy(state)
+    return [t for t in review_tickets(tickets) if t["id"] not in locked and tip_of(_repo(t, settings), t["branch"])]
+
+
+def _past_prep_time(settings: dict, now: datetime) -> bool:
+    hour, minute = (int(x) for x in settings["prep_time"].split(":"))
+    local = now.astimezone(PREP_TZ)
+    return (local.hour, local.minute) >= (hour, minute)
+
+
+def _pacific_day(now: datetime) -> str:
+    return now.astimezone(PREP_TZ).strftime("%Y-%m-%d")
+
+
+def _plan(tickets: list[dict], settings: dict, state: dict, now: datetime) -> tuple[str | None, bool]:
+    """(why the prep pass should run now or None, whether it is today's prep_time pass).
+    One ticket alone has nothing to reconcile, so a pass needs at least two tickets waiting,
+    one of them not covered by an earlier pass at its tip. It then runs when nothing is left to
+    build (no ticket claimed, none open that could start or is only waiting its turn), or once a
+    day at `prep_time` Pacific time (the first look at or after it)."""
+    if len(_waiting(tickets, settings, state)) < 2 or not _fresh(tickets, settings, state):
+        return None, False
     open_work = any(d.skip is None or d.skip in AT_CAPACITY for d in dp.decide(tickets, settings))
     claimed = any(t["status"] == "claimed" and t["type"] in dp.LAUNCH_TYPES and not t.get("oncall")
                   for t in tickets)
     if not open_work and not claimed:
-        return "nothing is left to build"
-    hour, minute = (int(x) for x in settings["prep_time"].split(":"))
-    local = now.astimezone(PREP_TZ)
-    if (local.hour, local.minute) >= (hour, minute):
-        return f"it is {settings['prep_time']} Pacific or later"
-    return None
+        return "nothing is left to build", False
+    if _past_prep_time(settings, now) and state.get("prep_day") != _pacific_day(now):
+        return f"it is {settings['prep_time']} Pacific", True
+    return None, False
+
+
+def _can_launch(settings: dict, state: dict, now: datetime) -> bool:
+    """The gates maybe_start applies before it starts an agent, without side effects."""
+    day = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    attempts = state["attempts"]
+    return (not any(j["kind"] == "prep" for j in state["jobs"]) and not dp.research_problem(settings)
+            and state.get("limit_day") != day
+            and not (attempts.get("day") == day and attempts.get("n", 0) >= MAX_ATTEMPTS_PER_DAY))
+
+
+def holds_ping(t: dict, tickets: list[dict], settings: dict, now: datetime) -> bool:
+    """True while the "ready to ship" ping of a ticket in review should wait: an agent holds it,
+    a prep pass already covered it (the "N ready to ship, list ready" ping speaks for it), a pass
+    is about to start, or one is due at today's prep_time. False means no pass will touch it, so
+    it can be shipped now. Raises OSError when the state cannot be read."""
+    state = _load()
+    tip = tip_of(_repo(t, settings), t["branch"])
+    if t["id"] in _busy(state) or f"{t['id']}:{tip}" in state["covered"]:
+        return True
+    if _plan(tickets, settings, state, now)[0] and _can_launch(settings, state, now):
+        return True
+    return (not _past_prep_time(settings, now) and len(_waiting(tickets, settings, state)) >= 2
+            and dp.research_problem(settings) is None)
 
 
 def _start_job(kind: str, tickets: list[dict], settings: dict, warn) -> dict:
@@ -332,15 +381,18 @@ def _start_job(kind: str, tickets: list[dict], settings: dict, warn) -> dict:
 
 
 def maybe_start(settings: dict, now: datetime, emit, warn, reserve=None) -> None:
-    """Launch the prep agent if it is due and there is something new in review."""
+    """Launch the prep agent if it is due: at least two tickets waiting in review, and either nothing
+    left to build or today's prep_time."""
     tickets = tk.list_tickets()
     state = _load()
     if any(j["kind"] == "prep" for j in state["jobs"]):
         return
-    if not _fresh(tickets, settings, state):
-        return
-    why = due(tickets, settings, now)
+    today = _pacific_day(now)
+    why, at_prep_time = _plan(tickets, settings, state, now)
     if why is None:
+        if _past_prep_time(settings, now) and state.get("prep_day") != today:
+            with _state() as st:   # prep_time came with nothing to reconcile: today's look is used up
+                st["prep_day"] = today
         return
     problem = dp.research_problem(settings)
     if problem:
@@ -352,6 +404,8 @@ def maybe_start(settings: dict, now: datetime, emit, warn, reserve=None) -> None
         emit(f"prep pass not started: {MAX_ATTEMPTS_PER_DAY} launch attempts failed today")
         return
     if reserve is not None and not reserve():
+        with _state() as st:   # holds_ping must not wait for a pass that cannot start today
+            st["limit_day"] = day
         emit("prep pass not started: daily launch limit reached")
         return
     with _state() as st:   # count the attempt before it starts, like every launch
@@ -363,6 +417,9 @@ def maybe_start(settings: dict, now: datetime, emit, warn, reserve=None) -> None
         dp.log("PREP_FAILED", f"launch failed: {exc}")
         emit(f"prep pass not started: {exc}")
         return
+    if at_prep_time:
+        with _state() as st:
+            st["prep_day"] = today
     dp.log("PREP_STARTED", f"{len(job['ids'])} tickets in review ({why}): {', '.join(job['ids'])}")
     emit(f"prep agent started over {len(job['ids'])} tickets in review ({why})")
 
