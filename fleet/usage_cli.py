@@ -12,6 +12,7 @@ from . import launch as lc
 from . import service as sv
 from . import settings as st
 from . import ticket as tk
+from . import ticketcost as tc
 from . import usage as us
 from .status import snapshot
 from .status_server import DEFAULT_PORT, serve
@@ -28,6 +29,8 @@ def main(argv=None) -> int:
     p = _Parser(prog="fleet")
     sub = p.add_subparsers(dest="cmd", required=True, parser_class=_Parser)
     u = sub.add_parser("usage", help="each AI tool's usage against its limits (local, read-only)")
+    u.add_argument("--by-ticket", action="store_true",
+                   help="top tickets by tokens over the last 7 days (build vs review, Claude vs Codex)")
     u.add_argument("--json", action="store_true", help="machine-readable output")
     sub.add_parser("doctor", help="check the settings, the tools on PATH and the tracker (read-only)")
     s = sub.add_parser("start", help="start herdr (headless), the workspaces and dispatch --watch; safe to repeat")
@@ -62,6 +65,10 @@ def main(argv=None) -> int:
     if args.cmd in ("start", "stop", "restart", "status", "logs", "autostart", "launcher"):
         return _service(args)
 
+    if args.cmd == "usage" and args.by_ticket:
+        rows = tc.by_ticket()
+        print(json.dumps(rows, indent=2) if args.json else tc.table(rows))
+        return 0
     results = us.collect()
     if args.json:
         print(json.dumps(results, indent=2))
