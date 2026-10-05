@@ -113,6 +113,11 @@ def test_the_job_refuses_a_branch_that_moved_and_pings_why(real_task, monkeypatc
     assert ship_cli._status(t["id"]) == 1
 
 
+def test_status_accepts_a_legacy_ticket_id(real_task, capsys):  # noqa: F811
+    assert ship_cli._status("T-20261004-001") == 1
+    assert "no ship of T-20261004-001" in capsys.readouterr().err
+
+
 def test_status_of_a_ship_never_run(real_task, capsys):  # noqa: F811
     assert ship_cli._status("BD-9") == 1
     assert "no ship of BD-9" in capsys.readouterr().err

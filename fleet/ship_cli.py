@@ -8,7 +8,6 @@ import contextlib
 import fcntl
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -391,6 +390,10 @@ def _ask_to_ship(repo: Path, wt: Path, branch: str, tip: str) -> str | int:
     if not risk or not word:
         return _fail("could not work out the risk level; nothing was merged")
     base = dp.main_branch(repo) or "main"
+    others = _gate(repo, wt, branch, "--field", "others").stdout.strip()
+    if others:
+        print(f"WARNING: shipping {branch} also ships the work of these unfinished tickets on it:")
+        print("".join(f"  {line}\n" for line in others.splitlines()), end="")
     print(dp._git(repo, "log", "--oneline", f"{base}..{tip}").stdout, end="")
     print(dp._git(repo, "diff", "--stat", f"{base}...{tip}").stdout, end="")
     try:
@@ -515,7 +518,7 @@ def _run_job(ticket_id: str, tip: str, answer: str) -> int:
 
 
 def _status(ticket_id: str) -> int:
-    if not re.fullmatch(r"[A-Za-z]+-\d+", ticket_id):
+    if not tk.ID_RE.fullmatch(ticket_id):
         return _fail(f"unknown ticket ID: {ticket_id}")
     files = _job_files(ticket_id)
     tail = ""
