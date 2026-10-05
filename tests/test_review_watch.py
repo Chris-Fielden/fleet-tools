@@ -10,6 +10,7 @@ from conftest import run
 from fake_kaneo import FakeKaneo
 from fleet import dispatch as dp
 from fleet import notify
+from fleet import prep
 from fleet import review_watch as rw
 from fleet import ticket as tk
 from test_dispatch import calls, claim, git, herdr_log, make_repo, mk, projects  # noqa: F401
@@ -136,6 +137,18 @@ def test_pass_summary_and_idle_agent_moves_to_review_with_one_ping(rig, ntfy):
     rig.cycle(5)
     rig.cycle(10)
     assert len(ntfy.requests) == 1 and rig.get()["status"] == "review"
+
+
+def test_the_tab_closes_when_the_ticket_reaches_review(rig, ntfy):
+    rig.finish()
+    rig.world.write_text(json.dumps({
+        "workspaces": [{"workspace_id": "w1", "label": "fleet"}],
+        "tabs": [{"tab_id": "w1:t4", "label": rig.id, "workspace_id": "w1", "focused": False}],
+        "agents": [{"name": rig.id.lower(), "agent_status": "idle", "tab_id": "w1:t4"}]}))
+    rig.cycle()
+    assert rig.get()["status"] == "review"
+    assert json.loads(rig.world.read_text())["tabs"] == []
+    assert f"TAB_CLOSED {rig.id} tab w1:t4" in dp.log_path().read_text()
 
 
 def test_done_agent_counts_like_idle(rig, ntfy):
@@ -270,12 +283,15 @@ def test_an_agent_can_never_set_review(rig, monkeypatch):
     assert rig.get()["status"] == "claimed"
 
 
-def test_a_review_ticket_still_holds_the_capacity_and_the_branch(rig):
+def test_a_review_ticket_holds_the_branch_but_not_the_capacity(rig):
     rig.finish()
     rig.cycle()
+    assert rig.get()["status"] == "review"
     other = mk(branch="task/other")
-    decision = dp.decide(tk.list_tickets(), rig.settings)[0]
-    assert decision.ticket["id"] == other["id"] and decision.skip == "at capacity"
+    same = mk(branch="task/demo")
+    decisions = {d.ticket["id"]: d for d in dp.decide(tk.list_tickets(), rig.settings)}
+    assert decisions[other["id"]].skip is None            # the next ticket launches while this one waits
+    assert "in use by claimed ticket" in decisions[same["id"]].skip   # but the branch stays taken
 
 
 def test_review_queue_lists_oldest_first(rig):
@@ -644,3 +660,15 @@ def test_investigation_done_pings_low(projects, herdr_log, ntfy, monkeypatch, en
     dispatch_cli._cycle(dp.load_settings(), print, lambda m: None)
     assert tk.load_ticket(t["id"])["status"] == "done"
     assert [r["priority"] for r in ntfy.requests] == ["low"]
+
+
+def test_only_the_prep_pass_success_note_counts_as_a_summary(rig, ntfy):
+    rig.verdict()
+    tk.add_note(rig.id, f"{prep.NOTE_PREFIX} left off the ship list: the task folder has uncommitted changes.")
+    tk.add_note(rig.id, f"{prep.NOTE_PREFIX} TICKET-2 was a duplicate and is cancelled; its work is folded in.")
+    rig.set_agent("idle")
+    rig.cycle()
+    assert rig.get()["status"] == "claimed"
+    tk.add_note(rig.id, f"{prep.PASS_NOTE_PREFIX} abc12345: the branch was changed; checks passed.")
+    rig.cycle(5)
+    assert rig.get()["status"] == "review"

@@ -34,7 +34,8 @@ def oncall_tickets():
 
 
 def agent_starts(herdr_log):
-    return [c[2] for c in calls(herdr_log) if c[:2] == ["agent", "start"]]
+    # the prep agent (overnight queue) is not a ticket's agent
+    return [c[2] for c in calls(herdr_log) if c[:2] == ["agent", "start"] and not c[2].startswith("prep")]
 
 
 def go(rig, minutes, stop, **settings):

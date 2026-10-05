@@ -43,6 +43,7 @@ from . import dispatch as dp
 from . import kaneo
 from . import launch as lc
 from . import notify
+from . import prep
 from . import risk as rk
 from . import ticket as tk
 
@@ -116,8 +117,11 @@ def has_summary_after_review(t: dict) -> bool:
     v = t["verdict"]
     if v is None:
         return False
-    return any(n["by"] == t.get("assignee") and n["at"] >= v["at"]
-               and not n["text"].startswith(LEFTOVERS_PREFIX) for n in t.get("notes", []))
+    # The prep pass (the dispatcher, so a human) re-checks a branch it changed and says so
+    # in a note; that stands in for the agent's summary of the new tip.
+    return any(n["at"] >= v["at"] and not n["text"].startswith(LEFTOVERS_PREFIX)
+               and (n["by"] == t.get("assignee") or (n["by"] == "human" and n["text"].startswith(prep.PASS_NOTE_PREFIX)))
+               for n in t.get("notes", []))
 
 
 def passed_for_tip(t: dict, tip: str) -> bool:
@@ -560,6 +564,9 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             dp.log("REVIEW_BACK", f"{t['id']} back to claimed: {why}")
             kaneo.mirror_quietly(new, warn)
             t = new   # claimed again: the alert checks below apply in full
+            if agents_known and agent is None:   # its tab was closed in review: nobody is on it
+                prep.relaunch_sent_back(t, settings, emit, warn)
+                return   # the new agent starts fresh: judge it from the next cycle
         else:
             return
     elif earned and stopped:
@@ -568,6 +575,10 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             emit(f"{t['id']}  ready to ship: moved to In Review")
             dp.log("REVIEW_READY", f"{t['id']} {tip[:8]} ready to ship")
             kaneo.mirror_quietly(new, warn)
+            # Its agent has stopped and the ticket no longer fills a build slot: close the
+            # tab (never a focused one; a kept tab is closed when the ticket is done).
+            closed, reason = lc.close_finished_tab(t["id"], settings)
+            emit(f"{t['id']}  tab {'closed' if closed else 'kept'}: {reason}")
             _ping(new, "ship", f"{t['id']}:ship:{tip}", state, warn)
             _end_spells(t["id"], state)
             _unrecorded_pings(new, repo, tip, state, now, emit, warn)
@@ -603,10 +614,16 @@ def _flag_stuck_oncall(settings: dict, warn) -> None:
 
 def check(settings: dict, now: datetime, emit, warn) -> None:
     """One watch cycle's pass over every claimed (or in-review) build or fix ticket."""
+    try:
+        locked = prep.locked_ids()   # a prep agent is working on these branches: not ours to judge now
+    except OSError as exc:   # before anything is sent, so a cycle that stops here leaves no half-saved state
+        warn(f"prep state unreadable ({exc}); not judging any ticket this cycle")
+        return
     state = _load_state(warn)
     _retry_pending(state, warn)
     process_recoveries(settings, state, now, emit, warn)
     recovering = {r["id"] for r in pending_recoveries(warn)}   # a ticket with a record is never checked again
+    recovering |= locked
     tickets = sorted((t for t in tk.list_tickets()
                       if t["status"] in ("claimed", "review") and t["type"] in dp.LAUNCH_TYPES
                       and t.get("assignee") in tk.AGENTS and t["id"] not in recovering), key=tk.oldest_first_key)
@@ -628,7 +645,7 @@ def check(settings: dict, now: datetime, emit, warn) -> None:
     except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
         warn(f"on-call check: {exc}")
     process_recoveries(settings, state, now, emit, warn)
-    live = {t["id"] for t in tickets}
+    live = {t["id"] for t in tickets} | locked
     for name in ("blocked_since", "stopped_since", "seen"):
         state[name] = {k: v for k, v in state[name].items() if k in live}
     # Keys of the failure pings stay: their ticket is closed, and the key is the record that it was sent.
