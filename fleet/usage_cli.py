@@ -4,11 +4,13 @@ status, logs, autostart, launcher; see service.py)."""
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import sys
 
 from . import doctor
 from . import launch as lc
+from . import ops
 from . import service as sv
 from . import settings as st
 from . import ticket as tk
@@ -25,9 +27,42 @@ class _Parser(argparse.ArgumentParser):
         raise SystemExit(2)
 
 
+# Verbs that hand the rest of the line to the command that already exists, so
+# `fleet <verb> ARGS` is exactly `<verb> ARGS`. (module, function, help line)
+FORWARDED = {
+    "ship": ("ship_cli", "main", "merge a ticket in review: fleet ship ID (human only)"),
+    "ticket": ("ticket_cli", "main", "tickets: new, list, show, note, approve, close ... (fleet ticket --help)"),
+    "approve": ("ticket_cli", None, "approve a proposed ticket: fleet approve ID (human only)"),
+    "alert": ("shortcuts_cli", "alert_main", "file an urgent ticket: fleet alert REPO TEXT (human only)"),
+    "idea": ("shortcuts_cli", "idea_main", "file an idea for review: fleet idea TEXT (human only)"),
+}
+
+
+def _forward(argv: list[str]) -> int | None:
+    """Run a forwarded verb; None if argv does not start with one."""
+    if not argv or argv[0] not in FORWARDED:
+        return None
+    verb, rest = argv[0], argv[1:]
+    module, func, _ = FORWARDED[verb]
+    mod = importlib.import_module(f"fleet.{module}")
+    if func is None:   # approve is `ticket approve`
+        return mod.main(["approve", *rest])
+    return getattr(mod, func)(rest)
+
+
 def main(argv=None) -> int:
-    p = _Parser(prog="fleet")
-    sub = p.add_subparsers(dest="cmd", required=True, parser_class=_Parser)
+    argv = sys.argv[1:] if argv is None else list(argv)
+    code = _forward(argv)
+    if code is not None:
+        return code
+    if argv == ["help"]:
+        argv = ["--help"]
+    p = _Parser(prog="fleet", epilog="ship, ticket, alert and idea also still work as commands of their own.")
+    sub = p.add_subparsers(dest="cmd", required=True, parser_class=_Parser, metavar="VERB")
+    for verb, (_, _, text) in FORWARDED.items():
+        sub.add_parser(verb, help=text, add_help=False)
+    sub.add_parser("ops", help="open or reattach tmux session 'fleet': an ops shell and a read-only herdr view")
+    sub.add_parser("help", help="this list")
     u = sub.add_parser("usage", help="each AI tool's usage against its limits (local, read-only)")
     u.add_argument("--by-ticket", action="store_true",
                    help="top tickets by tokens over the last 7 days (build vs review, Claude vs Codex)")
@@ -60,6 +95,12 @@ def main(argv=None) -> int:
         try:
             return serve(args.host, args.port)
         except (ValueError, OSError) as exc:
+            print(f"fleet: {exc}", file=sys.stderr)
+            return 1
+    if args.cmd == "ops":
+        try:
+            return ops.cmd_ops()
+        except (sv.ServiceError, OSError) as exc:
             print(f"fleet: {exc}", file=sys.stderr)
             return 1
     if args.cmd in ("start", "stop", "restart", "status", "logs", "autostart", "launcher"):
