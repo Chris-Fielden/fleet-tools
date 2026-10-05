@@ -31,18 +31,42 @@ SECTION_MAX = 12000    # characters of any one part of the new prompt (the spec,
 TAIL_BYTES = 262144    # how much of the end of a transcript is read
 
 
-def claude_session_tokens(folder: Path, home: Path | None = None) -> int | None:
-    """The context size, in tokens, of the newest Claude Code session run in
-    `folder`: input plus cache tokens of its last assistant turn. None when there
-    is no readable transcript. Read-only."""
+def _starts_with_task_prompt(path: Path, ticket_id: str) -> bool:
+    """Whether the transcript is the ticket's author session: its first user
+    message is the launch prompt (or this module's takeover prompt). Review and
+    consult sessions run in the same folder with other prompts and don't count."""
+    with open(path, "rb") as fh:
+        head = fh.read(TAIL_BYTES).decode("utf-8", errors="replace")
+    for line in head.splitlines():
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(msg, dict) or msg.get("type") != "user":
+            continue
+        content = (msg.get("message") or {}).get("content")
+        if isinstance(content, list):
+            content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
+        text = content.lstrip() if isinstance(content, str) else ""
+        return any(re.match(rf"You are {what} ticket {re.escape(ticket_id)}\s", text)
+                   for what in ("working", "taking over"))
+    return False
+
+
+def claude_session_tokens(folder: Path, ticket_id: str, home: Path | None = None) -> int | None:
+    """The context size, in tokens, of the newest Claude Code author session of
+    `ticket_id` run in `folder`: input plus cache tokens of its last assistant
+    turn. Reviewer sessions in the same folder are skipped. None when there is
+    no readable transcript. Read-only."""
     config = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (home or Path.home()) / ".claude")
     project = config / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(folder.resolve()))
     try:
         files = sorted((p for p in project.glob("*.jsonl") if p.is_file() and not p.is_symlink()),
-                       key=lambda p: p.stat().st_mtime)
-        if not files:
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        mine = next((p for p in files if _starts_with_task_prompt(p, ticket_id)), None)
+        if mine is None:
             return None
-        with open(files[-1], "rb") as fh:
+        with open(mine, "rb") as fh:
             fh.seek(0, os.SEEK_END)
             fh.seek(max(0, fh.tell() - TAIL_BYTES))
             lines = fh.read().decode("utf-8", errors="replace").splitlines()
@@ -62,7 +86,7 @@ def claude_session_tokens(folder: Path, home: Path | None = None) -> int | None:
 
 def session_tokens(t: dict, folder: Path) -> int | None:
     """How big the ticket's agent session is; tests replace this with fixture sizes."""
-    return claude_session_tokens(folder) if t.get("assignee") == "claude" else None
+    return claude_session_tokens(folder, t["id"]) if t.get("assignee") == "claude" else None
 
 
 def _clip(text: str, limit: int = SECTION_MAX) -> str:
@@ -87,6 +111,8 @@ def _must_fix(t: dict, folder: Path) -> str:
     v = t["verdict"]
     parts = []
     try:
+        if folder.is_symlink() or (folder / ".reviews").is_symlink():
+            raise OSError("symlinked task folder or reviews directory")
         for kind, info in sorted(rk.latest_reviews(folder / ".reviews", v["commit"]).items()):
             if info["verdict"] == "FAIL" and not Path(info["file"]).is_symlink():
                 items = rk.review_items(Path(info["file"]).read_text(encoding="utf-8"), "MUST FIX")
@@ -165,6 +191,11 @@ def refresh_if_large(t: dict, agent: dict | None, tip: str, settings: dict, stat
         warn(f"{t['id']}: session is {size} tokens but its agent has no tab to close; not replacing it")
         return False
     try:
+        prompt = build_prompt(t, repo, folder)
+    except Exception as exc:    # nothing has been stopped yet: leave the agent running
+        warn(f"{t['id']}: session is {size} tokens but the new prompt could not be built ({exc}); not replacing it")
+        return False
+    try:
         others = [a.get("name") for a in lc.list_agents()
                   if a.get("tab_id") == tab and a.get("name") != t["id"].lower()]
         if others:   # closing the tab would end them too; tried again next cycle
@@ -176,7 +207,7 @@ def refresh_if_large(t: dict, agent: dict | None, tip: str, settings: dict, stat
         warn(f"{t['id']}: session is {size} tokens but its tab {tab} could not be closed ({exc}); not replacing it")
         return False
     handled[t["id"]] = v["commit"]
-    code, message = lc.relaunch(t, settings, warn, prompt=build_prompt(t, repo, folder),
+    code, message = lc.relaunch(t, settings, warn, prompt=prompt,
                                 why=f" (FRESH_SESSION: old session {size} tokens, limit {limit})")
     emit(message)
     if code:

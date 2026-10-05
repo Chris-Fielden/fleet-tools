@@ -1,6 +1,7 @@
 """A fresh agent session when the context is large (fake herdr, fixture session
 sizes, temp FLEET_HOME, real git)."""
 import json
+import os
 
 import pytest
 
@@ -134,7 +135,7 @@ def test_the_setting_is_validated(env):
     assert st.load_settings()["fresh_session_tokens"] == 100000
 
 
-def test_claude_session_size_reads_the_last_turn_of_the_folders_transcript(env, monkeypatch):
+def test_claude_session_size_reads_the_authors_transcript_not_a_reviewers(env, monkeypatch):
     cfg = env / "cfg"
     folder = env / "my.proj" / "wt"
     folder.mkdir(parents=True)
@@ -143,9 +144,45 @@ def test_claude_session_size_reads_the_last_turn_of_the_folders_transcript(env, 
     proj.mkdir(parents=True)
     usage = lambda i, c, r: json.dumps({"type": "assistant", "message": {"usage": {
         "input_tokens": i, "cache_creation_input_tokens": c, "cache_read_input_tokens": r, "output_tokens": 9}}})
-    (proj / "s.jsonl").write_text(usage(1, 2, 3) + "\nnot json\n" + usage(10, 20000, 90000) + '\n{"type":"user"}\n')
-    assert fresh.claude_session_tokens(folder) == 110010
-    assert fresh.claude_session_tokens(env) is None
+    first = lambda text: json.dumps({"type": "user", "message": {"role": "user", "content": text}})
+    author = proj / "a.jsonl"
+    author.write_text(first("You are working ticket EM-1 in this task folder.\nRun it.") + "\n" + usage(1, 2, 3)
+                      + "\nnot json\n" + usage(10, 20000, 90000) + '\n{"type":"user"}\n')
+    reviewer = proj / "r.jsonl"      # newer, small: a review run in the same folder
+    reviewer.write_text(first("Review this branch.") + "\n" + usage(1, 2, 3) + "\n")
+    os.utime(author, (1, 1))
+    assert fresh.claude_session_tokens(folder, "EM-1") == 110010
+    assert fresh.claude_session_tokens(folder, "EM-2") is None
+    assert fresh.claude_session_tokens(env, "EM-1") is None
+    taken = proj / "t.jsonl"         # a replacement session counts too, and is the newest
+    taken.write_text(first("You are taking over ticket EM-1 in this task folder") + "\n" + usage(5, 0, 0) + "\n")
+    assert fresh.claude_session_tokens(folder, "EM-1") == 5
+
+
+def test_a_tab_close_error_means_no_relaunch_and_is_retried(rig, sizes, herdr_log, monkeypatch):
+    rig.verdict("FAIL")
+    tabbed(rig)
+    real = fresh.lc.herdr
+
+    def boom(*a, **k):
+        if a[:2] == ("tab", "close"):
+            raise fresh.lc.LaunchError("close failed")
+        return real(*a, **k)
+    monkeypatch.setattr(fresh.lc, "herdr", boom)
+    rig.cycle()
+    assert prompts(herdr_log) == [] and rig.warnings
+    monkeypatch.setattr(fresh.lc, "herdr", real)
+    rig.cycle()
+    assert len(prompts(herdr_log)) == 1
+
+
+def test_a_prompt_that_cannot_be_built_leaves_the_agent_running(rig, sizes, herdr_log, monkeypatch):
+    rig.verdict("FAIL")
+    tabbed(rig)
+    monkeypatch.setattr(fresh, "build_prompt", lambda *a: 1 / 0)
+    rig.cycle()
+    assert prompts(herdr_log) == [] and rig.warnings
+    assert not any(c[:2] == ["tab", "close"] for c in calls(herdr_log))
 
 
 def test_a_fail_of_an_older_commit_is_not_acted_on(rig, sizes, herdr_log):
