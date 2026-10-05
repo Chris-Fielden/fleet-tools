@@ -665,8 +665,9 @@ def _flag_stuck_oncall(settings: dict, warn) -> None:
             write_recovery(oc, f"the on-call ticket cannot be launched: {reason}", oc.get("oncall_base") or "0" * 40)
 
 
-def check(settings: dict, now: datetime, emit, warn) -> None:
-    """One watch cycle's pass over every claimed (or in-review) build or fix ticket."""
+def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
+    """One watch cycle's pass over every claimed (or in-review) build or fix ticket.
+    Tickets in `skip` (their agent was just sent a note) are not judged this cycle."""
     try:
         locked = prep.locked_ids()   # a prep agent is working on these branches: not ours to judge now
     except OSError as exc:   # before anything is sent, so a cycle that stops here leaves no half-saved state
@@ -676,7 +677,7 @@ def check(settings: dict, now: datetime, emit, warn) -> None:
     _retry_pending(state, warn)
     process_recoveries(settings, state, now, emit, warn)
     recovering = {r["id"] for r in pending_recoveries(warn)}   # a ticket with a record is never checked again
-    recovering |= locked
+    recovering |= locked | set(skip)
     tickets = sorted((t for t in tk.list_tickets()
                       if t["status"] in ("claimed", "review") and t["type"] in dp.LAUNCH_TYPES
                       and t.get("assignee") in tk.AGENTS and t["id"] not in recovering), key=tk.oldest_first_key)

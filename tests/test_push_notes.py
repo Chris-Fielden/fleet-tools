@@ -186,8 +186,8 @@ def test_notes_are_pushed_before_the_review_checks(world, herdr_log):
     tk.add_note(t["id"], "added while it worked")
     seen = []
     dispatch_cli._cycle(dp.load_settings(), lambda m: None, lambda m: None,
-                        checks=lambda emit, warn: seen.append(len(prompts(herdr_log))))
-    assert seen == [1]
+                        checks=lambda emit, warn, skip: seen.append((len(prompts(herdr_log)), set(skip))))
+    assert seen == [(1, {t["id"]})]
 
 
 def test_an_idle_investigation_with_a_pending_note_is_prompted_not_finished(world, herdr_log):
@@ -197,7 +197,7 @@ def test_an_idle_investigation_with_a_pending_note_is_prompted_not_finished(worl
     world(t["id"].lower(), "idle")
     run_push()
     tk.add_note(t["id"], "look at the logs too")
-    dispatch_cli._cycle(dp.load_settings(), lambda m: None, lambda m: None, checks=lambda emit, warn: None)
+    dispatch_cli._cycle(dp.load_settings(), lambda m: None, lambda m: None, checks=lambda emit, warn, skip: None)
     assert len(prompts(herdr_log)) == 1
     assert tk.load_ticket(t["id"])["status"] == "claimed"
 
@@ -226,3 +226,20 @@ def test_a_relaunch_counts_every_note_as_read(world, herdr_log, projects, env, m
     (env / "world.json").write_text(json.dumps(w))
     run_push()
     assert not [p for p in prompts(herdr_log) if p[3].startswith(push_notes.PREFIX)]
+
+
+def test_review_checks_skip_a_ticket_that_was_just_prompted(world, herdr_log, projects):
+    from fleet import review_watch as rw
+    from fleet import dispatch as dp
+    from datetime import datetime, timezone
+    t = claim(mk())
+    world(t["id"].lower(), "idle")
+    seen = []
+    orig = rw._check_one
+    rw._check_one = lambda tk_, *a, **k: seen.append(tk_["id"])
+    try:
+        rw.check(dp.load_settings(), datetime.now(timezone.utc), lambda m: None, lambda m: None)
+        rw.check(dp.load_settings(), datetime.now(timezone.utc), lambda m: None, lambda m: None, skip={t["id"]})
+    finally:
+        rw._check_one = orig
+    assert seen == [t["id"]]   # judged without skip, not judged with it

@@ -859,6 +859,10 @@ def relaunch(t: dict, settings: dict, warn, prompt: str | None = None, why: str 
         if not folder.exists():
             raise LaunchError(f"task folder {d.worktree} is gone")
         check_reusable(d, folder)
+        try:
+            read_by_agent = tk.load_ticket(t["id"])   # before the start: a later note must still be sent
+        except (tk.TicketError, tk.TicketInvalid):
+            read_by_agent = t
         tab = start_agent(d, folder, ensure_workspace(settings["herdr_workspace"]), warn)
     except AgentMayBeRunning as exc:
         _safe_log("RELAUNCH_FAILED", f"{t['id']} {exc}")
@@ -866,10 +870,7 @@ def relaunch(t: dict, settings: dict, warn, prompt: str | None = None, why: str 
     except (LaunchError, OSError, subprocess.TimeoutExpired) as exc:
         _safe_log("RELAUNCH_FAILED", f"{t['id']} {exc}")
         return 1, f"{t['id']}  relaunch failed: {exc}; ticket stays claimed"
-    try:
-        from . import push_notes   # here, not at the top: push_notes imports this module
-        push_notes.baseline(tk.load_ticket(t["id"]), overwrite=True)   # the new agent read every note
-    except (tk.TicketError, tk.TicketInvalid, OSError):
-        pass
+    from . import push_notes   # here, not at the top: push_notes imports this module
+    push_notes.baseline(read_by_agent, overwrite=True)   # the new agent read every note up to here
     _safe_log("RELAUNCHED", f"{t['id']} {d.agent} ({d.model or 'default'}) tab {tab} in {d.worktree}{why}")
     return 0, f"{t['id']}  relaunched {d.agent} ({d.model or 'default'}) in tab {tab}"

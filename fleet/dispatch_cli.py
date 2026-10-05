@@ -140,7 +140,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     # tickets, and start the next prep pass after it has moved new tickets into review.
     _prep_quietly(lambda: prep.finish(settings, clock.now(), emit, warn), warn)
     if checks is not None:
-        checks(emit, warn)
+        checks(emit, warn, prompted)
     _prep_quietly(lambda: prep.maybe_start(settings, clock.now(), emit, warn, reserve), warn)
     lines, held = dp.ensure_investigations(tk.list_tickets(), warn)
     for line in lines:
@@ -275,8 +275,8 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None) -> int:
         while True:
             lines: list[str] = []
             try:
-                def checks(emit, warn):
-                    review_watch.check(settings, clock.now(), emit, warn)
+                def checks(emit, warn, skip=frozenset()):
+                    review_watch.check(settings, clock.now(), emit, warn, skip)
                 _cycle(settings, lines.append, lambda m: lines.append(f"warning: {m}"), reserve=reserve,
                        retry_tabs=kept_tabs, checks=checks, clock=clock)
             except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
