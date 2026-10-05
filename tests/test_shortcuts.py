@@ -71,6 +71,30 @@ def test_alert_title_is_first_100_characters():
     assert t["title"] == "y" * 100 and t["body"] == "y" * 120
 
 
+def test_alert_multiline_title_is_first_line_only():
+    text = "fleet up/down\nRe-filed from BD-41 as urgent; BD-4"
+    t = tk.load_ticket(sh(ALERT, "myrepo", text).stdout.strip())
+    assert t["title"] == "fleet up/down" and t["body"] == text
+
+
+def test_alert_skips_leading_blank_lines_and_trims_long_first_line():
+    t = tk.load_ticket(sh(ALERT, "myrepo", "\n\n" + "z" * 120 + "\nmore").stdout.strip())
+    assert t["title"] == "z" * 100
+
+
+def test_fix_titles_retitles_squashed_open_tickets(monkeypatch):
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    body = "disk full\nsecond line"
+    squashed = tk.create_ticket({"type": "build", "repo": "r", "branch": "task/a-1",
+                                 "title": "disk full second line", "body": body})
+    manual = tk.create_ticket({"type": "build", "repo": "r", "branch": "task/a-2",
+                               "title": "my own title", "body": body})
+    assert [t["id"] for t in tk.fix_titles()] == [squashed["id"]]
+    assert tk.load_ticket(squashed["id"])["title"] == "disk full"
+    assert tk.load_ticket(manual["id"])["title"] == "my own title"
+    assert tk.fix_titles() == []
+
+
 @pytest.mark.parametrize("args", [[], ["myrepo"], ["myrepo", " "]])
 def test_alert_without_text_prints_usage(args):
     r = sh(ALERT, *args)

@@ -60,6 +60,7 @@ def bash(command, cwd, **kw):
     "ticket close BD-1 --done",
     "ticket approve BD-2",
     "ticket sync",
+    "ticket fix-titles",
     "ticket priority BD-1 urgent",
     "env -u CLAUDECODE bin/ticket priority BD-1 urgent",
     "fleet ticket priority BD-1 urgent",

@@ -46,6 +46,10 @@ def _title(text: str) -> str:
     return text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")[:100].strip()
 
 
+def _alert_title(text: str) -> str:
+    return tk.first_line_title(text)
+
+
 def idea_main(argv=None) -> int:
     words = sys.argv[1:] if argv is None else argv
     text = _text(words)
@@ -67,4 +71,4 @@ def alert_main(argv=None) -> int:
               file=sys.stderr)
         return 2
     return _file("alert", {"type": "build", "repo": words[0], "branch": _branch("alert"),
-                           "title": _title(text), "body": text, "priority": "urgent"})
+                           "title": _alert_title(text), "body": text, "priority": "urgent"})

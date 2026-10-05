@@ -73,6 +73,10 @@ class Tracker(ABC):
         """urgent or normal, on an unfinished ticket (humans only)."""
 
     @abstractmethod
+    def fix_titles(self) -> list[dict]:
+        """Retitle unfinished tickets whose title was squashed from a multi-line body (humans only)."""
+
+    @abstractmethod
     def close(self, ticket_id: str, outcome: str, note: str | None = None) -> dict:
         """done, failed or cancelled (humans only)."""
 
@@ -127,6 +131,9 @@ class LocalTracker(Tracker):
 
     def set_priority(self, ticket_id, priority):
         return self._mirrored(tk.set_priority(ticket_id, priority))
+
+    def fix_titles(self):
+        return [self._mirrored(t) for t in tk.fix_titles()]
 
     def close(self, ticket_id, outcome, note=None):
         return self._mirrored(tk.close_ticket(ticket_id, outcome, note))
