@@ -29,14 +29,14 @@ from . import ticket as tk
 from .usage import WEEK, _files, _int, _iso, _lines, _n, _ts
 
 REVIEW_MARK = "you are a code reviewer"
-_WORKTREE = re.compile(r"/\.worktrees/([^/]+)")
+_WORKTREE = re.compile(r"([^/]+)/\.worktrees/([^/]+)")
 
 
-def _branch(cwd, git_branch=None) -> str | None:
-    if isinstance(git_branch, str) and git_branch.startswith("task/"):
-        return git_branch
+def _where(cwd) -> tuple[str, str] | None:
+    """(repo, branch) of a task worktree folder, or None. The repo is the name
+    of the folder holding .worktrees, which is what a ticket's `repo` names."""
     m = _WORKTREE.search(cwd) if isinstance(cwd, str) else None
-    return f"task/{m.group(1)}" if m else None
+    return (m.group(1), f"task/{m.group(2)}") if m else None
 
 
 def _text(content) -> str:
@@ -48,22 +48,25 @@ def _text(content) -> str:
     return ""
 
 
-def _session(agent, branch, model, first_user, times, tokens) -> dict | None:
-    if not times or branch is None:
+def _session(agent, where, model, first_user, times, since, tokens) -> dict | None:
+    """`times` are all the session's timestamps; only those since `since` count
+    towards the duration (tokens are already clipped by the caller)."""
+    inside = [t for t in times if t >= since]
+    if not inside or where is None:
         return None
-    start, end = min(times), max(times)
+    start, end = min(inside), max(inside)
     return {
         "agent": agent, "model": model,
         "kind": "review" if first_user.strip().lower().startswith(REVIEW_MARK) else "build",
-        "branch": branch, "started_at": _iso(start), "ended_at": _iso(end),
+        "repo": where[0], "branch": where[1], "started_at": _iso(start), "ended_at": _iso(end),
         "duration_seconds": int((end - start).total_seconds()),
         "fresh_input": tokens[0], "output": tokens[1], "cache_read": tokens[2],
-        "tokens": sum(tokens), "_start": start,
+        "tokens": sum(tokens), "_start": min(times),
     }
 
 
-def _claude_session(path: Path, unreadable) -> dict | None:
-    branch = model = None
+def _claude_session(path: Path, unreadable, since) -> dict | None:
+    where = model = None
     first_user = None
     times, seen = [], set()
     tot = [0, 0, 0]
@@ -71,14 +74,15 @@ def _claude_session(path: Path, unreadable) -> dict | None:
         ts = _ts(obj.get("timestamp"))
         if ts is not None:
             times.append(ts)
-        branch = branch or _branch(obj.get("cwd"), obj.get("gitBranch"))
+        where = where or _where(obj.get("cwd"))
         msg = obj.get("message")
         if not isinstance(msg, dict):
             continue
         if obj.get("type") == "user" and first_user is None:
             first_user = _text(msg.get("content"))
         usage = msg.get("usage")
-        if obj.get("type") != "assistant" or not isinstance(usage, dict):
+        if obj.get("type") != "assistant" or not isinstance(usage, dict) \
+                or ts is None or ts < since:
             continue
         key = (msg.get("id"), obj.get("requestId"))
         if not all(k is None or isinstance(k, str) for k in key):
@@ -92,14 +96,15 @@ def _claude_session(path: Path, unreadable) -> dict | None:
         tot[0] += _int(usage.get("input_tokens")) + _int(usage.get("cache_creation_input_tokens"))
         tot[1] += _int(usage.get("output_tokens"))
         tot[2] += _int(usage.get("cache_read_input_tokens"))
-    return _session("claude", branch, model, first_user or "", times, tot)
+    return _session("claude", where, model, first_user or "", times, since, tot)
 
 
-def _codex_session(path: Path, unreadable) -> dict | None:
-    branch = model = None
+def _codex_session(path: Path, unreadable, since) -> dict | None:
+    where = model = None
     first_user = None
     times = []
     best = None  # the running total with the most tokens
+    base = None  # the largest running total reached before `since`
     for obj in _lines(path, unreadable):
         ts = _ts(obj.get("timestamp"))
         if ts is not None:
@@ -108,7 +113,7 @@ def _codex_session(path: Path, unreadable) -> dict | None:
         if not isinstance(p, dict):
             continue
         if obj.get("type") in ("session_meta", "turn_context"):
-            branch = branch or _branch(p.get("cwd"))
+            where = where or _where(p.get("cwd"))
             if isinstance(p.get("model"), str):
                 model = model or p["model"]
         elif obj.get("type") == "event_msg":
@@ -121,11 +126,18 @@ def _codex_session(path: Path, unreadable) -> dict | None:
             if p.get("type") == "token_count" and isinstance(total, dict):
                 if best is None or _int(total.get("total_tokens")) >= _int(best.get("total_tokens")):
                     best = total
+                if ts is not None and ts < since and (
+                        base is None or _int(total.get("total_tokens")) >= _int(base.get("total_tokens"))):
+                    base = total
     tot = [0, 0, 0]
     if best:
-        cached = _int(best.get("cached_input_tokens"))
-        tot = [max(_int(best.get("input_tokens")) - cached, 0), _int(best.get("output_tokens")), cached]
-    return _session("codex", branch, model, first_user or "", times, tot)
+        # Running totals: what counts is the growth since the cutoff.
+        def part(t, key):
+            return _int(t.get(key)) if t else 0
+        cached = max(part(best, "cached_input_tokens") - part(base, "cached_input_tokens"), 0)
+        fresh = (part(best, "input_tokens") - part(base, "input_tokens")) - cached
+        tot = [max(fresh, 0), max(part(best, "output_tokens") - part(base, "output_tokens"), 0), cached]
+    return _session("codex", where, model, first_user or "", times, since, tot)
 
 
 def sessions(home: Path | None = None, since: datetime | None = None,
@@ -140,7 +152,7 @@ def sessions(home: Path | None = None, since: datetime | None = None,
     for root, pattern, parse in ((claude, "*.jsonl", _claude_session),
                                  (codex, "rollout-*.jsonl", _codex_session)):
         for path in _files(root, pattern, since, bad):
-            s = parse(path, bad)
+            s = parse(path, bad, since)
             if s and s["_start"] <= now:
                 out.append(s)
     return out
@@ -149,7 +161,8 @@ def sessions(home: Path | None = None, since: datetime | None = None,
 def _owner(tickets: list[dict], s: dict) -> str | None:
     """The ticket a session belongs to: of those on its branch, the newest one
     created before the session began (a fix ticket may reuse the folder)."""
-    mine = [t for t in tickets if t.get("branch") == s["branch"]]
+    mine = [t for t in tickets
+            if t.get("branch") == s["branch"] and t.get("repo") == s["repo"]]
     if not mine:
         return None
     started = s["_start"]
@@ -182,8 +195,6 @@ def by_ticket(home: Path | None = None, now: datetime | None = None, limit: int 
     rows = attribute(tk.list_tickets(), sessions(home, now - WEEK, now))
     agg: dict[str, dict] = {}
     for s in rows:
-        if (_ts(s["ended_at"]) or now) < now - WEEK:
-            continue
         a = agg.setdefault(s["ticket"], {"ticket": s["ticket"], "tokens": 0, "runs": 0,
                                          "duration_seconds": 0, "split": {}})
         a["tokens"] += s["tokens"]

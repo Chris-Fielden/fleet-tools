@@ -68,12 +68,12 @@ def test_sessions_split_by_kind_agent_and_ticket(env):
     other = ticket("task/other")
     now = datetime.now(timezone.utc)
     home = env / "home"
-    wt = str(env / "r/.worktrees/demo")
+    wt = str(env / "fleet-tools/.worktrees/demo")
     claude_file(home, "a", wt, "Do the work", now, [(10, 20, 30, 40), (1, 2, 3, 4)])
     claude_file(home, "b", wt, REVIEW_PROMPT, now, [(5, 5, 0, 7)])
     codex_file(home, "c", wt, REVIEW_PROMPT, now, inp=1000, cached=400, out=50)
-    claude_file(home, "d", str(env / "r/.worktrees/other"), "x", now, [(1, 1, 1, 1)])
-    claude_file(home, "e", str(env / "r"), "no worktree", now, [(9, 9, 9, 9)])
+    claude_file(home, "d", str(env / "fleet-tools/.worktrees/other"), "x", now, [(1, 1, 1, 1)])
+    claude_file(home, "e", str(env / "fleet-tools"), "no worktree", now, [(9, 9, 9, 9)])
 
     c = tc.for_ticket(t, home)
     assert c["runs"] == 3
@@ -99,7 +99,7 @@ def test_old_sessions_are_left_out(env):
     ticket()
     home = env / "home"
     now = datetime.now(timezone.utc)
-    claude_file(home, "a", str(env / "r/.worktrees/demo"), "x", now - timedelta(days=9), [(1, 1, 1, 1)])
+    claude_file(home, "a", str(env / "fleet-tools/.worktrees/demo"), "x", now - timedelta(days=9), [(1, 1, 1, 1)])
     assert tc.by_ticket(home, now) == []
     assert tc.table([]).startswith("no ticket usage")
 
@@ -107,7 +107,7 @@ def test_old_sessions_are_left_out(env):
 def test_no_prompt_text_in_results(env):
     t = ticket()
     home = env / "home"
-    claude_file(home, "a", str(env / "r/.worktrees/demo"), "SECRET-PROMPT-TEXT",
+    claude_file(home, "a", str(env / "fleet-tools/.worktrees/demo"), "SECRET-PROMPT-TEXT",
                 datetime.now(timezone.utc), [(1, 1, 1, 1)])
     assert "SECRET-PROMPT-TEXT" not in json.dumps(tc.for_ticket(t, home))
 
@@ -115,7 +115,7 @@ def test_no_prompt_text_in_results(env):
 def test_cli_show_and_by_ticket(env):
     t = ticket()
     home = env / "home"
-    claude_file(home, "a", str(env / "r/.worktrees/demo"), "work", datetime.now(timezone.utc), [(10, 20, 30, 40)])
+    claude_file(home, "a", str(env / "fleet-tools/.worktrees/demo"), "work", datetime.now(timezone.utc), [(10, 20, 30, 40)])
     bin_ = ROOT / "bin"
     shown = subprocess.run([sys.executable, str(bin_ / "ticket"), "show", t["id"]],
                            capture_output=True, text=True)
@@ -141,3 +141,39 @@ def test_review_runs_keep_a_codex_session_file():
     script = (ROOT / "scripts/review.sh").read_text()
     exec_lines = [ln for ln in script.splitlines() if "codex exec" in ln and not ln.lstrip().startswith("#")]
     assert exec_lines and all("--ephemeral" not in ln for ln in exec_lines)
+
+
+def test_same_branch_in_two_repos_is_kept_apart(env):
+    mine = ticket()
+    theirs = tk.create_ticket({"type": "build", "repo": "other-repo", "branch": "task/demo",
+                               "title": "Other", "body": "Details."})
+    home = env / "home"
+    now = datetime.now(timezone.utc)
+    claude_file(home, "a", str(env / "fleet-tools/.worktrees/demo"), "x", now, [(1, 1, 1, 1)])
+    claude_file(home, "b", str(env / "other-repo/.worktrees/demo"), "x", now, [(5, 5, 5, 5)])
+    assert tc.for_ticket(mine, home)["tokens"] == 4
+    assert tc.for_ticket(theirs, home)["tokens"] == 20
+
+
+def test_week_report_counts_only_usage_inside_the_window(env):
+    ticket()
+    home = env / "home"
+    now = datetime.now(timezone.utc)
+    wt = str(env / "fleet-tools/.worktrees/demo")
+    start = now - timedelta(days=7, seconds=90)
+    claude_file(home, "a", wt, "x", start, [(100, 0, 0, 0), (1, 0, 0, 0), (2, 0, 0, 0)])
+    rows = tc.by_ticket(home, now)
+    assert rows[0]["tokens"] == 3 and rows[0]["duration_seconds"] == 60
+    # Codex: running totals; the 7 days ago part is subtracted.
+    d = home / ".codex/sessions/2026/10/03"
+    d.mkdir(parents=True)
+
+    def ev(t, total):
+        u = {"input_tokens": total, "cached_input_tokens": 0, "output_tokens": 0, "total_tokens": total}
+        return json.dumps({"timestamp": z(t), "type": "event_msg",
+                           "payload": {"type": "token_count", "info": {"total_token_usage": u}}})
+    meta = json.dumps({"timestamp": z(now - timedelta(days=8)), "type": "session_meta", "payload": {"cwd": wt}})
+    (d / "rollout-x.jsonl").write_text("\n".join([
+        meta, ev(now - timedelta(days=8), 1000), ev(now - timedelta(minutes=5), 1040)]) + "\n")
+    codex = [r for r in tc.sessions(home, now - tc.WEEK, now) if r["agent"] == "codex"]
+    assert codex[0]["tokens"] == 40 and codex[0]["duration_seconds"] == 0
