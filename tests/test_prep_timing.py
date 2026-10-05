@@ -172,3 +172,18 @@ def test_one_ticket_arriving_while_a_pass_runs_is_not_pinged_before_the_next_pas
     ready(q, monkeypatch, "task/late", {"late.txt": "x"})
     watch_cycle(THREE_PM)
     assert titles(ntfy) == []                                  # the two covered tickets plus this one make a pass
+
+
+def test_a_reconciled_ticket_is_not_pinged_when_a_pass_over_it_and_a_waiting_ticket_follows(
+        q, herdr_log, env, ntfy, capsys, monkeypatch):
+    from test_prep import conflicting, merge
+    a, a_wt, b, b_wt = conflicting(q)
+    assert ship_main([a["id"]]) == 0 and ship_main([b["id"]]) == 1   # beta conflicts: a reconcile agent starts
+    assert merge(b_wt, "main").returncode != 0
+    (b_wt / "code.py").write_text("def shared():\n    return 0\n\ndef alpha():\n    return 'a'\n\ndef beta():\n    return 'b'\n")
+    git(b_wt, "add", "-A")
+    git(b_wt, "commit", "-q", "-m", "merge main, keep both")
+    ready(q, monkeypatch, "task/other", {"other.txt": "o"})          # waits, not covered: a pass will follow
+    set_agent_status(env, f"prep-{b['id'].lower()}", "idle")
+    finish_prep(dp.load_settings())
+    assert titles(ntfy) == []

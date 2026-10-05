@@ -331,8 +331,12 @@ def holds_ping(t: dict, tickets: list[dict], settings: dict, now: datetime) -> b
     tip = tip_of(_repo(t, settings), t["branch"])
     if t["id"] in _busy(state) or f"{t['id']}:{tip}" in state["covered"]:
         return True
-    # Judge as if a running pass had finished: its tickets are waiting again, and a newcomer
-    # would then make the next pass due, which would lock it.
+    return _pass_follows(tickets, settings, state, now)
+
+
+def _pass_follows(tickets: list[dict], settings: dict, state: dict, now: datetime) -> bool:
+    """True when a prep pass is about to start or is due today, judged as if a running pass had
+    finished: its tickets are waiting again, and a newcomer would make the next pass due."""
     after = dict(state, jobs=[j for j in state["jobs"] if j["kind"] != "prep"])
     if _plan(tickets, settings, after, now)[0] and _can_launch(settings, state, now):
         return True
@@ -776,13 +780,20 @@ def _finish_reconcile(job: dict, settings: dict, now: datetime, emit, warn) -> N
                 _write_list([line for _, line in read_list()]
                             + [_line(t, settings, {}, [], {t["id"]: t})], now)
             emit(f"{ticket_id}  reconciled with main and re-checked; ready to ship again")
-            # Its new tip is covered (no pass will touch it), so review_watch holds its ping: say it here.
-            notify.notify_quietly(t, "ship", warn)
             dp.log("PREP_DONE", f"{ticket_id} reconciled")
     with _state() as st:
         st["jobs"] = [j for j in st["jobs"] if j["name"] != job["name"]]
         st["covered"] = _covered(st, settings) + ([f"{ticket_id}:{tip_of(_repo(t, settings), t['branch'])}"]
                                                    if t["status"] == "review" and not problem else [])
+    if t["status"] == "review" and not problem:
+        # Its new tip is covered, so review_watch holds its ping: say it here, unless a pass follows
+        # that will lock it (that pass's list ping speaks for it).
+        try:
+            follows = _pass_follows(tk.list_tickets(), settings, _load(), now)
+        except OSError:
+            follows = False
+        if not follows:
+            notify.notify_quietly(t, "ship", warn)
 
 
 def finish(settings: dict, now: datetime, emit, warn) -> None:
