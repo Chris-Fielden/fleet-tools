@@ -19,7 +19,7 @@ with a plain message.
 | `watch_interval_seconds` | `120` | at least 30 |
 | `max_launches_per_day` | `10` | launch attempts a day; the day ends at local midnight in `timezone` |
 | `timezone` | `America/Los_Angeles` | IANA name; the daily launch and on-call caps reset at midnight here, not at UTC midnight |
-| `prep_time` | `06:00` | HH:MM, America/Los_Angeles: the prep pass over tickets in review runs by then (or earlier, when nothing is left to build) |
+| `prep_time` | `06:00` | HH:MM, America/Los_Angeles: the prep pass over tickets in review (two or more waiting) runs once a day at this time (or when nothing is left to build) |
 | `projects_dir` | `~/projects` | a ticket's repo is `<projects_dir>/<repo>` |
 | `research_dir` | `~/fleet-research` | folder for read-only research agents |
 | `herdr_workspace` | `fleet` | herdr workspace agents are launched in |

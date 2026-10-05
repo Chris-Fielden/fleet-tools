@@ -166,6 +166,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
         checks(emit, warn, prompted)
         kaneo.refresh_usage(tk.list_tickets(), warn)   # --watch: each run's tokens reach the card
     _prep_quietly(lambda: prep.maybe_start(settings, clock.now(), emit, warn, reserve), warn)
+    _prep_quietly(lambda: prep.flush_pings(settings, clock.now(), warn), warn)
     lines, held = dp.ensure_investigations(tk.list_tickets(), warn)
     for line in lines:
         emit(line)
@@ -261,6 +262,7 @@ def _cmd_once(settings: dict) -> int:
     # A one-shot run has no next cycle: wait for the prep re-checks started above and finish the job.
     prep.wait_checks()
     _prep_quietly(lambda: prep.finish(settings, dp.Clock().now(), print, _warn), _warn)
+    _prep_quietly(lambda: prep.flush_pings(settings, dp.Clock().now(), _warn), _warn)   # owed pings
     return code
 
 

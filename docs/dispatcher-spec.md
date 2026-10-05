@@ -408,12 +408,22 @@ launch puts the ticket back to the status it had.
 A ticket in review no longer fills a `max_running` slot, so the queue keeps building
 all night while finished work waits. In the morning the human ships from one list.
 
-**When it runs.** Every cycle (`--once` and `--watch`), if some ticket in review was not
-covered by an earlier prep pass at its current tip, the dispatcher launches ONE prep
-agent over all tickets in review when either nothing is left to build (nothing claimed,
-nothing open that could start or is only waiting its turn) or it is `prep_time`
-(default `06:00`) America/Los_Angeles or later. A pass covers the tickets it saw, so it
-runs once unless new tickets reach review (or a ticket returns with a new tip) after it.
+**When it runs.** Every cycle (`--once` and `--watch`), if at least TWO tickets wait in
+review and one of them was not covered by an earlier prep pass at its current tip, the
+dispatcher launches ONE prep agent over all tickets in review when either nothing is left
+to build (nothing claimed, nothing open that could start or is only waiting its turn) or it
+is the first look at or after `prep_time` (default `06:00`) America/Los_Angeles today (once
+a day). One ticket alone has nothing to reconcile: it gets no prep agent and its ready ping
+at once. A pass covers the tickets it saw, so it runs again only when new tickets reach
+review (or a ticket returns with a new tip) and nothing is left to build.
+
+**The ready ping.** "Ready to ship" is sent per ticket only when no prep pass will touch it:
+it waits while an agent holds the ticket, a pass is due now or at today's `prep_time` (two or
+more waiting), or a pass already covered it. A pass's one "N ready to ship, list ready" ping
+speaks for its tickets, so a ready ping is never followed by a refusal because an agent holds
+the ticket. `ship --list` prints on stderr every ticket in review that is not on the list
+(it reached review after the list was written) and does not ship it.
+
 Only one prep agent runs at a time, at most 3 launch attempts a day, and it counts as a
 launch against `max_launches_per_day`. It needs `builder` claude, like investigations
 (it works from `<research_dir>/PREP`, with the guard hooks, and never touches the ticket
