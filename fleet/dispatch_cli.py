@@ -137,6 +137,8 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     if checks is not None:
         checks(emit, warn)
     _prep_quietly(lambda: prep.maybe_start(settings, clock.now(), emit, warn, reserve), warn)
+    for line in dp.ensure_investigations(tk.list_tickets(), warn):
+        emit(line)
     tickets = tk.list_tickets()
     # The on-call agent has its own slot: it starts at once, whatever the normal
     # queue is doing, and never counts against the daily launch limit.
