@@ -164,7 +164,8 @@ run_review() {
       local model_args=()
       [[ -n "$model" ]] && model_args=(-m "$model")
       # -s read-only: Codex may read files and run read-only commands, never edit.
-      # --ephemeral: don't keep a Codex session file for this one-off review.
+      # No --ephemeral: the session file is what `ticket show` and `fleet usage`
+      #   read for per-ticket tokens and Codex's rate-limit figure.
       # </dev/null: without it, Codex waits for extra input when no terminal is
       #   attached (for example when an agent runs this script).
       # Progress goes to stderr; only the final review goes to stdout (and the file).
@@ -172,7 +173,7 @@ run_review() {
       # `|| rc=$?` keeps the reviewer's failure (pipefail) instead of losing it
       # when this function is called inside an `||` list.
       { echo "Reviewer: Codex${model:+ ($model)}"; echo "Commit: $full_sha"; echo; \
-        codex exec -s read-only --ephemeral "${model_args[@]}" "$prompt" </dev/null; } | tee "$part" || rc=$?
+        codex exec -s read-only "${model_args[@]}" "$prompt" </dev/null; } | tee "$part" || rc=$?
       ;;
     claude)
       model="${model:-sonnet}"

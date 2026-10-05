@@ -15,6 +15,7 @@ from . import notify
 from . import risk as rk
 from . import settings as st
 from . import ticket as tk
+from . import ticketcost as tc
 from . import tracker as tr
 
 
@@ -186,6 +187,14 @@ def _cmd_list(args) -> int:
     return 0
 
 
+def _usage_line(t: dict) -> str:
+    """Token use from the local session files; never stops `ticket show`."""
+    try:
+        return tc.usage_line(tc.for_ticket(t))
+    except Exception:   # noqa: BLE001 - informational only
+        return "unavailable"
+
+
 def _cmd_show(args) -> int:
     t = _tracker().show(args.id)
     if args.json:
@@ -196,6 +205,7 @@ def _cmd_show(args) -> int:
                  "created_by", "assignee", "verdict", "close_note", "base_commit", "created_at", "updated_at"):
         value = tk.verdict_line(t.get(name)) if name == "verdict" else t.get(name)
         print(f"  {name + ':':<12} {'-' if value is None else value}")
+    print(f"  {'usage:':<12} {_usage_line(t)}")
     print()
     print(t["body"])
     for n in t.get("notes", []):
