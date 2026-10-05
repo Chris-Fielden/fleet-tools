@@ -200,3 +200,29 @@ def test_an_idle_investigation_with_a_pending_note_is_prompted_not_finished(worl
     dispatch_cli._cycle(dp.load_settings(), lambda m: None, lambda m: None, checks=lambda emit, warn: None)
     assert len(prompts(herdr_log)) == 1
     assert tk.load_ticket(t["id"])["status"] == "claimed"
+
+
+def test_a_relaunch_counts_every_note_as_read(world, herdr_log, projects, env, monkeypatch):
+    monkeypatch.setattr("fleet.launch.START_TIMEOUT", 3)
+    from fleet import launch as lc
+    from fleet import dispatch as dp
+    from test_dispatch import make_repo, git
+    repo = make_repo(projects)
+    (repo / ".gitignore").write_text(".worktrees/\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "ignore")
+    git(repo, "worktree", "add", "-q", str(repo / ".worktrees" / "demo"), "-b", "task/demo")
+    t = claim(mk(branch="task/demo"))
+    world(t["id"].lower(), "idle")
+    run_push()
+    tk.add_note(t["id"], "written by the watcher while the ticket was in review")
+    w = json.loads((env / "world.json").read_text())
+    w["agents"] = []   # the old agent is gone
+    (env / "world.json").write_text(json.dumps(w))
+    code, msg = lc.relaunch(tk.load_ticket(t["id"]), dp.load_settings(), lambda m: None)
+    assert code == 0, msg
+    w = json.loads((env / "world.json").read_text())
+    w["agents"][0]["agent_status"] = "idle"
+    (env / "world.json").write_text(json.dumps(w))
+    run_push()
+    assert not [p for p in prompts(herdr_log) if p[3].startswith(push_notes.PREFIX)]

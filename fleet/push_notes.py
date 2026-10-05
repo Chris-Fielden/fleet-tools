@@ -47,13 +47,14 @@ def _save(state: dict) -> None:
     tmp.replace(path)
 
 
-def baseline(ticket: dict) -> None:
+def baseline(ticket: dict, overwrite: bool = False) -> None:
     """A ticket was just launched with the notes it holds now in front of the agent:
     count them as handled, so a note added after the launch (even before the next
-    cycle) still goes out. A ticket that is already counted keeps its count."""
+    cycle) still goes out. A ticket that is already counted keeps its count, unless
+    `overwrite` (a relaunch: the new agent read all the notes, whoever wrote them)."""
     try:
         state = _load()
-        if ticket["id"] not in state:
+        if overwrite or ticket["id"] not in state:
             state[ticket["id"]] = len(ticket.get("notes") or [])
             _save(state)
     except (tk.TicketError, OSError):

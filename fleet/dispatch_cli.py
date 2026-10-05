@@ -136,8 +136,6 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
             relaunch_code, message = lc.relaunch(t, settings, warn)
             code = code or relaunch_code
             emit(message)
-            if relaunch_code == 0:
-                push_notes.baseline(t)
     # Overnight queue: finish prep agents that stopped before the review pass looks at their
     # tickets, and start the next prep pass after it has moved new tickets into review.
     _prep_quietly(lambda: prep.finish(settings, clock.now(), emit, warn), warn)
