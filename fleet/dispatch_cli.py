@@ -14,6 +14,7 @@ from . import kaneo
 from . import launch as lc
 from . import notify
 from . import prep
+from . import push_notes
 from . import review_watch
 from . import ticket as tk
 
@@ -136,6 +137,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     _prep_quietly(lambda: prep.finish(settings, clock.now(), emit, warn), warn)
     if checks is not None:
         checks(emit, warn)
+        push_notes.push(tk.list_tickets(), emit, warn)
     _prep_quietly(lambda: prep.maybe_start(settings, clock.now(), emit, warn, reserve), warn)
     lines, held = dp.ensure_investigations(tk.list_tickets(), warn)
     for line in lines:
