@@ -137,10 +137,13 @@ def test_sweep_closes_only_stale_tabs_of_the_agents_workspace(rig):
     claimed = finished("d", "claimed")
     review = finished("e", "review")
     running = finished("f", "failed")
+    reused = finished("g", "done")   # a tab that only carries the label: a human's, no agent of the ticket in it
     tabs = [tab("fleet", "w1:t1"), tab(done["id"], "w1:t2", focused=True), tab(failed["id"], "w1:t3"),
             tab(cancelled["id"], "w1:t4"), tab(claimed["id"], "w1:t5"), tab(review["id"], "w1:t6"),
-            tab(running["id"], "w1:t7"), tab(done["id"], "w2:t1", ws="w2")]
+            tab(running["id"], "w1:t7"), tab(done["id"], "w2:t1", ws="w2"),
+            tab(reused["id"], "w1:t8")]
     agents = [{"name": done["id"].lower(), "agent_status": "idle", "tab_id": "w1:t2"},
+              {"name": cancelled["id"].lower(), "agent_status": "done", "tab_id": "w1:t4"},
               {"name": failed["id"].lower(), "agent_status": "done", "tab_id": "w1:t3"},
               {"name": claimed["id"].lower(), "agent_status": "working", "tab_id": "w1:t5"},
               {"name": running["id"].lower(), "agent_status": "working", "tab_id": "w1:t7"}]
@@ -148,7 +151,7 @@ def test_sweep_closes_only_stale_tabs_of_the_agents_workspace(rig):
     swept = lc.sweep_tabs(rig.settings, lambda m: None)
     assert sorted(i for i, _ in swept) == sorted([done["id"], failed["id"], cancelled["id"]])
     left = json.loads(rig.world.read_text())["tabs"]
-    assert sorted(t["tab_id"] for t in left) == ["w1:t1", "w1:t5", "w1:t6", "w1:t7", "w2:t1"]
+    assert sorted(t["tab_id"] for t in left) == ["w1:t1", "w1:t5", "w1:t6", "w1:t7", "w1:t8", "w2:t1"]
     log = dp.log_path().read_text()
     assert log.count("TAB_SWEPT") == 3 and all(i in log for i, _ in swept)
 

@@ -309,6 +309,8 @@ def _failure_reason(t: dict, repo: Path, tip: str, agent: dict | None, state: di
 
 def _clip(text: str, limit: int) -> str:
     text = text.strip()
+    if limit <= 0:
+        return ""
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
@@ -369,10 +371,14 @@ def _oncall_body(t: dict, detail: str, tip: str, repo: Path) -> str:
         except (OSError, UnicodeDecodeError):
             continue
         if must:
-            chunks = _split(must, MUST_FIX_PART)[:MUST_FIX_PARTS]
+            every = _split(must, MUST_FIX_PART)
+            chunks = every[:MUST_FIX_PARTS]
             for i, chunk in enumerate(chunks, 1):
-                part = f" (part {i}/{len(chunks)})" if len(chunks) > 1 else ""
+                part = f" (part {i}/{len(every)})" if len(every) > 1 else ""
                 parts.append(f"MUST FIX from the latest {info['reviewer']} review ({reviewed[:7]}){part}:\n{chunk}")
+            if len(every) > len(chunks):
+                parts.append(f"MUST FIX from the {info['reviewer']} review: parts {len(chunks) + 1} to {len(every)} "
+                             f"are left out here; the whole review is in {info['file']}")
     tail = _log_tail(t["id"])
     if tail:
         parts.append("DISPATCHER LOG TAIL:\n" + _clip(tail, 600))

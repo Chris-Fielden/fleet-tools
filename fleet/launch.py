@@ -741,12 +741,11 @@ def retry_kept_tabs(ticket_ids: list[str], settings: dict, warn=lambda m: None) 
 
 
 def _close_tab_in(ticket_id: str, tabs: list[dict], agents: list[dict],
-                  by_label: bool = True, agentless_ok: bool = False) -> tuple[bool, str, str | None]:
+                  by_label: bool = True) -> tuple[bool, str, str | None]:
     """Close the ticket's tab if the safety rules allow: (closed, reason, tab id).
     `by_label` allows falling back to a tab labelled with the ticket id when its
     agent is not listed; a retry on a later cycle must not, since by then the
-    label may belong to a tab the human opened. `agentless_ok` (the sweep of
-    finished tickets) also closes a tab in which no agent is listed at all."""
+    label may belong to a tab the human opened."""
     agent = next((a for a in agents if a.get("name") == ticket_id.lower()), None)
     tab = None
     if agent is not None:
@@ -763,10 +762,7 @@ def _close_tab_in(ticket_id: str, tabs: list[dict], agents: list[dict],
     state = agent.get("agent_status") if agent is not None else tab.get("agent_status")
     # Closing a tab ends every pane in it, so every agent in it must be finished.
     in_tab = [a for a in agents if a.get("tab_id") == tab["tab_id"]]
-    checked = [{"agent_status": state}] + in_tab
-    if agentless_ok and agent is None and not in_tab:
-        checked, state = [], "no agent"   # a bare shell tab of a finished ticket
-    for a in checked:
+    for a in [{"agent_status": state}] + in_tab:
         if a.get("agent_status") not in RESEARCH_DONE_STATES:
             return False, (f"tab {tab['tab_id']} has an agent that is "
                            f"{a.get('agent_status') or 'unknown'}, not idle or done"), None
@@ -793,10 +789,12 @@ SWEEP_SKIP_WORKSPACES = ("fleet-tools",)   # the dispatch tab lives there (servi
 
 
 def sweep_tabs(settings: dict, warn=lambda m: None) -> list[tuple[str, str]]:
-    """Close the stale tabs of the agents workspace: any tab labelled with the id of a
-    ticket that is done, failed or cancelled (a done investigation included), even a
+    """Close the stale tabs of the agents workspace: the tab holding the own agent
+    (named after the ticket) of a ticket that is done, failed or cancelled (a done
+    investigation included), found through a tab labelled with the ticket id, even a
     focused one. Never a tab of a claimed, open or in-review ticket, a tab that is not
-    labelled with a ticket id (the workspace's base tab), a tab whose agent is still
+    labelled with a ticket id (the workspace's base tab), a tab that only carries the
+    label with no such agent in it (it may be a human's), a tab with an agent still
     working or blocked, or anything outside herdr_workspace (never fleet-tools).
     Returns (ticket id, reason) per tab closed and logs TAB_SWEPT for each."""
     if settings["herdr_workspace"] in SWEEP_SKIP_WORKSPACES:
@@ -820,7 +818,9 @@ def sweep_tabs(settings: dict, warn=lambda m: None) -> list[tuple[str, str]]:
             except LaunchError as exc:
                 warn(f"tab sweep: herdr could not be asked ({exc})")
                 break
-        closed, reason, _ = _close_tab_in(label, tabs, agents, agentless_ok=True)
+        # Ownership is the ticket's own agent living in the tab: a tab that only carries
+        # the label (a human's shell or editor reusing it) is never closed.
+        closed, reason, _ = _close_tab_in(label, tabs, agents, by_label=False)
         if closed:
             _safe_log("TAB_SWEPT", f"{label} ({status[label]}) {reason}")
             swept.append((label, reason))
