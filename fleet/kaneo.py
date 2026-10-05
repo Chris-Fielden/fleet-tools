@@ -1,7 +1,8 @@
 """One-way mirror of the local ticket store onto a Kaneo board (phase 2).
 
 The local store stays the source of truth; Kaneo is only a view. Nothing is
-ever read back into a ticket. Standard library only.
+ever read back into a ticket, except priority: pull_priorities() notices a card
+a human dragged into or out of Urgent. Standard library only.
 
 Kaneo endpoints used (https://kaneo.app/docs/llms.txt, API reference):
   GET  /project?workspaceId=...   list projects (find one by exact name)
@@ -583,28 +584,39 @@ def pull_priorities(tickets: list[dict]):
     with _map_locked():
         tasks = _load_map()
         placed = _load_placed()
-    for t in tickets:
-        task_id = tasks.get(t["id"])
-        if task_id is None or t["status"] not in ("proposed", "open"):
-            continue
-        try:
-            pid = board.project_id(t["repo"])
-            urgent = None if pid is None else board._columns_of(pid).get("urgent")
-            card = client.request("GET", f"/task/{task_id}", query={"view": "detail"})
-            if urgent is None or card.get("projectId") != pid:
+    baselines: dict[str, str] = {}
+    try:
+        for t in tickets:
+            task_id = tasks.get(t["id"])
+            if task_id is None or t["status"] not in ("proposed", "open"):
                 continue
-            slug, last = card.get("status"), placed.get(t["id"])
-            if slug == last:
-                continue
-            if slug == urgent["slug"] and not is_urgent(t):
-                yield t["id"], "urgent"
-            elif last == urgent["slug"] and is_urgent(t) and t["status"] == "open":
-                yield t["id"], "normal"
-        except KaneoError as exc:
-            if "HTTP 404" not in str(exc):
-                raise
-        except (KeyError, TypeError, AttributeError):
-            raise KaneoError("Kaneo sent a reply in an unexpected shape") from None
+            try:
+                pid = board.project_id(t["repo"])
+                urgent = None if pid is None else board._columns_of(pid).get("urgent")
+                card = client.request("GET", f"/task/{task_id}", query={"view": "detail"})
+                if urgent is None or card.get("projectId") != pid:
+                    continue
+                slug, last = card.get("status"), placed.get(t["id"])
+                if last is None and slug == board.column_slug(pid, t):
+                    # No record yet (cards made before the sync kept one): the card is
+                    # where the sync would put it, so remember that as the baseline.
+                    baselines[t["id"]] = slug
+                    continue
+                if slug == last:
+                    continue
+                if slug == urgent["slug"] and not is_urgent(t):
+                    yield t["id"], "urgent"
+                elif last == urgent["slug"] and is_urgent(t) and t["status"] == "open":
+                    yield t["id"], "normal"
+            except KaneoError as exc:
+                if "HTTP 404" not in str(exc):
+                    raise
+            except (KeyError, TypeError, AttributeError):
+                raise KaneoError("Kaneo sent a reply in an unexpected shape") from None
+    finally:
+        if baselines:
+            with _map_locked():
+                _save_placed(baselines)
 
 
 def sync(tickets: list[dict], dry_run: bool = False):

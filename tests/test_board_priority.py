@@ -178,3 +178,14 @@ def test_one_shot_runs_do_not_read_the_board(kaneo, projects, herdr_log):
     drag(kaneo, "Urgent")
     dispatch_cli._cycle(dp.load_settings(), lambda m: None, lambda m: None)
     assert priority(tid) == "normal"
+
+
+def test_cards_made_before_placements_were_kept_get_a_baseline(kaneo):
+    tid = new_ticket(priority="urgent")
+    kn.placed_path().unlink()   # an install from before the sync kept placements
+    assert pull() == ([], [])   # the card is where the sync put it: remembered
+    assert json.loads(kn.placed_path().read_text()) == {tid: slug_of(kaneo, "Urgent")}
+    drag(kaneo, "To Do")
+    out, _ = pull()
+    assert out == [f"{tid}  priority normal (moved on the board)"]
+    assert priority(tid) == "normal"
