@@ -146,3 +146,31 @@ def test_claude_session_size_reads_the_last_turn_of_the_folders_transcript(env, 
     (proj / "s.jsonl").write_text(usage(1, 2, 3) + "\nnot json\n" + usage(10, 20000, 90000) + '\n{"type":"user"}\n')
     assert fresh.claude_session_tokens(folder) == 110010
     assert fresh.claude_session_tokens(env) is None
+
+
+def test_a_fail_of_an_older_commit_is_not_acted_on(rig, sizes, herdr_log):
+    rig.verdict("FAIL")
+    rig.commit("fix")          # the agent already committed a fix: the verdict is obsolete
+    tabbed(rig)
+    rig.cycle()
+    assert prompts(herdr_log) == [] and ["tab", "close", "w1:t4"] not in calls(herdr_log)
+
+
+def test_a_tab_shared_with_another_agent_is_not_closed_and_is_retried(rig, sizes, herdr_log):
+    rig.verdict("FAIL")
+    tabbed(rig)
+    world = json.loads(rig.world.read_text())
+    world["agents"].append({"name": "someone-else", "agent_status": "working", "tab_id": "w1:t4"})
+    rig.world.write_text(json.dumps(world))
+    rig.cycle()
+    assert prompts(herdr_log) == [] and rig.warnings
+    tabbed(rig)
+    rig.cycle(1)
+    assert len(prompts(herdr_log)) == 1
+
+
+def test_the_prompt_keeps_the_newest_notes_when_there_are_too_many_to_fit(rig):
+    lines = [f"note {i:03d} " + "x" * 100 for i in range(200)]
+    out = fresh._recent(lines, rig.id, limit=1000)
+    assert "note 199" in out and "note 000" not in out
+    assert f"ticket show {rig.id}" in out

@@ -586,7 +586,7 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             _end_spells(t["id"], state)
             _unrecorded_pings(new, repo, tip, state, now, emit, warn)
         return
-    if fresh.refresh_if_large(t, agent, settings, state, emit, warn):
+    if fresh.refresh_if_large(t, agent, tip, settings, state, emit, warn):
         return   # a new session starts from here: judge it from the next cycle
     _unrecorded_pings(t, repo, tip, state, now, emit, warn)
     reason = _failure_reason(t, repo, tip, agent, state, now, settings["fail_rounds_threshold"])

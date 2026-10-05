@@ -69,6 +69,20 @@ def _clip(text: str, limit: int = SECTION_MAX) -> str:
     return text if len(text) <= limit else text[:limit - 15].rstrip() + "\n[cut: too long]"
 
 
+def _recent(lines: list[str], ticket_id: str, limit: int = SECTION_MAX) -> str:
+    """As many of the newest lines as fit, oldest first: the newest decisions matter most."""
+    kept, used = [], 0
+    for line in reversed(lines):
+        if used + len(line) + 1 > limit:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    kept.reverse()
+    if len(kept) < len(lines):
+        kept.insert(0, f"[{len(lines) - len(kept)} older notes left out: run `ticket show {ticket_id}` for all]")
+    return "\n".join(kept)
+
+
 def _must_fix(t: dict, folder: Path) -> str:
     v = t["verdict"]
     parts = []
@@ -91,7 +105,7 @@ def _diff_summary(t: dict, repo: Path) -> str:
 
 def build_prompt(t: dict, repo: Path, folder: Path) -> str:
     """The new session's whole starting prompt."""
-    notes = "\n".join(f"[{n['at']}] {n['by']}: {n['text']}" for n in t.get("notes", [])) or "(none)"
+    notes = _recent([f"[{n['at']}] {n['by']}: {n['text']}" for n in t.get("notes", [])], t["id"]) or "(none)"
     return f"""\
 You are taking over ticket {t['id']} in this task folder from an earlier agent
 session that was replaced because its context had grown large. Its history is
@@ -109,7 +123,7 @@ SPEC
 {_clip(t['body'])}
 
 NOTES (oldest first)
-{_clip(notes)}
+{notes}
 
 THE BRANCH SO FAR ({t['branch']}, against the main branch)
 {_clip(_diff_summary(t, repo))}
@@ -126,34 +140,42 @@ again. Then say the same summary in your reply.
 """
 
 
-def refresh_if_large(t: dict, agent: dict | None, settings: dict, state: dict, emit, warn) -> bool:
+def refresh_if_large(t: dict, agent: dict | None, tip: str, settings: dict, state: dict, emit, warn) -> bool:
     """Called by the watch for a claimed ticket. When its latest verdict is a FAIL
-    not yet handled, and its agent's session is over the threshold, replace the
+    of the branch's current tip (an agent that has committed since is already
+    fixing it) not yet handled, and its agent's session is over the threshold, replace the
     agent. Each failed commit is handled once. Returns True when the agent was
     stopped (the new one, if it started, is judged from the next cycle)."""
     limit = settings.get("fresh_session_tokens", 0)
     v = t.get("verdict")
     handled = state.setdefault("fresh", {})
     if (not limit or t["status"] != "claimed" or v is None or v["result"] != "FAIL"
-            or handled.get(t["id"]) == v["commit"] or agent is None):
+            or v["commit"] != tip or handled.get(t["id"]) == v["commit"] or agent is None):
         return False
     repo = settings["projects_dir"] / t["repo"]
     folder = repo / ".worktrees" / t["branch"].removeprefix("task/")
     size = session_tokens(t, folder)
     if size is None:
         return False     # cannot be measured: try again next cycle
-    handled[t["id"]] = v["commit"]
     if size <= limit:
+        handled[t["id"]] = v["commit"]
         return False
     tab = agent.get("tab_id")
     if not isinstance(tab, str):
         warn(f"{t['id']}: session is {size} tokens but its agent has no tab to close; not replacing it")
         return False
     try:
+        others = [a.get("name") for a in lc.list_agents()
+                  if a.get("tab_id") == tab and a.get("name") != t["id"].lower()]
+        if others:   # closing the tab would end them too; tried again next cycle
+            warn(f"{t['id']}: session is {size} tokens but tab {tab} also holds {', '.join(map(str, others))}; "
+                 "not replacing it")
+            return False
         lc.herdr("tab", "close", tab)
     except lc.LaunchError as exc:
         warn(f"{t['id']}: session is {size} tokens but its tab {tab} could not be closed ({exc}); not replacing it")
         return False
+    handled[t["id"]] = v["commit"]
     code, message = lc.relaunch(t, settings, warn, prompt=build_prompt(t, repo, folder),
                                 why=f" (FRESH_SESSION: old session {size} tokens, limit {limit})")
     emit(message)
