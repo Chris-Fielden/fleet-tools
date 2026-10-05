@@ -49,6 +49,9 @@ DEFAULTS = {
     # FAIL verdicts on different commits before a claimed ticket is "going in
     # circles" and truly fails.
     "fail_rounds_threshold": 8,
+    # A claimed ticket's agent session whose context has passed this many tokens
+    # at the end of a review round is replaced by a fresh one (0 turns it off).
+    "fresh_session_tokens": 100000,
     # Non-secret Kaneo values. null means "use what kaneo.json says". The API
     # key and the url (which decides where the key is sent) stay in kaneo.json.
     "kaneo": {"workspace_id": None, "project_icon": "Layout"},
@@ -180,6 +183,9 @@ def _merge(settings: dict, given, path: Path) -> None:
         settings["max_oncall_per_day"] = _whole(path, given, "max_oncall_per_day", 0, "0 or more")
     if "fail_rounds_threshold" in given:
         settings["fail_rounds_threshold"] = _whole(path, given, "fail_rounds_threshold", 1, "1 or more")
+    if "fresh_session_tokens" in given:
+        settings["fresh_session_tokens"] = _whole(path, given, "fresh_session_tokens", 0,
+                                                  "0 or more (0 turns it off)")
     used = list(settings["id_prefixes"].values()) + [settings["emergency_prefix"], settings["oncall_prefix"]]
     if len(set(used)) != len(used):
         raise SettingsError(f"{path}: id prefixes must differ from each other and from emergency_prefix and oncall_prefix")

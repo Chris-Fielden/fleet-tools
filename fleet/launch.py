@@ -800,13 +800,15 @@ def lost_agents(tickets: list[dict], warn) -> list[dict]:
     return [t for t in sorted(claimed, key=tk.oldest_first_key) if t["id"].lower() not in names]
 
 
-def relaunch(t: dict, settings: dict, warn) -> tuple[int, str]:
-    """Start a new agent for a claimed ticket in its existing task folder. The
-    ticket stays claimed whether or not this works."""
+def relaunch(t: dict, settings: dict, warn, prompt: str | None = None, why: str = "") -> tuple[int, str]:
+    """Start a new agent for a claimed ticket in its existing task folder, with
+    the standard prompt or the given one. The ticket stays claimed whether or
+    not this works. `why` is added to the RELAUNCHED log line."""
     repo = settings["projects_dir"] / t["repo"]
     name = t["branch"].removeprefix("task/")
     d = dp.Decision(ticket=t, name=name, repo_path=repo, agent=t["assignee"],
-                    model=settings["models"].get(t["assignee"]), oncall=bool(t.get("oncall")))
+                    model=settings["models"].get(t["assignee"]), oncall=bool(t.get("oncall")),
+                    prompt=prompt)
     folder = repo / ".worktrees" / name
     try:
         if repo.resolve().parent != settings["projects_dir"].resolve():
@@ -821,5 +823,5 @@ def relaunch(t: dict, settings: dict, warn) -> tuple[int, str]:
     except (LaunchError, OSError, subprocess.TimeoutExpired) as exc:
         _safe_log("RELAUNCH_FAILED", f"{t['id']} {exc}")
         return 1, f"{t['id']}  relaunch failed: {exc}; ticket stays claimed"
-    _safe_log("RELAUNCHED", f"{t['id']} {d.agent} ({d.model or 'default'}) tab {tab} in {d.worktree}")
+    _safe_log("RELAUNCHED", f"{t['id']} {d.agent} ({d.model or 'default'}) tab {tab} in {d.worktree}{why}")
     return 0, f"{t['id']}  relaunched {d.agent} ({d.model or 'default'}) in tab {tab}"

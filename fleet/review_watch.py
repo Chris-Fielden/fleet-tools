@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import dispatch as dp
+from . import fresh
 from . import kaneo
 from . import launch as lc
 from . import notify
@@ -67,7 +68,7 @@ def state_path() -> Path:
 
 
 def _load_state(warn) -> dict:
-    state = {"sent": [], "blocked_since": {}, "stopped_since": {}, "seen": {}, "pending": []}
+    state = {"sent": [], "blocked_since": {}, "stopped_since": {}, "seen": {}, "pending": [], "fresh": {}}
     try:
         data = json.loads(state_path().read_text(encoding="utf-8"))
         if (isinstance(data, dict) and isinstance(data.get("sent"), list)
@@ -77,6 +78,8 @@ def _load_state(warn) -> dict:
             state.update(sent=[k for k in data["sent"] if isinstance(k, str)],
                          blocked_since=data["blocked_since"], seen=data["seen"],
                          stopped_since=data.get("stopped_since", {}),
+                         fresh={k: v for k, v in (data["fresh"] if isinstance(data.get("fresh"), dict) else {}).items()
+                                if isinstance(k, str) and isinstance(v, str)},
                          pending=[p for p in data.get("pending", []) if isinstance(p, dict)
                                   and isinstance(p.get("id"), str) and p.get("event") in FAILURE_EVENTS
                                   and isinstance(p.get("detail"), (str, type(None)))])
@@ -583,6 +586,8 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             _end_spells(t["id"], state)
             _unrecorded_pings(new, repo, tip, state, now, emit, warn)
         return
+    if fresh.refresh_if_large(t, agent, settings, state, emit, warn):
+        return   # a new session starts from here: judge it from the next cycle
     _unrecorded_pings(t, repo, tip, state, now, emit, warn)
     reason = _failure_reason(t, repo, tip, agent, state, now, settings["fail_rounds_threshold"])
     if reason:
@@ -646,7 +651,7 @@ def check(settings: dict, now: datetime, emit, warn) -> None:
         warn(f"on-call check: {exc}")
     process_recoveries(settings, state, now, emit, warn)
     live = {t["id"] for t in tickets} | locked
-    for name in ("blocked_since", "stopped_since", "seen"):
+    for name in ("blocked_since", "stopped_since", "seen", "fresh"):
         state[name] = {k: v for k, v in state[name].items() if k in live}
     # Keys of the failure pings stay: their ticket is closed, and the key is the record that it was sent.
     kept = [k for k in state["sent"] if k.split(":", 1)[0] in live]
