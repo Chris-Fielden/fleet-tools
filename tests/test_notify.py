@@ -97,7 +97,7 @@ def test_urgent_created(ntfy):
 
 def test_failed_close_notifies_but_done_does_not(ntfy):
     tid = make().stdout.split()[0]
-    tid2 = make(branch="task/other").stdout.split()[0]
+    tid2 = make(branch="task/other", title="Another job entirely").stdout.split()[0]
     assert run("close", tid, "--done").returncode == 0
     assert ntfy.requests == []
     assert run("close", tid2, "--failed").returncode == 0
@@ -109,7 +109,7 @@ def test_follow_ups_only_when_enabled(ntfy):
     make(type="investigate", branch="task/i")
     assert ntfy.requests == []
     write_config(ntfy.url, follow_ups=True)
-    make(type="investigate", branch="task/j")
+    make(type="investigate", branch="task/j", title="Look into the other matter")
     assert len(ntfy.requests) == 1
 
 

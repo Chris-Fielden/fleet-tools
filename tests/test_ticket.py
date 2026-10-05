@@ -165,9 +165,12 @@ def test_gitleaks_receives_title_and_body(monkeypatch, tmp_path):
 
 # 6. Concurrency -------------------------------------------------------------
 
+WORDS = ["alpha", "bravo", "cobalt", "delta", "ember", "falcon", "garnet", "harbor", "indigo", "juniper", "kestrel", "lantern"]
+
+
 def test_concurrent_new_get_different_ids():
     import os
-    procs = [subprocess.Popen([sys.executable, str(BIN), "new", *new_args(title=f"t{i}")],
+    procs = [subprocess.Popen([sys.executable, str(BIN), "new", *new_args(title=WORDS[i], branch=f"task/c{i}")],
                               stdout=subprocess.PIPE, text=True, env=dict(os.environ))
              for i in range(12)]
     ids = [p.communicate()[0].strip() for p in procs]
@@ -445,7 +448,7 @@ def test_counter_file_is_not_a_ticket():
 
 def test_concurrent_new_short_ids_unique_and_counted():
     import os
-    procs = [subprocess.Popen([sys.executable, str(BIN), "new", *new_args(title=f"t{i}")],
+    procs = [subprocess.Popen([sys.executable, str(BIN), "new", *new_args(title=WORDS[i], branch=f"task/c{i}")],
                               stdout=subprocess.PIPE, text=True, env=dict(os.environ))
              for i in range(12)]
     ids = sorted(p.communicate()[0].strip() for p in procs)

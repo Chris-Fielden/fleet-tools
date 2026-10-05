@@ -144,7 +144,7 @@ def test_loose_config_is_refused(kaneo, mode):
     assert "chmod 600" in r.stderr
     assert kaneo.requests == []
     # ticket new still works and warns instead of failing
-    r = run("new", *new_args())
+    r = run("new", *new_args(branch="task/second", title="A second job"))
     assert r.returncode == 0
     assert "chmod 600" in r.stderr
     assert tid
@@ -209,7 +209,7 @@ def test_kaneo_down_ticket_new_still_succeeds_with_warning():
 def test_approve_mirrors_the_card(kaneo):
     tid = new_ticket()
     # created by a (simulated) agent -> proposed
-    r = run("new", *new_args(type="investigate"), extra_env={"CLAUDECODE": "1"})
+    r = run("new", *new_args(type="investigate", branch="task/inv", title="Look into the other matter"), extra_env={"CLAUDECODE": "1"})
     pid_ticket = r.stdout.strip()
     assert [t["status"] for t in kaneo.tasks.values() if pid_ticket in t["title"]] == ["proposed"]
     r = run("approve", pid_ticket)
@@ -219,11 +219,11 @@ def test_approve_mirrors_the_card(kaneo):
 
 
 def test_one_failing_ticket_does_not_stop_the_others(kaneo):
-    a = new_ticket(title="alpha")
+    a = new_ticket(title="alpha", branch="task/a1")
     kaneo.tasks.clear()
     (fleet_home() / "kaneo-map.json").unlink()
-    b = new_ticket(title="boom")  # the mirror after `new` fails; ticket is still saved
-    c = new_ticket(title="gamma")
+    b = new_ticket(title="boom", branch="task/a2")  # the mirror after `new` fails; ticket is still saved
+    c = new_ticket(title="gamma", branch="task/a3")
     kaneo.fail_title = "boom"
     kaneo.tasks.clear()
     (fleet_home() / "kaneo-map.json").unlink(missing_ok=True)
@@ -318,12 +318,15 @@ def slug_of(kaneo, name):
     return next(c["slug"] for c in kaneo.columns[kaneo.projects[0]["id"]] if c["name"] == name)
 
 
+TITLES = ["Alpha", "Quokka", "Zebra", "Walrus", "Ocelot", "Pangolin"]
+
+
 def test_each_status_lands_in_its_column(kaneo):
     want = {"proposed": "Proposed", "open": "To Do", "claimed": "In Progress",
             "done": "Done", "failed": "Failed", "cancelled": "Done"}
     ids = {}
     for status in want:
-        tid = new_ticket()
+        tid = new_ticket(branch=f"task/s{len(ids)}", title=f"{TITLES[len(ids)]} job")
         edit_ticket(tid, status=status)
         ids[tid] = status
     run("sync")
@@ -399,10 +402,10 @@ def test_dry_run_changes_no_columns(kaneo):
 
 
 def test_failed_column_setup_is_retried_for_the_next_ticket(kaneo):
-    a = new_ticket(title="alpha")
+    a = new_ticket(title="alpha", branch="task/a1")
     kaneo.projects.clear(); kaneo.columns.clear(); kaneo.tasks.clear()
     (fleet_home() / "kaneo-map.json").unlink()
-    b = new_ticket(title="beta")  # builds the project again, fine
+    b = new_ticket(title="beta", branch="task/a2")  # builds the project again, fine
     kaneo.projects.clear(); kaneo.columns.clear(); kaneo.tasks.clear()
     (fleet_home() / "kaneo-map.json").unlink()
     kaneo.fail_column = "In Progress"
