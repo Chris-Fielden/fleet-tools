@@ -4,7 +4,7 @@ Tools for the agent fleet: tickets and the dispatcher.
 
 ## One command: `fleet <verb>`
 
-`fleet help` lists every verb. Besides the ones below, `fleet ship ID`, `fleet ticket ARGS`, `fleet approve ID` (same as `ticket approve`), `fleet alert REPO TEXT` and `fleet idea TEXT` do exactly what `ship`, `ticket`, `alert` and `idea` do; those four keep working unchanged as aliases. Agents are blocked from the human-only verbs by the guard hook under both names (`fleet ship`, `fleet approve`, `fleet ticket approve|close|sync`, `fleet alert`, `fleet idea`, `fleet dispatch`, `fleet start|stop|restart|autostart|launcher|ops`).
+`fleet help` lists every verb. Besides the ones below, `fleet ship ID`, `fleet ticket ARGS`, `fleet approve ID` (same as `ticket approve`), `fleet alert REPO TEXT` and `fleet idea TEXT` do exactly what `ship`, `ticket`, `alert` and `idea` do; those four keep working unchanged as aliases. Agents are blocked from the human-only verbs by the guard hook under both names (`fleet ship`, `fleet approve`, `fleet ticket approve|close|sync`, `fleet alert`, `fleet idea`, `fleet start|stop|restart|autostart|launcher|ops`).
 
 - `fleet ops`: opens or reattaches a persistent tmux session named `fleet` with two windows: `ops` (a shell for fleet commands; its prompt starts with a bright red `[LOIC ops]` so it cannot be mistaken for the Mac or an agent tab) and `herdr` (herdr attached read-only, for watching; it runs in a detached `fleet-herdr` tmux session and the window attaches with `tmux attach -r`, which ignores keys). Agents are spoken to only through ticket notes (`ticket note`), never by typing into herdr. Needs tmux; if it is missing, run `sudo apt install -y tmux` (it is not installed for you).
 

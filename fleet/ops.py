@@ -30,7 +30,8 @@ def _tmux(*args: str):
 
 
 def _has(session: str) -> bool:
-    return _tmux("has-session", "-t", session).returncode == 0
+    # "=" asks for an exact name: a bare -t fleet would also match fleet-herdr.
+    return _tmux("has-session", "-t", f"={session}").returncode == 0
 
 
 def _must(*args: str) -> None:
@@ -65,11 +66,17 @@ def cmd_ops(attach: bool = True) -> int:
     if created:
         rc = _write_rcfile()
         _must("new-session", "-d", "-s", SESSION, "-n", "ops", f"bash --rcfile {shlex.quote(rc)} -i")
-        _must("new-window", "-t", SESSION, "-n", "herdr", shlex.join(tmux + ["attach", "-r", "-t", HERDR_SESSION]))
-        _must("select-window", "-t", f"{SESSION}:ops")
+        try:
+            # env -u TMUX: tmux refuses to attach from inside a tmux pane otherwise.
+            viewer = shlex.join(["env", "-u", "TMUX"] + tmux + ["attach", "-r", "-t", f"={HERDR_SESSION}"])
+            _must("new-window", "-t", f"={SESSION}:", "-n", "herdr", viewer)
+            _must("select-window", "-t", f"={SESSION}:ops")
+        except sv.ServiceError:
+            _tmux("kill-session", "-t", f"={SESSION}")   # no half-built session for the next run
+            raise
     print(f"tmux session '{SESSION}': " + ("created (windows: ops, herdr)" if created else "already running"))
     if not attach:
         return 0
     if os.environ.get("TMUX"):
-        return _tmux("switch-client", "-t", SESSION).returncode
-    return subprocess.run(tmux + ["attach", "-t", SESSION]).returncode
+        return _tmux("switch-client", "-t", f"={SESSION}").returncode
+    return subprocess.run(tmux + ["attach", "-t", f"={SESSION}"]).returncode

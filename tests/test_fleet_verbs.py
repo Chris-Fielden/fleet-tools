@@ -66,7 +66,8 @@ def fake_tmux(env, monkeypatch):
         "#!/bin/sh\n"
         f"echo \"$@\" >> {log}\n"
         "case \"$1\" in\n"
-        f"  has-session) grep -qx \"$3\" {state} 2>/dev/null; exit $?;;\n"
+        # like tmux: an exact name only with a leading =, otherwise a prefix matches too
+        f"  has-session) case \"$3\" in =*) grep -qx \"${{3#=}}\" {state};; *) grep -q \"^$3\" {state};; esac 2>/dev/null; exit $?;;\n"
         f"  new-session) n=; while [ $# -gt 0 ]; do [ \"$1\" = -s ] && n=$2; shift; done; echo $n >> {state};;\n"
         "esac\nexit 0\n")
     script.chmod(0o755)
@@ -80,14 +81,15 @@ def test_ops_creates_two_windows_then_reattaches(fake_tmux, capsys):
     first = fake_tmux.read_text().splitlines()
     assert any(l.startswith("new-session -d -s fleet-herdr") for l in first)
     assert any(l.startswith("new-session -d -s fleet -n ops") and "--rcfile" in l for l in first)
-    assert any(l.startswith("new-window -t fleet -n herdr") and "attach -r -t fleet-herdr" in l for l in first)
-    assert first[-1] == "attach -t fleet"
+    assert any(l.startswith("new-window -t =fleet: -n herdr") and "env -u TMUX" in l
+               and "attach -r -t =fleet-herdr" in l for l in first)
+    assert first[-1] == "attach -t =fleet"
     assert "created" in capsys.readouterr().out
     fake_tmux.write_text("")
     assert usage_cli.main(["ops"]) == 0
     again = fake_tmux.read_text().splitlines()
     assert not any(l.startswith(("new-session", "new-window")) for l in again)
-    assert again[-1] == "attach -t fleet"
+    assert again[-1] == "attach -t =fleet"
     assert "already running" in capsys.readouterr().out
 
 
