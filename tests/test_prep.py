@@ -149,6 +149,7 @@ def finish_prep(settings, now=NIGHT):
     if prep._CHECKS:
         prep.wait_checks()
         prep.finish(settings, now, out.append, warns.append)
+    prep.flush_pings(settings, now, warns.append)   # the cycle sends the owed pings after its review pass
     return out, warns
 
 

@@ -753,11 +753,10 @@ def _finish_prep(job: dict, settings: dict, now: datetime, emit, warn) -> None:
     with _state() as st:
         st["jobs"] = [j for j in st["jobs"] if j["name"] != job["name"]]
         st["covered"] = _covered(st, settings) + [f"{t['id']}:{tip_of(_repo(t, settings), t['branch'])}" for t in ok]
+        if lines:   # said by flush_pings, after the review pass and maybe_start: no follow-up pass may lock these
+            _defer_ping(st, "list", [t["id"] for t in ok])
     dp.log("PREP_DONE", f"{len(lines)} ready, {len(failed)} failed, {len(gone)} cancelled")
     emit(f"prep pass done: {len(lines)} ready to ship, list written")
-    if lines:   # sent by flush_pings once no follow-up pass (over tickets that arrived meanwhile) can lock these
-        _defer_ping("list", [t["id"] for t in ok])
-    flush_pings(settings, now, warn)
 
 
 def _finish_reconcile(job: dict, settings: dict, now: datetime, emit, warn) -> None:
@@ -789,21 +788,21 @@ def _finish_reconcile(job: dict, settings: dict, now: datetime, emit, warn) -> N
         st["jobs"] = [j for j in st["jobs"] if j["name"] != job["name"]]
         st["covered"] = _covered(st, settings) + ([f"{ticket_id}:{tip_of(_repo(t, settings), t['branch'])}"]
                                                    if t["status"] == "review" and not problem else [])
-    if t["status"] == "review" and not problem:
-        # Its new tip is covered, so review_watch holds its ping: flush_pings says it once no pass
-        # follows that would lock it (that pass's list ping speaks for it).
-        _defer_ping("ship", [ticket_id])
-    flush_pings(settings, now, warn)
+        if t["status"] == "review" and not problem:
+            # Its new tip is covered, so review_watch holds its ping: flush_pings says it once no pass
+            # follows that would lock it (that pass's list ping speaks for it).
+            _defer_ping(st, "ship", [ticket_id])
 
 
-def _defer_ping(kind: str, ids: list[str]) -> None:
-    """Record a ready ping that is owed, so it survives a held back or failed send."""
-    with _state() as st:
-        if kind == "list":   # one list ping speaks for the current list: a newer pass supersedes the older
-            older = [i for p in st["pings"] if p["kind"] == "list" for i in p["ids"]]
-            st["pings"] = [p for p in st["pings"] if p["kind"] != "list"]
-            ids = list(dict.fromkeys(older + ids))
-        st["pings"].append({"kind": kind, "ids": ids})
+def _defer_ping(st: dict, kind: str, ids: list[str]) -> None:
+    """Record a ready ping that is owed (in the state being saved), so it survives a held back or
+    failed send. One list ping speaks for the whole current list: it supersedes older list pings
+    and the individual pings of the tickets it names."""
+    if kind == "list":
+        older = [i for p in st["pings"] if p["kind"] == "list" for i in p["ids"]]
+        st["pings"] = [p for p in st["pings"] if p["kind"] != "list" and not set(p["ids"]) <= set(ids)]
+        ids = list(dict.fromkeys(older + ids))
+    st["pings"].append({"kind": kind, "ids": ids})
 
 
 def flush_pings(settings: dict, now: datetime, warn) -> None:

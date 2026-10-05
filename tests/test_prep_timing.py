@@ -283,3 +283,24 @@ def test_a_second_pass_supersedes_the_list_ping_of_the_first(q, herdr_log, env, 
     watch_cycle(THREE_PM)
     watch_cycle(THREE_PM)
     assert titles(ntfy) == ["3 ready to ship, list ready"]     # one ping for the current list
+
+
+def test_finishing_a_job_sends_no_ping_itself_the_cycle_does_after_its_review_pass(q, herdr_log, env, ntfy, monkeypatch):
+    a = ready(q, monkeypatch, "task/one", {"one.txt": "1"})
+    b = ready(q, monkeypatch, "task/two", {"two.txt": "2"})
+    watch_cycle(THREE_PM)
+    set_agent_status(env, "prep", "idle")
+    report(dp.load_settings(), order=[a["id"], b["id"]], tickets={}, duplicates=[])
+    settings = dp.load_settings()
+    prep.finish(settings, THREE_PM, print, print)
+    prep.wait_checks()
+    prep.finish(settings, THREE_PM, print, print)
+    assert titles(ntfy) == [] and len(prep._load()["pings"]) == 1   # owed, not yet said
+    prep.flush_pings(settings, THREE_PM, print)
+    assert titles(ntfy) == ["2 ready to ship, list ready"]
+
+
+def test_a_list_ping_supersedes_the_deferred_individual_pings_of_its_tickets():
+    st = {"pings": [{"kind": "ship", "ids": ["A"]}, {"kind": "ship", "ids": ["Z"]}, {"kind": "list", "ids": ["B"]}]}
+    prep._defer_ping(st, "list", ["A", "C"])
+    assert st["pings"] == [{"kind": "ship", "ids": ["Z"]}, {"kind": "list", "ids": ["B", "A", "C"]}]
