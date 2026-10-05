@@ -17,7 +17,8 @@ with a plain message.
 | `auto_investigate` | `true` | start proposed investigations without approval |
 | `max_investigations_per_day` | `3` | |
 | `watch_interval_seconds` | `120` | at least 30 |
-| `max_launches_per_day` | `10` | |
+| `max_launches_per_day` | `10` | launch attempts a day; the day ends at local midnight in `timezone` |
+| `timezone` | `America/Los_Angeles` | IANA name; the daily launch and on-call caps reset at midnight here, not at UTC midnight |
 | `prep_time` | `06:00` | HH:MM, America/Los_Angeles: the prep pass over tickets in review runs by then (or earlier, when nothing is left to build) |
 | `projects_dir` | `~/projects` | a ticket's repo is `<projects_dir>/<repo>` |
 | `research_dir` | `~/fleet-research` | folder for read-only research agents |
@@ -26,7 +27,7 @@ with a plain message.
 | `id_prefixes` | `build BD, fix FX, review RV, question QN, investigate ID` | two capital letters per ticket type |
 | `emergency_prefix` | `EM` | prefix for any urgent ticket |
 | `oncall_prefix` | `OC` | prefix for the on-call fix tickets filed after a true failure |
-| `max_oncall_per_day` | `3` | on-call attempts a day (UTC); they do not count against `max_launches_per_day` |
+| `max_oncall_per_day` | `3` | on-call attempts a day (local day in `timezone`); they do not count against `max_launches_per_day` |
 | `fresh_session_tokens` | `100000` | When a claimed ticket gets a FAIL verdict and its agent's session context is over this many tokens, dispatch closes that agent's tab and starts a fresh session on the same branch (logged `FRESH_SESSION`); 0 turns it off. Only Claude sessions can be measured; a Codex session is never replaced |
 | `fail_rounds_threshold` | `8` | FAIL verdicts on different commits (latest still FAIL) after which a claimed ticket is "going in circles" and truly fails; 1 or more |
 | `kaneo.workspace_id` | `null` | used when `kaneo.json` lacks it (the url stays in `kaneo.json`: it decides where the key is sent) |

@@ -507,7 +507,7 @@ def _oncall_for(t: dict, rec: dict, detail: str, repo: Path, settings: dict, now
     if mine:
         return None, "an on-call attempt was already made for it"
     cap = settings["max_oncall_per_day"]
-    if dp.oncall_today(tickets, now) >= cap:
+    if dp.oncall_today(tickets, now, settings["timezone"]) >= cap:
         return None, f"the daily on-call limit ({cap}) is reached"
     oc = _file_oncall(t, detail, rec["commit"], repo, warn)
     if oc is None:

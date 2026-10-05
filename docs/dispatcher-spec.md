@@ -190,14 +190,14 @@ already running" message and exit 0.
   a ticket that stays "at capacity" is reported once. It never asks a
   question. Warnings go to the same output. An error in one cycle (disk, git,
   ticket store) is printed and the next cycle runs.
-- **Safety cap.** At most `max_launches_per_day` launches are attempted per UTC
+- **Safety cap.** At most `max_launches_per_day` launches are attempted per local
   day (build, fix and investigation launches together). Each launch is counted
   and saved before it starts, so an interruption or a later error cannot leave
   it uncounted, and if the count cannot be saved the launch is refused. A failed
   attempt counts, so a broken setup cannot loop forever. The count is kept in
   `$FLEET_HOME/dispatch-launches.json` so restarting the watcher does not
   reset it. Once the cap is reached it keeps reconciling, closing tabs and
-  checking agents, launches nothing until the next UTC day, and says so once
+  checking agents, launches nothing until the next local day (midnight in `timezone`), and says so once
   per day (log `LAUNCH_CAP`). If the count file is unreadable it launches
   nothing and says so. The cap applies to `--watch` only; `--once` is a
   deliberate human action.
@@ -457,3 +457,12 @@ merge main into the branch, keep what both sides needed) and exits 1. When that 
 the dispatcher re-checks and re-reviews the branch like in the prep pass; a pass leaves the
 ticket in review and the review watch sends the usual `ready to ship` ping. No conflict means
 no agent.
+
+### Settings reload (`--watch`)
+
+`settings.json` is re-read at the start of every cycle, so a change takes effect on
+the next cycle without a restart. Changed keys are logged as `SETTINGS_RELOADED`
+(`changed: max_running, ...`). If the new file is invalid, the last good settings
+stay in force, `SETTINGS_INVALID` is logged and one low-priority ping
+(`settings_invalid`) is sent, once per distinct problem until the file is valid
+again.

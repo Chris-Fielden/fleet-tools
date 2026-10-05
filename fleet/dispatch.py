@@ -22,6 +22,7 @@ from . import risk as rk
 from . import ticket as tk
 from .settings import (  # noqa: F401  (re-exported: callers use dp.load_settings etc.)
     DEFAULTS, MIN_WATCH_INTERVAL, SettingsError, load_settings, settings_path)
+from zoneinfo import ZoneInfo
 
 LAUNCH_TYPES = ("build", "fix")
 MAIN_BRANCHES = ("main", "master")
@@ -98,12 +99,17 @@ class Clock:
         time.sleep(seconds)
 
 
+def local_day(now: datetime, tz: str = DEFAULTS["timezone"]) -> str:
+    """The calendar day (YYYY-MM-DD) of `now` in timezone `tz`: when the daily caps reset."""
+    return now.astimezone(ZoneInfo(tz)).strftime("%Y-%m-%d")
+
+
 def launches_path() -> Path:
     return tk.fleet_home() / "dispatch-launches.json"
 
 
 def launches_today(day: str) -> int:
-    """Launches the watch loop has attempted on this UTC day (YYYY-MM-DD). Kept
+    """Launches the watch loop has attempted on this local day (YYYY-MM-DD, see local_day). Kept
     in a file so restarting the watcher does not reset the safety cap. A
     missing file is 0; an unreadable one raises OSError (callers fail closed)."""
     try:
@@ -501,12 +507,21 @@ def decide_investigations(tickets: list[dict], settings: dict, now: datetime | N
     return decisions
 
 
-def oncall_today(tickets: list[dict], now: datetime | None = None) -> int:
-    """On-call attempts made today (UTC): an on-call ticket counts from the
+def oncall_today(tickets: list[dict], now: datetime | None = None, tz: str = DEFAULTS["timezone"]) -> int:
+    """On-call attempts made today (local day in `tz`): an on-call ticket counts from the
     moment it is filed, so a queued one is already spent. Counted from the
     stored tickets, so restarting the watcher cannot reset it."""
-    today = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
-    return sum(1 for t in tickets if t.get("oncall") and t["created_at"].startswith(today))
+    today = local_day(now or datetime.now(timezone.utc), tz)
+    n = 0
+    for t in tickets:
+        if not t.get("oncall"):
+            continue
+        try:
+            filed = datetime.strptime(t["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except (KeyError, TypeError, ValueError):
+            continue
+        n += local_day(filed, tz) == today
+    return n
 
 
 def decide_oncall(tickets: list[dict], settings: dict, running: frozenset | set | None) -> list[Decision]:
