@@ -130,7 +130,8 @@ def guard_duplicates(fields: dict, force: bool = False, prog: str = "ticket") ->
         if sys.stdin.readline().strip().lower() in ("y", "yes"):
             return
         raise tk.TicketInvalid(["not filed"])
-    hint = "use --force to file it anyway" if human else f"add a note to {similar[0][0]['id']} instead"
+    force = "--force" if prog == "ticket" else "`ticket new --force`"
+    hint = f"use {force} to file it anyway" if human else f"add a note to {similar[0][0]['id']} instead"
     raise tk.TicketInvalid([f"the title is very similar to {named}; {hint}"])
 
 
