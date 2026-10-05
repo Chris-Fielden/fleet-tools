@@ -157,6 +157,12 @@ def test_claude_session_size_reads_the_authors_transcript_not_a_reviewers(env, m
     taken = proj / "t.jsonl"         # a replacement session counts too, and is the newest
     taken.write_text(first("You are taking over ticket EM-1 in this task folder") + "\n" + usage(5, 0, 0) + "\n")
     assert fresh.claude_session_tokens(folder, "EM-1") == 5
+    taken.unlink()
+    oncall = proj / "o.jsonl"        # an on-call agent's prompt, after a malformed record
+    oncall.write_text(json.dumps({"type": "user", "message": 7}) + "\n"
+                      + first("You are the on-call agent for ticket EM-1, in this task folder.") + "\n"
+                      + usage(7, 0, 0) + "\n")
+    assert fresh.claude_session_tokens(folder, "EM-1") == 7
 
 
 def test_a_tab_close_error_means_no_relaunch_and_is_retried(rig, sizes, herdr_log, monkeypatch):

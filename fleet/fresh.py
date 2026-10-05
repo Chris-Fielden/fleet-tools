@@ -44,12 +44,15 @@ def _starts_with_task_prompt(path: Path, ticket_id: str) -> bool:
             continue
         if not isinstance(msg, dict) or msg.get("type") != "user":
             continue
-        content = (msg.get("message") or {}).get("content")
+        inner = msg.get("message")
+        if not isinstance(inner, dict):
+            continue    # malformed record: look at the next one
+        content = inner.get("content")
         if isinstance(content, list):
             content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
         text = content.lstrip() if isinstance(content, str) else ""
-        return any(re.match(rf"You are {what} ticket {re.escape(ticket_id)}\s", text)
-                   for what in ("working", "taking over"))
+        return any(re.match(rf"You are {what} {re.escape(ticket_id)}[\s,]", text)
+                   for what in ("working ticket", "taking over ticket", "the on-call agent for ticket"))
     return False
 
 
