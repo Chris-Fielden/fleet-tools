@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from . import dispatch as dp
+from . import dupes
 from . import kaneo
 from . import launch as lc
 from . import notify
@@ -185,6 +186,34 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     return code
 
 
+def dupes_path():
+    return tk.fleet_home() / "dupes-checked.txt"
+
+
+def check_dupes_daily(day: str, emit, warn) -> None:
+    """Once per UTC day (kept in a file, so a restart does not repeat it): look for
+    likely duplicate tickets and log DUPES_FOUND with the ids if there are any."""
+    path = dupes_path()
+    try:
+        if path.read_text(encoding="utf-8").strip() == day:
+            return
+    except FileNotFoundError:
+        pass
+    except (OSError, UnicodeDecodeError):
+        pass  # unreadable: check again and rewrite it
+    try:
+        found = dupes.pairs(tk.list_tickets())
+        if found:
+            ids = "; ".join(f"{p['a']}~{p['b']}" + (f" ({p['branch']})" if p["branch"] else "") for p in found)
+            dp.log("DUPES_FOUND", f"{len(found)} likely duplicate pair(s): {ids}")
+            emit(f"likely duplicate tickets: {ids} (run `ticket dupes`)")
+        tk.refuse_real_store_in_tests(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(day + "\n", encoding="utf-8")
+    except (tk.TicketError, OSError) as exc:
+        warn(f"duplicate check: {exc}")
+
+
 def _cmd_once(settings: dict) -> int:
     def offer(t: dict) -> bool:
         return _ask_yes_no(f"{t['id']}: start a new {t['assignee']} agent in the same task folder?")
@@ -236,6 +265,7 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None) -> int:
                        retry_tabs=kept_tabs, checks=checks, clock=clock)
             except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
                 lines.append(f"error: {exc}")
+            check_dupes_daily(today(), lines.append, lambda m: lines.append(f"warning: {m}"))
             for line in lines:
                 if line not in previous:
                     print(line, flush=True)

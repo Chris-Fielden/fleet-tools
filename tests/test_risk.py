@@ -93,7 +93,7 @@ def test_the_real_rules_file_loads():
 ])
 def test_starting_level(over, level):
     run("new", *new_args())  # BD-1, a parent for the fix case
-    r = run("new", *new_args(**over))
+    r = run("new", *new_args(**{"branch": "task/other", "title": "A different job", **over}))
     assert r.returncode == 0, r.stderr
     assert tk.load_ticket(r.stdout.split()[0])["risk"] == level
 
