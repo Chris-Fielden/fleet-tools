@@ -165,6 +165,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     if checks is not None:
         checks(emit, warn, prompted)
     _prep_quietly(lambda: prep.maybe_start(settings, clock.now(), emit, warn, reserve), warn)
+    _prep_quietly(lambda: prep.flush_pings(settings, clock.now(), warn), warn)
     lines, held = dp.ensure_investigations(tk.list_tickets(), warn)
     for line in lines:
         emit(line)

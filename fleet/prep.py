@@ -113,7 +113,7 @@ def list_path() -> Path:
 
 def _empty() -> dict:
     return {"covered": [], "jobs": [], "attempts": {"day": "", "n": 0}, "shipping": [],
-            "prep_day": "", "limit_day": ""}
+            "prep_day": "", "limit_day": "", "pings": []}
 
 
 def _load() -> dict:
@@ -135,6 +135,9 @@ def _load() -> dict:
             isinstance(r, dict) and isinstance(r.get("id"), str) and isinstance(r.get("pid"), int) for r in shipping)):
         raise OSError(f"{path} has an unexpected shape")
     data["shipping"] = shipping
+    pings = data.get("pings", [])   # ready pings deferred until no follow-up pass can lock their tickets
+    data["pings"] = [p for p in pings if isinstance(p, dict) and p.get("kind") in ("list", "ship")
+                     and isinstance(p.get("ids"), list)] if isinstance(pings, list) else []
     for key in ("prep_day", "limit_day"):   # date strings; absent in older files
         if not isinstance(data.get(key), str):
             data[key] = ""
@@ -319,6 +322,7 @@ def _can_launch(settings: dict, state: dict, now: datetime) -> bool:
     attempts = state["attempts"]
     return (not dp.research_problem(settings)
             and state.get("limit_day") != dp.local_day(now, settings["timezone"])
+            and dp.launches_today(dp.local_day(now, settings["timezone"])) < settings["max_launches_per_day"]
             and not (attempts.get("day") == day and attempts.get("n", 0) >= MAX_ATTEMPTS_PER_DAY))
 
 
@@ -751,13 +755,9 @@ def _finish_prep(job: dict, settings: dict, now: datetime, emit, warn) -> None:
         st["covered"] = _covered(st, settings) + [f"{t['id']}:{tip_of(_repo(t, settings), t['branch'])}" for t in ok]
     dp.log("PREP_DONE", f"{len(lines)} ready, {len(failed)} failed, {len(gone)} cancelled")
     emit(f"prep pass done: {len(lines)} ready to ship, list written")
-    try:   # a follow-up pass (over tickets that arrived meanwhile) would lock these: its ping speaks for them
-        follows = _pass_follows(tk.list_tickets(), settings, _load(), now)
-    except OSError:
-        follows = False
-    if lines and not follows:
-        stub = {"id": "list", "type": "build", "status": "review", "title": "ship list"}
-        notify.notify_quietly(stub, "ship_list", warn, f"{len(lines)} ready to ship, list ready")
+    if lines:   # sent by flush_pings once no follow-up pass (over tickets that arrived meanwhile) can lock these
+        _defer_ping("list", [t["id"] for t in ok])
+    flush_pings(settings, now, warn)
 
 
 def _finish_reconcile(job: dict, settings: dict, now: datetime, emit, warn) -> None:
@@ -790,14 +790,47 @@ def _finish_reconcile(job: dict, settings: dict, now: datetime, emit, warn) -> N
         st["covered"] = _covered(st, settings) + ([f"{ticket_id}:{tip_of(_repo(t, settings), t['branch'])}"]
                                                    if t["status"] == "review" and not problem else [])
     if t["status"] == "review" and not problem:
-        # Its new tip is covered, so review_watch holds its ping: say it here, unless a pass follows
-        # that will lock it (that pass's list ping speaks for it).
-        try:
-            follows = _pass_follows(tk.list_tickets(), settings, _load(), now)
-        except OSError:
-            follows = False
-        if not follows:
-            notify.notify_quietly(t, "ship", warn)
+        # Its new tip is covered, so review_watch holds its ping: flush_pings says it once no pass
+        # follows that would lock it (that pass's list ping speaks for it).
+        _defer_ping("ship", [ticket_id])
+    flush_pings(settings, now, warn)
+
+
+def _defer_ping(kind: str, ids: list[str]) -> None:
+    """Record a ready ping that is owed, so it survives a held back or failed send."""
+    with _state() as st:
+        st["pings"].append({"kind": kind, "ids": ids})
+
+
+def flush_pings(settings: dict, now: datetime, warn) -> None:
+    """Send the deferred ready pings, unless a prep pass runs or can still start (it would lock the
+    tickets and its own ping speaks for them). A send that fails stays recorded and is retried on
+    the next cycle; tickets no longer in review are dropped."""
+    try:
+        state = _load()
+        if not state["pings"] or any(j["kind"] == "prep" for j in state["jobs"]):
+            return
+        tickets = tk.list_tickets()
+        if _pass_follows(tickets, settings, state, now):
+            return
+        in_review = {t["id"]: t for t in review_tickets(tickets)}
+        done = list(state["pings"])
+        keep = []
+        for p in done:
+            ids = [i for i in p["ids"] if i in in_review]
+            if not ids:
+                continue
+            if p["kind"] == "list":
+                stub = {"id": "list", "type": "build", "status": "review", "title": "ship list"}
+                sent = notify.notify_quietly(stub, "ship_list", warn, f"{len(ids)} ready to ship, list ready")
+            else:
+                sent = notify.notify_quietly(in_review[ids[0]], "ship", warn)
+            if not sent:
+                keep.append(dict(p, ids=ids))
+        with _state() as st:
+            st["pings"] = keep + [p for p in st["pings"] if p not in done]
+    except OSError as exc:
+        warn(f"prep state: {exc}")
 
 
 def finish(settings: dict, now: datetime, emit, warn) -> None:

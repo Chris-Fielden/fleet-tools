@@ -36,6 +36,7 @@ def watch_cycle(now, reserve=None):
     prep.finish(settings, now, out.append, warns.append)
     rw.check(settings, now, out.append, warns.append)
     prep.maybe_start(settings, now, out.append, warns.append, reserve)
+    prep.flush_pings(settings, now, warns.append)
     return out, warns
 
 
@@ -214,3 +215,50 @@ def test_the_list_ping_waits_when_a_follow_up_pass_over_late_tickets_will_lock_t
     prep.wait_checks()
     watch_cycle(THREE_PM)
     assert titles(ntfy) == []                                  # the next pass locks all three; its ping comes after
+
+
+def use_up_the_launch_budget(now):
+    settings = dp.load_settings()
+    day = dp.local_day(now, settings["timezone"])
+    for _ in range(settings["max_launches_per_day"]):
+        dp.add_launches(day)
+
+
+def test_the_list_ping_is_sent_when_the_launch_budget_is_used_up_and_no_follow_up_pass_can_start(
+        q, herdr_log, env, ntfy, monkeypatch):
+    a = ready(q, monkeypatch, "task/one", {"one.txt": "1"})
+    b = ready(q, monkeypatch, "task/two", {"two.txt": "2"})
+    watch_cycle(THREE_PM)
+    assert agent_names(herdr_log) == ["prep"]
+    ready(q, monkeypatch, "task/late", {"late.txt": "x"})
+    use_up_the_launch_budget(THREE_PM)                         # the pass took the last launch slot
+    set_agent_status(env, "prep", "idle")
+    report(dp.load_settings(), order=[a["id"], b["id"]], tickets={}, duplicates=[])
+    refuse = lambda: False   # noqa: E731  (what the dispatcher's reserve() says at the limit)
+    watch_cycle(THREE_PM, refuse)
+    prep.wait_checks()
+    watch_cycle(THREE_PM, refuse)
+    watch_cycle(THREE_PM, refuse)
+    got = titles(ntfy)                                         # not lost: no follow-up pass can launch
+    assert "2 ready to ship, list ready" in got and len(got) == 2   # (the late ticket is pinged on its own)
+    assert agent_names(herdr_log) == ["prep"]
+
+
+def test_a_failed_list_ping_is_kept_and_retried(q, herdr_log, env, ntfy, monkeypatch):
+    a = ready(q, monkeypatch, "task/one", {"one.txt": "1"})
+    b = ready(q, monkeypatch, "task/two", {"two.txt": "2"})
+    watch_cycle(THREE_PM)
+    set_agent_status(env, "prep", "idle")
+    report(dp.load_settings(), order=[a["id"], b["id"]], tickets={}, duplicates=[])
+    sends, up = [], []
+    monkeypatch.setattr(prep.notify, "notify_quietly", lambda *a, **k: sends.append(a[1]) or bool(up))
+    watch_cycle(THREE_PM)
+    prep.wait_checks()
+    watch_cycle(THREE_PM)
+    assert sends and set(sends) == {"ship_list"} and len(prep._load()["pings"]) == 1   # failed: still owed
+    up.append(True)                                            # the outage is over
+    watch_cycle(THREE_PM)
+    assert prep._load()["pings"] == [] and sends[-1] == "ship_list"
+    n = len(sends)
+    watch_cycle(THREE_PM)
+    assert len(sends) == n                                     # sent once it went through
