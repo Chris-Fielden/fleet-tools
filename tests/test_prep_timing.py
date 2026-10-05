@@ -262,3 +262,24 @@ def test_a_failed_list_ping_is_kept_and_retried(q, herdr_log, env, ntfy, monkeyp
     n = len(sends)
     watch_cycle(THREE_PM)
     assert len(sends) == n                                     # sent once it went through
+
+
+def test_a_second_pass_supersedes_the_list_ping_of_the_first(q, herdr_log, env, ntfy, monkeypatch):
+    a = ready(q, monkeypatch, "task/one", {"one.txt": "1"})
+    b = ready(q, monkeypatch, "task/two", {"two.txt": "2"})
+    watch_cycle(THREE_PM)
+    c = ready(q, monkeypatch, "task/late", {"late.txt": "x"})
+    set_agent_status(env, "prep", "idle")
+    report(dp.load_settings(), order=[a["id"], b["id"]], tickets={}, duplicates=[])
+    watch_cycle(THREE_PM)
+    prep.wait_checks()
+    watch_cycle(THREE_PM)
+    assert titles(ntfy) == [] and len(prep._load()["pings"]) == 1   # the next pass will lock all three
+    watch_cycle(THREE_PM)                                      # the follow-up pass starts over all three
+    set_agent_status(env, "prep", "idle")
+    report(dp.load_settings(), order=[a["id"], b["id"], c["id"]], tickets={}, duplicates=[])
+    watch_cycle(THREE_PM)
+    prep.wait_checks()
+    watch_cycle(THREE_PM)
+    watch_cycle(THREE_PM)
+    assert titles(ntfy) == ["3 ready to ship, list ready"]     # one ping for the current list

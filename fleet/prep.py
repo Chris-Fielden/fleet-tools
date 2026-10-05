@@ -799,6 +799,10 @@ def _finish_reconcile(job: dict, settings: dict, now: datetime, emit, warn) -> N
 def _defer_ping(kind: str, ids: list[str]) -> None:
     """Record a ready ping that is owed, so it survives a held back or failed send."""
     with _state() as st:
+        if kind == "list":   # one list ping speaks for the current list: a newer pass supersedes the older
+            older = [i for p in st["pings"] if p["kind"] == "list" for i in p["ids"]]
+            st["pings"] = [p for p in st["pings"] if p["kind"] != "list"]
+            ids = list(dict.fromkeys(older + ids))
         st["pings"].append({"kind": kind, "ids": ids})
 
 
@@ -814,11 +818,15 @@ def flush_pings(settings: dict, now: datetime, warn) -> None:
         if _pass_follows(tickets, settings, state, now):
             return
         in_review = {t["id"]: t for t in review_tickets(tickets)}
+        busy = _busy(state)
         done = list(state["pings"])
         keep = []
         for p in done:
             ids = [i for i in p["ids"] if i in in_review]
             if not ids:
+                continue
+            if any(i in busy for i in ids):   # an agent or a ship holds one: say it once it is free
+                keep.append(dict(p, ids=ids))
                 continue
             if p["kind"] == "list":
                 stub = {"id": "list", "type": "build", "status": "review", "title": "ship list"}
