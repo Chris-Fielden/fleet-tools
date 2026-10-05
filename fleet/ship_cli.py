@@ -6,9 +6,12 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import json
 import os
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import dispatch as dp
@@ -32,6 +35,12 @@ def _fail(message: str, code: int = 1) -> int:
     _last_message = message
     print(f"ship: {message}", file=sys.stderr)
     return code
+
+
+def _say(message: str) -> None:
+    global _last_message
+    _last_message = message
+    print(f"ship: {message}")
 
 
 def _reconcile() -> int:
@@ -182,7 +191,7 @@ def _conflict_agent(repo: Path, t: dict, settings: dict) -> str | None:
             "You will get a ping when it is ready: ship it again then")
 
 
-def _ship_one(ticket_id: str, in_list: bool = False, expect: str | None = None) -> int:
+def _ship_one(ticket_id: str, in_list: bool = False, expect: str | None = None, preset=None) -> int:
     """Ship one ticket; prints what happened and returns the exit code. The ticket is reserved
     for the whole run, so no prep or reconcile agent can start on its branch meanwhile."""
     try:
@@ -201,7 +210,7 @@ def _ship_one(ticket_id: str, in_list: bool = False, expect: str | None = None) 
         with _repo_lock(t.get("repo")) as busy:
             if busy:
                 return _fail(f"another ship is already merging into {t.get('repo')}; wait for it to finish")
-            return _ship_reserved(t["id"], in_list, expect)
+            return _ship_reserved(t["id"], in_list, expect, preset)
     finally:
         prep.release_shipping(t["id"])
 
@@ -227,17 +236,9 @@ def _repo_lock(repo_name):
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
-def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None) -> int:
-    try:
-        t = tk.load_ticket(ticket_id)
-    except tk.TicketInvalid as exc:
-        return _fail(f"unknown ticket ID: {exc}")
-    except tk.TicketError as exc:
-        return _fail(str(exc))
-    if t["status"] not in ("claimed", "review"):
-        return _fail(f"{t['id']} is {t['status']}; only a ticket in review (or still claimed) can be shipped")
-    if in_list and t["status"] != "review":
-        return _fail(f"{t['id']} is {t['status']}, not in review any more, so it is no longer ready")
+def _resolve(t: dict):
+    """Where a ticket's work lives: (repo, branch, name, script, settings), or the exit code
+    of a refusal that was already printed."""
     repo_name, branch = t.get("repo"), t.get("branch")
     if not repo_name or not branch:
         return _fail(f"{t['id']} has no repo and branch to ship")
@@ -246,7 +247,6 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None) -> 
     name = branch.removeprefix("task/")
     global _ship_ticket
     _ship_ticket = t["id"]
-
     try:
         settings = dp.load_settings()
     except dp.SettingsError as exc:
@@ -258,9 +258,33 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None) -> 
     script = repo / "scripts" / "finish-task.sh"
     if not script.is_file():
         return _fail(f"{repo} has no scripts/finish-task.sh")
+    return repo, branch, name, script, settings
+
+
+def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, preset=None) -> int:
+    try:
+        t = tk.load_ticket(ticket_id)
+    except tk.TicketInvalid as exc:
+        return _fail(f"unknown ticket ID: {exc}")
+    except tk.TicketError as exc:
+        return _fail(str(exc))
+    if t["status"] not in ("claimed", "review"):
+        return _fail(f"{t['id']} is {t['status']}; only a ticket in review (or still claimed) can be shipped")
+    if in_list and t["status"] != "review":
+        return _fail(f"{t['id']} is {t['status']}, not in review any more, so it is no longer ready")
+    resolved = _resolve(t)
+    if isinstance(resolved, int):
+        return resolved
+    repo, branch, name, script, settings = resolved
 
     answer = None
-    if expect:
+    if preset:
+        # The detached job: the questions were asked on the terminal, and the reviews done there.
+        tip = dp._git(repo, "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}").stdout.strip()
+        if tip != preset[1]:
+            return _fail(f"{branch} is now at {tip[:8]}, not the {preset[1][:8]} that was confirmed; nothing was merged")
+        answer = preset[0]
+    elif expect:
         # No terminal: only a ticket already in review, at the confirmed commit.
         if t["status"] != "review":
             return _fail(f"{t['id']} is {t['status']}; only a ticket in review can be shipped from the web")
@@ -271,7 +295,7 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None) -> 
         if isinstance(answer, int):
             return answer
     else:
-        problem = _review_if_needed(repo, name, branch, script)
+        problem = _review_if_needed(repo, name, branch, script)  # no preset: the unattended and list paths
         if problem:
             return _fail(problem)
 
@@ -306,13 +330,13 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None) -> 
         _reconcile()
         status = tk.load_ticket(t["id"])["status"]
     except (OSError, tk.TicketError) as exc:
-        print(f"ship: {t['id']} merged, but the card was not updated ({exc}){later}")
+        _say(f"{t['id']} merged, but the card was not updated ({exc}){later}")
         return 0
     if status == "done":
-        print(f"ship: {t['id']} merged and marked done")
+        _say(f"{t['id']} merged and marked done")
     else:
         # e.g. a running `dispatch --watch` holds the lock; it reconciles on its next pass
-        print(f"ship: {t['id']} merged, but is still {status}{later}")
+        _say(f"{t['id']} merged, but is still {status}{later}")
     return 0
 
 
@@ -345,24 +369,220 @@ def _ship_list() -> int:
     return 0
 
 
+# --- the detached ship: questions on the terminal, the rest in a background job ------------
+
+def _job_files(ticket_id: str) -> dict:
+    d = tk.fleet_home() / "ship"
+    tk.refuse_real_store_in_tests(d)
+    return {"dir": d, "log": d / f"{ticket_id}.log", "result": d / f"{ticket_id}.result",
+            "lock": d / f"{ticket_id}.lock"}
+
+
+def _ask_to_ship(repo: Path, wt: Path, branch: str, tip: str) -> str | int:
+    """Every question of the merge, asked before anything long runs. Returns the answer
+    finish-task's one prompt is to get (the ticket id at high risk, else y), or an exit code."""
+    try:
+        if _field(repo, wt, branch, "ok") != "yes":
+            return _fail(f"not allowed: {_blocked_lines(repo, wt, branch)}; nothing was merged")
+        risk, word = _field(repo, wt, branch, "risk"), _field(repo, wt, branch, "confirm")
+    except _GateBroken as exc:
+        return _fail(str(exc))
+    if not risk or not word:
+        return _fail("could not work out the risk level; nothing was merged")
+    base = dp.main_branch(repo) or "main"
+    others = _gate(repo, wt, branch, "--field", "others").stdout.strip()
+    if others:
+        print(f"WARNING: shipping {branch} also ships the work of these unfinished tickets on it:")
+        print("".join(f"  {line}\n" for line in others.splitlines()), end="")
+    print(dp._git(repo, "log", "--oneline", f"{base}..{tip}").stdout, end="")
+    print(dp._git(repo, "diff", "--stat", f"{base}...{tip}").stdout, end="")
+    try:
+        if risk == "high":
+            typed = input(f"HIGH RISK change. Type the ticket id ({word}) to ship {branch} into {base}: ")
+            yes = typed.strip().lower() == word.lower()
+        else:
+            yes = input(f"Ship {branch} into {base}? [y/N] ").strip().lower() in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        yes = False
+    if not yes:
+        return _fail("cancelled; nothing changed")
+    return word if risk == "high" else "y"
+
+
+def _prepare_detached(t: dict) -> tuple[str, str] | int:
+    """Under the ticket's reservation: validate, review if needed, ask. Returns (answer, tip)
+    or an exit code. The reservation ends here; the job takes its own."""
+    try:
+        problem = prep.reserve_shipping(t["id"])
+    except OSError as exc:
+        return _fail(f"cannot tell whether an agent is working on {t['id']} ({exc}); nothing was merged")
+    if problem:
+        return _fail(problem)
+    try:
+        if t["status"] not in ("claimed", "review"):
+            return _fail(f"{t['id']} is {t['status']}; only a ticket in review (or still claimed) can be shipped")
+        resolved = _resolve(t)
+        if isinstance(resolved, int):
+            return resolved
+        repo, branch, name, script, _ = resolved
+        problem = _review_if_needed(repo, name, branch, script)
+        if problem:
+            return _fail(problem)
+        if dp._git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
+            return _fail(f"a merge is already in progress in {repo}; finish or abort it first")
+        tip = dp._git(repo, "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}").stdout.strip()
+        wt = repo / ".worktrees" / name
+        if not tip or not wt.is_dir():
+            return _fail(f"no worktree at {wt}; nothing was merged")
+        answer = _ask_to_ship(repo, wt, branch, tip)
+        return answer if isinstance(answer, int) else (answer, tip)
+    finally:
+        prep.release_shipping(t["id"])
+
+
+def _follow(proc: subprocess.Popen, log: Path, ticket_id: str) -> int:
+    """Show the job's log as it grows until the job ends. Ctrl-C only stops watching."""
+    pos = 0
+    try:
+        while True:
+            running = proc.poll() is None
+            with open(log, "rb") as fh:
+                fh.seek(pos)
+                chunk = fh.read()
+            if chunk:
+                pos += len(chunk)
+                sys.stdout.write(chunk.decode(errors="replace"))
+                sys.stdout.flush()
+            if not running:
+                return proc.returncode
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        print(f"\nship: still shipping {ticket_id} in the background; `ship --status {ticket_id}` shows how far it got")
+        return 0
+
+
+def _ship_detached(ticket_id: str) -> int:
+    try:
+        t = tk.load_ticket(ticket_id)
+    except tk.TicketInvalid as exc:
+        return _fail(f"unknown ticket ID: {exc}")
+    except tk.TicketError as exc:
+        return _fail(str(exc))
+    files = _job_files(t["id"])
+    files["dir"].mkdir(parents=True, exist_ok=True)
+    lock = open(files["lock"], "a")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        return _fail(f"{t['id']} is already being shipped; `ship --status {t['id']}` shows how far it got")
+    try:
+        prepared = _prepare_detached(t)
+        if isinstance(prepared, int):
+            return prepared
+        answer, tip = prepared
+        files["result"].unlink(missing_ok=True)
+        ship = Path(__file__).resolve().parent.parent / "bin" / "ship"
+        started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with open(files["log"], "w") as log:
+            log.write(f"ship: {t['id']} started {started}\n")
+            log.flush()
+            # A new session, its output in the log, and the lock handed over: closing the
+            # terminal or sleeping the laptop cannot stop it, and a second ship is refused
+            # until it ends (flock lives as long as any copy of the open file).
+            proc = subprocess.Popen(
+                [sys.executable, str(ship), "--job", t["id"], "--tip", tip, "--answer", answer],
+                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+                pass_fds=[lock.fileno()], env={**os.environ, "PYTHONUNBUFFERED": "1"})
+    except OSError as exc:
+        return _fail(f"could not start the ship job: {exc}")
+    finally:
+        lock.close()   # the job's copy keeps the lock
+    print(f"ship: {t['id']} is shipping in the background (log {files['log']})")
+    return _follow(proc, files["log"], t["id"])
+
+
+def _run_job(ticket_id: str, tip: str, answer: str) -> int:
+    """The detached job itself: checks, merge and push through finish-task with the answers
+    already given, then the one phone ping and the result file `ship --status` reads."""
+    code = _ship_one(ticket_id, preset=(answer, tip))
+    files = _job_files(ticket_id)
+    finished = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        files["result"].write_text(json.dumps({"code": code, "message": _last_message, "finished": finished}))
+    except OSError as exc:
+        print(f"ship: could not write the result file: {exc}", file=sys.stderr)
+    _ping_result(ticket_id, code)
+    return code
+
+
+def _status(ticket_id: str) -> int:
+    if not tk.ID_RE.fullmatch(ticket_id):
+        return _fail(f"unknown ticket ID: {ticket_id}")
+    files = _job_files(ticket_id)
+    tail = ""
+    if files["log"].is_file():
+        tail = "".join(files["log"].read_text(errors="replace").splitlines(True)[-8:])
+    running = False
+    if files["lock"].is_file():
+        with open(files["lock"], "a") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fh, fcntl.LOCK_UN)
+            except OSError:
+                running = True
+    if running:
+        print(f"ship: {ticket_id} is still shipping; the log so far:")
+        print(tail, end="")
+        return 0
+    if not files["log"].is_file():
+        return _fail(f"no ship of {ticket_id} has been run")
+    try:
+        result = json.loads(files["result"].read_text())
+    except (OSError, ValueError):
+        print(tail, end="")
+        return _fail(f"{ticket_id} stopped without a result (the job was killed?); see {files['log']}")
+    if result.get("code") == 0:
+        print(f"ship: {ticket_id} shipped ({result.get('finished')}): {result.get('message')}")
+        return 0
+    print(tail, end="")
+    return _fail(f"{ticket_id} was not shipped ({result.get('finished')}): {result.get('message')}")
+
+
 def main(argv=None) -> int:
     p = _Parser(prog="ship")
     p.add_argument("id", nargs="?", help="ticket id, like BD-17")
+    p.add_argument("--status", metavar="ID", help="show how far a ship of ID got, or how it ended")
+    p.add_argument("--job", metavar="ID", help=argparse.SUPPRESS)
+    p.add_argument("--tip", help=argparse.SUPPRESS)
+    p.add_argument("--answer", help=argparse.SUPPRESS)
     p.add_argument("--list", action="store_true", help="ship every ticket on the ship list, in order")
     p.add_argument("--non-interactive", metavar="COMMIT", dest="expect",
                    help="used by the web endpoint: ship without a terminal, only if the branch is "
                         "still at COMMIT and the gate passes with the reviews already on file; "
                         "sends one phone ping with the result")
     args = p.parse_args(argv)
-    if args.list == bool(args.id):
+    if args.status:
+        if args.id or args.list or args.job:
+            p.error("--status takes its ticket id and nothing else")
+        return _status(args.status)
+    if args.job:
+        if not (args.tip and args.answer) or args.id or args.list or args.expect:
+            p.error("--job is internal: it needs --tip and --answer and nothing else")
+    elif args.list == bool(args.id):
         p.error("give a ticket id, or --list, not both and not neither")
     if args.list and args.expect:
         p.error("--non-interactive ships one ticket, not the list")
     who = tk.current_creator()
     if who != "human":
         return _fail(f"refusing to run inside an agent (running as {who}); only a human ships")
+    if args.job:
+        return _run_job(args.job, args.tip, args.answer)
     if args.list:
         return _ship_list()
+    if not args.expect and sys.stdin.isatty():
+        return _ship_detached(args.id)   # no terminal: the old way, since nobody could be asked
     code = _ship_one(args.id, expect=args.expect)
     if args.expect:
         _ping_result(args.id, code)

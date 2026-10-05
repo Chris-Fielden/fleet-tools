@@ -21,6 +21,7 @@ from test_risk import commit_in, fake_tool, repo, run_review, task  # noqa: F401
 FAKE = """#!/bin/bash
 # Fake finish-task: records how it was called, optionally merges, exits as told.
 echo "$PWD|$*" >> "$FAKE_LOG"
+sleep "${FAKE_SLEEP:-0}"
 [[ -z "${FAKE_MERGE:-}" ]] || git -c user.name=T -c user.email=t@example.com merge -q --no-ff "task/$1" -m "Merge task/$1"
 exit "${FAKE_EXIT:-0}"
 """
@@ -209,12 +210,13 @@ def answer(monkeypatch, text):
     """Pretend a terminal is attached and the human types `text` (an exception
     class is raised instead). Returns the list of prompts shown."""
     asked = []
+    replies = list(text) if isinstance(text, list) else None
 
     def fake_input(prompt=""):
         asked.append(prompt)
         if isinstance(text, type):
             raise text
-        return text
+        return replies.pop(0) if replies else text
 
     monkeypatch.setattr("fleet.ship_cli.sys.stdin", type("TTY", (), {"isatty": lambda self: True})())
     monkeypatch.setattr("builtins.input", fake_input)
@@ -241,12 +243,13 @@ def test_ship_offers_a_review_when_the_tip_has_none_and_merges(real_task, env, m
     assert tk.load_ticket(t["id"])["status"] == "done"
 
 
-def test_ship_declined_offer_still_goes_to_the_gate(real_task, monkeypatch):
+def test_ship_declined_offer_still_goes_to_the_gate(real_task, env, monkeypatch):
     wt, t = real_task
     full = commit_in(wt, "fleet/x.py")
     answer(monkeypatch, "n")
-    assert ship_main([t["id"]]) == 0  # the (fake) merge script decides, not ship
+    assert ship_main([t["id"]]) == 1  # the gate refuses before any question about the merge
     assert reviewers(wt, full) == set()
+    assert not (env / "finish.log").exists()
 
 
 def test_ship_offer_review_failure_stops_the_merge(real_task, env, monkeypatch, capsys):
@@ -265,7 +268,7 @@ def test_ship_does_not_offer_when_a_review_exists_but_failed(real_task, env, mon
     fake_tool(env / "bin", "codex", verdict="FAIL")
     run_review(wt, env / "bin")
     asked = answer(monkeypatch, "y")
-    assert ship_main([t["id"]]) == 0
+    assert ship_main([t["id"]]) == 1  # the gate refuses before any question
     assert asked == []
 
 
@@ -314,7 +317,7 @@ def test_ship_ctrl_c_at_the_offer_declines_without_a_traceback(real_task, monkey
     wt, t = real_task
     full = commit_in(wt, "fleet/x.py")
     answer(monkeypatch, KeyboardInterrupt)
-    assert ship_main([t["id"]]) == 0  # same as a no: the merge script decides
+    assert ship_main([t["id"]]) == 1  # same as a no; the gate then refuses
     assert reviewers(wt, full) == set()
     assert "Traceback" not in capsys.readouterr().err
 
@@ -322,9 +325,9 @@ def test_ship_ctrl_c_at_the_offer_declines_without_a_traceback(real_task, monkey
 def test_ship_high_risk_never_prompts(real_task, monkeypatch, capsys):
     wt, t = real_task
     full = commit_in(wt, "k8s/app.yaml")
-    asked = answer(monkeypatch, "n")  # a terminal is attached, and "no" must not matter
+    asked = answer(monkeypatch, t["id"].lower())  # the reviews are no question; the ticket id is, any case
     assert ship_main([t["id"]]) == 0
-    assert asked == []
+    assert len(asked) == 1 and "HIGH RISK" in asked[0]
     assert reviewers(wt, full) == {"codex", "claude"}
     assert "running both reviewers" in capsys.readouterr().out
 
