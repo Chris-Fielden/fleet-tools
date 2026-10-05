@@ -50,7 +50,7 @@ def test_merges_through_finish_task_and_marks_done(shipping, monkeypatch, capsys
     monkeypatch.setenv("FAKE_MERGE", "1")
     assert ship_main([t["id"]]) == 0
     # run from the repo's main checkout, with the task name and nothing else
-    assert log.read_text().strip() == f"{repo.resolve()}|demo"
+    assert log.read_text().strip() == f"{repo.resolve()}|demo --ticket {t['id']}"
     assert tk.load_ticket(t["id"])["status"] == "done"
     assert f"{t['id']} merged and marked done" in capsys.readouterr().out
 
@@ -345,3 +345,12 @@ def test_ship_stops_when_the_gate_is_broken(real_task, env, monkeypatch, capsys,
     assert ship_main([t["id"]]) == 1
     assert "ticket gate --field reviews failed" in capsys.readouterr().err
     assert not (env / "finish.log").exists()
+
+
+def test_ship_passes_its_own_ticket_when_several_share_the_branch(shipping, monkeypatch):
+    repo, t, log = shipping
+    newer = [mk(title=f"Newer {w}")["id"] for w in ("quartz harbour", "mellow zebra")]
+    monkeypatch.setenv("FAKE_MERGE", "1")
+    assert ship_main([t["id"]]) == 0
+    assert log.read_text().strip().endswith(f"|demo --ticket {t['id']}")
+    assert t["id"] not in newer

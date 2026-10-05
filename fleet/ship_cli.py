@@ -41,13 +41,17 @@ def _reconcile() -> int:
     return subprocess.run([sys.executable, str(dispatch), "--reconcile"]).returncode
 
 
+_ship_ticket = ""   # the ticket this run ships: the gate checks it is on the branch and asks for its id
+
+
 def _gate(repo: Path, wt: Path, branch: str, *fields: str) -> subprocess.CompletedProcess:
     """`ticket gate` the way the merge script calls it: the exact same gate."""
     ticket = Path(__file__).resolve().parent.parent / "bin" / "ticket"
     base = dp.main_branch(repo) or "main"
     return subprocess.run(
         [sys.executable, str(ticket), "gate", "--base", base, "--branch", branch, "--dir", str(repo),
-         "--worktree", str(wt), "--repo", repo.name, *fields], capture_output=True, text=True)
+         "--worktree", str(wt), "--repo", repo.name,
+         *(["--ticket", _ship_ticket] if _ship_ticket else []), *fields], capture_output=True, text=True)
 
 
 def _confirm(question: str) -> bool:
@@ -240,6 +244,8 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None) -> 
     if not branch.startswith("task/") or len(branch) == len("task/"):
         return _fail(f"{t['id']} branch {branch} is not a task/<name> branch")
     name = branch.removeprefix("task/")
+    global _ship_ticket
+    _ship_ticket = t["id"]
 
     try:
         settings = dp.load_settings()
@@ -279,7 +285,7 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None) -> 
     # (A web ship has no terminal: finish-task's one prompt is answered with
     # what the confirmation page already made the person do.)
     try:
-        done = subprocess.run(["bash", str(script), name], cwd=repo, env=dict(os.environ),
+        done = subprocess.run(["bash", str(script), name, "--ticket", t["id"]], cwd=repo, env=dict(os.environ),
                               input=answer + "\n" if answer else None, text=True)
     except OSError as exc:
         return _fail(f"could not run {script}: {exc}")

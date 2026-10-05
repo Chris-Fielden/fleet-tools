@@ -92,7 +92,9 @@ def _build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--dir", default=".", help="the git repo (default: here)")
     gate.add_argument("--repo", help="only tickets filed against this repo name count")
     gate.add_argument("--worktree", required=True, help="the task worktree holding .reviews/")
-    gate.add_argument("--field", choices=("risk", "confirm", "ok", "reviews"),
+    gate.add_argument("--ticket", help="the ticket being shipped: it must be on this branch, and its id "
+                                       "is the word to type")
+    gate.add_argument("--field", choices=("risk", "confirm", "ok", "reviews", "others"),
                       help="print just one value instead of the report")
 
     sub.add_parser("dupes", help="list likely duplicate tickets: shared branch or similar title")
@@ -328,12 +330,25 @@ def _gate(args) -> dict:
     full = rk._git(args.dir, "rev-parse", "--verify", f"{args.branch}^{{commit}}").strip()
     reviews = rk.latest_reviews(Path(args.worktree) / ".reviews", full)
     problems = rk.check_reviews(reviews, level)
-    # The ticket whose id is typed to confirm: the highest-risk one on the branch.
+    # The ticket whose id is typed to confirm: the one being shipped, else the highest-risk one
+    # on the branch.
     best = max((t for t in tickets if t["id"] in ids),
                key=lambda t: rk.rank(rk.stored_level(t, rules)), default=None)
+    others = []
+    if args.ticket:
+        mine = next((t for t in tickets if t["id"] == args.ticket), None)
+        if mine is None:
+            raise tk.TicketError(f"no such ticket: {args.ticket}")
+        if mine["branch"] != args.branch or (args.repo and mine["repo"] != args.repo):
+            raise tk.TicketError(f"{mine['id']} is on {mine['repo']} {mine['branch']}, "
+                                 f"not {args.branch}")
+        best = mine
+        others = [t for t in tickets if t["id"] in ids and t["id"] != mine["id"]
+                  and t["status"] != "done"]
     return {"level": level, "diff_level": diff_level, "stored": stored, "ids": ids, "rows": rows,
             "commit": full, "reviews": reviews, "problems": problems,
-            "confirm": best["id"] if best else args.branch.removeprefix("task/")}
+            "confirm": best["id"] if best else args.branch.removeprefix("task/"),
+            "others": [f"{t['id']} ({t['status']}) {t['title']}" for t in others]}
 
 
 def _cmd_gate(args) -> int:
@@ -342,6 +357,8 @@ def _cmd_gate(args) -> int:
         print(g["level"])
     elif args.field == "confirm":
         print(g["confirm"])
+    elif args.field == "others":
+        print("\n".join(g["others"]))
     elif args.field == "ok":
         print("yes" if not g["problems"] else "no")
     elif args.field == "reviews":
