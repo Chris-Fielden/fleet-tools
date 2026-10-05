@@ -164,6 +164,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     _prep_quietly(lambda: prep.finish(settings, clock.now(), emit, warn), warn)
     if checks is not None:
         checks(emit, warn, prompted)
+        kaneo.refresh_usage(tk.list_tickets(), warn)   # --watch: each run's tokens reach the card
     _prep_quietly(lambda: prep.maybe_start(settings, clock.now(), emit, warn, reserve), warn)
     lines, held = dp.ensure_investigations(tk.list_tickets(), warn)
     for line in lines:

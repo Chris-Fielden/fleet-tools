@@ -220,6 +220,46 @@ def usage_line(c: dict) -> str:
             f" [{', '.join(models)}]")
 
 
+def _chain(by_id: dict, t: dict) -> set[str]:
+    """The ticket and, for an on-call fix, the tickets above it: whose cards its runs count towards."""
+    out = {t["id"]}
+    while t.get("oncall") and t.get("parent") in by_id and t["parent"] not in out:
+        t = by_id[t["parent"]]
+        out.add(t["id"])
+    return out
+
+
+def card_usage(targets: list[dict], home: Path | None = None) -> dict[str, str]:
+    """Ticket id -> the usage line for its Kaneo card, for those of `targets` that
+    have any usage (the others are left out). A ticket's total includes the runs of
+    the on-call tickets filed to fix it. Session files are read once for all targets."""
+    if not targets:
+        return {}
+    every = tk.list_tickets()
+    by_id = {t["id"]: t for t in every}
+    wanted = {t["id"] for t in targets}
+    chain = {t["id"]: _chain(by_id, t) for t in every}
+    created = [_ts(t.get("created_at")) for t in every if wanted & chain[t["id"]]]
+    start = min((c for c in created if c), default=datetime.now(timezone.utc) - WEEK)
+    rows = [s for s in attribute(every, sessions(home, start - timedelta(minutes=1)))
+            if wanted & chain[s["ticket"]]]
+    out: dict[str, str] = {}
+    for tid in wanted:
+        mine = [s for s in rows if tid in chain[s["ticket"]]]
+        total = sum(s["tokens"] for s in mine)
+        if total <= 0:
+            continue
+        split: dict[str, int] = {}
+        for s in mine:
+            key = f"{s['kind']} {s['agent']}"
+            split[key] = split.get(key, 0) + s["tokens"]
+        parts = ", ".join(f"{k} {_n(v)}" for k, v in sorted(split.items()) if v)
+        extra = " (including on-call)" if any(s["ticket"] != tid for s in mine) else ""
+        out[tid] = (f"{_n(total)} tokens{extra}: {parts}; "
+                    f"{_dur(sum(s['duration_seconds'] for s in mine))} over {len(mine)} run(s)")
+    return out
+
+
 def table(rows: list[dict]) -> str:
     if not rows:
         return "no ticket usage found in the last 7 days"
