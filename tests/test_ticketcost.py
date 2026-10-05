@@ -177,3 +177,34 @@ def test_week_report_counts_only_usage_inside_the_window(env):
         meta, ev(now - timedelta(days=8), 1000), ev(now - timedelta(minutes=5), 1040)]) + "\n")
     codex = [r for r in tc.sessions(home, now - tc.WEEK, now) if r["agent"] == "codex"]
     assert codex[0]["tokens"] == 40 and codex[0]["duration_seconds"] == 0
+
+
+def test_a_timed_run_always_has_its_tokens_counted(env):
+    # A ticket with several runs, one still waiting for its first reply and one
+    # whose log grew after its last reply: neither may add time without tokens.
+    t = ticket()
+    home = env / "home"
+    now = datetime.now(timezone.utc)
+    wt = str(env / "fleet-tools/.worktrees/demo")
+    claude_file(home, "a", wt, "Do the work", now, [(10, 20, 0, 0), (1, 2, 0, 0)])
+    # Log lines after the last assistant line (tool results, attachments).
+    path = home / ".claude/projects/p/a.jsonl"
+    tail = [json.dumps({"type": t_, "timestamp": z(now + timedelta(minutes=m)), "cwd": wt})
+            for t_, m in (("user", 9), ("attachment", 12))]
+    path.write_text(path.read_text() + "\n".join(tail) + "\n")
+    # A fresh Claude run with no reply yet.
+    d = home / ".claude/projects/p"
+    (d / "fresh.jsonl").write_text(json.dumps(
+        {"type": "user", "timestamp": z(now), "cwd": wt, "message": {"role": "user", "content": "go"}}) + "\n")
+    # A Codex review with no token_count yet, and one that finished.
+    codex_file(home, "done", wt, REVIEW_PROMPT, now, inp=1000, cached=400, out=50)
+    cd = home / ".codex/sessions/2026/10/03"
+    (cd / "rollout-new.jsonl").write_text(json.dumps(
+        {"timestamp": z(now), "type": "session_meta", "payload": {"cwd": wt}}) + "\n")
+
+    c = tc.for_ticket(t, home)
+    assert c["runs"] == 2
+    assert all(s["tokens"] > 0 for s in c["sessions"])
+    by = {s["agent"]: s for s in c["sessions"]}
+    assert by["claude"]["duration_seconds"] == 120 and by["codex"]["duration_seconds"] == 180
+    assert c["duration_seconds"] == 300
