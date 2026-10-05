@@ -304,3 +304,14 @@ def test_a_list_ping_supersedes_the_deferred_individual_pings_of_its_tickets():
     st = {"pings": [{"kind": "ship", "ids": ["A"]}, {"kind": "ship", "ids": ["Z"]}, {"kind": "list", "ids": ["B"]}]}
     prep._defer_ping(st, "list", ["A", "C"])
     assert st["pings"] == [{"kind": "ship", "ids": ["Z"]}, {"kind": "list", "ids": ["B", "A", "C"]}]
+
+
+def test_a_one_shot_run_sends_the_pings_owed_by_its_final_finish(monkeypatch):
+    from fleet import dispatch_cli
+    calls = []
+    monkeypatch.setattr(dispatch_cli, "_cycle", lambda *a, **k: 0)
+    monkeypatch.setattr(prep, "wait_checks", lambda: None)
+    monkeypatch.setattr(prep, "finish", lambda *a: calls.append("finish"))
+    monkeypatch.setattr(prep, "flush_pings", lambda *a: calls.append("flush"))
+    assert dispatch_cli._cmd_once({}) == 0
+    assert calls == ["finish", "flush"]

@@ -261,6 +261,7 @@ def _cmd_once(settings: dict) -> int:
     # A one-shot run has no next cycle: wait for the prep re-checks started above and finish the job.
     prep.wait_checks()
     _prep_quietly(lambda: prep.finish(settings, dp.Clock().now(), print, _warn), _warn)
+    _prep_quietly(lambda: prep.flush_pings(settings, dp.Clock().now(), _warn), _warn)   # owed pings
     return code
 
 
