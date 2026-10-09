@@ -840,6 +840,36 @@ def sweep_tabs(settings: dict, warn=lambda m: None) -> list[tuple[str, str]]:
     return swept
 
 
+def stop_agent(ticket_id: str, settings: dict) -> tuple[bool, str]:
+    """End the herdr session of ONE ticket's own agent (named after the ticket) by closing
+    its tab, whatever it is doing. (True, why) when no agent of the ticket is left; (False,
+    why) when it could not be stopped. Closing a tab ends every pane in it, so a tab that
+    also holds any other agent is left alone, as is a tab a person is looking at (focused),
+    one outside the agents workspace, and one that could not be found. Nothing else is touched."""
+    name = ticket_id.lower()
+    try:
+        tabs, agents = _herdr_tabs(settings)
+    except LaunchError as exc:
+        return False, f"herdr could not be asked ({exc})"
+    agent = next((a for a in agents if a.get("name") == name), None)
+    if agent is None:
+        return True, "no agent is running"
+    tab = next((x for x in tabs if x.get("tab_id") == agent.get("tab_id")), None)
+    if tab is None or not isinstance(tab.get("tab_id"), str):
+        return False, f"the tab of agent {name} is not in workspace {settings['herdr_workspace']}"
+    in_tab = [a for a in agents if a.get("tab_id") == tab["tab_id"]]
+    others = [a.get("name") or "an unnamed agent" for a in in_tab if a.get("name") != name]
+    if others:
+        return False, f"tab {tab['tab_id']} also holds {', '.join(map(str, others))}; left alone"
+    if tab.get("focused") or any(a.get("focused") for a in in_tab):
+        return False, f"tab {tab['tab_id']} is focused; left alone"
+    try:
+        herdr("tab", "close", tab["tab_id"])
+    except LaunchError as exc:
+        return False, f"tab {tab['tab_id']} could not be closed ({exc})"
+    return True, f"closed tab {tab['tab_id']}"
+
+
 def lost_agents(tickets: list[dict], warn) -> list[dict]:
     """Claimed build or fix tickets whose herdr agent is no longer listed: the
     tab died and the ticket stays claimed, blocking the queue. If herdr cannot
@@ -877,6 +907,8 @@ def relaunch(t: dict, settings: dict, warn, prompt: str | None = None, why: str 
         if not folder.exists():
             raise LaunchError(f"task folder {d.worktree} is gone")
         check_reusable(d, folder)
+        if agent_listed(t["id"].lower())[0]:   # one ticket never gets two agents
+            raise LaunchError(f"an agent named {t['id'].lower()} is already running")
         try:
             read_by_agent = tk.load_ticket(t["id"])   # before the start: a later note must still be sent
         except (tk.TicketError, tk.TicketInvalid):

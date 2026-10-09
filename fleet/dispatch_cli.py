@@ -162,7 +162,9 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
         emit(f"{t['id']}  investigation {t['status']}")
         kaneo.mirror_quietly(t, warn)
         notify.notify_quietly(t, "failed" if t["status"] == "failed" else "investigated", warn)
-    stopped = governor.held_ids()   # stopped on purpose: the governor restarts them after the reset
+    # held: stopped on purpose, the governor restarts them after the reset; looping: the supervisor's
+    # LOOP restart is about to start their fresh session (a second agent would be a duplicate)
+    stopped = governor.held_ids() | supervisor_run.pending_ids()
     for t in lc.lost_agents([t for t in tk.list_tickets() if t["id"] not in stopped], warn):
         emit(f"{t['id']}  claimed, but its agent is not running in herdr (the tab died?); "
              f"task folder {t['repo']}/.worktrees/{t['branch'].removeprefix('task/')}")

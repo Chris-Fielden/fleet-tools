@@ -147,7 +147,7 @@ def test_a_stale_answer_is_dropped(sup, model):
 def test_state_is_pruned_and_bad_files_are_survived(sup, model):
     sr.state_path().write_text("[1, 2]")
     warnings = []
-    assert sr.load_state(warnings.append) == {"classified": {}, "attempts": {}}
+    assert sr.load_state(warnings.append) == {"classified": {}, "attempts": {}, "pending": {}}
     assert warnings
     sr.state_path().write_text(json.dumps({"classified": {"GONE-1": {"a" * 40: "PROGRESS"}, sup.id: {"b": "BOGUS"}},
                                            "attempts": {"GONE-1": {"a": 1}}}))
