@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from conftest import ROOT
 from fleet import dispatch as dp
 from fleet import supervisor as sv
 from fleet import ticket as tk
@@ -156,6 +157,8 @@ def test_parse_reply_keeps_a_design_line_starting_with_reason():
     "", "no format at all", "CLASSIFICATION: MAYBE\nREASON: x\n", "CLASSIFICATION: PROGRESS\n",
     "CLASSIFICATION: PROGRESS\nREASON: a\nCLASSIFICATION: LOOP\n",
     "CLASSIFICATION: PROGRESS\nREASON: a\nREASON: b\n",
+    "Sure! Here you go:\nCLASSIFICATION: PROGRESS\nREASON: a\n",
+    "CLASSIFICATION: PROGRESS\nREASON: a\nand some more prose\n",
     "CLASSIFICATION: LOOP\nREASON: x\n", "CLASSIFICATION: LOOP\nREASON: x\nDESIGN CHANGE: short\n",
 ])
 def test_parse_reply_rejects(text):
@@ -190,3 +193,19 @@ def test_classify_bad_reply_saves_nothing(model, branch, env):
     with pytest.raises(sv.SupervisorError):
         sv.classify(t["id"], repo, base, tip, env / "x", cwd=repo)
     assert not tk.load_ticket(t["id"]).get("notes")
+
+
+def test_must_fix_bar_matches_review_policy():
+    policy = (ROOT / "scripts" / "review.sh").read_text()
+    for word in ("SECURITY", "DATA LOSS", "WRONG BEHAVIOR", "TESTS", "SHOULD FIX"):
+        assert word in policy and word in sv.MUST_FIX_BAR
+    assert "unclear" in sv.MUST_FIX_BAR and "rare" in sv.MUST_FIX_BAR
+
+
+def test_verdict_for_another_commit_is_not_shown_as_the_tips(branch):
+    repo, base, tip = branch
+    t = ticket()
+    t["verdict"] = {"result": "PASS", "commit": "f" * 40, "reviews": {"claude": {"result": "PASS"}}}
+    assert "its Claude review is not run" in " ".join(sv.build_prompt(t, repo, base, tip, []).split())
+    t["verdict"]["commit"] = tip
+    assert "its Claude review is PASS" in " ".join(sv.build_prompt(t, repo, base, tip, []).split())

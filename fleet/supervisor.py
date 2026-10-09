@@ -36,9 +36,12 @@ CLASSES = ("PROGRESS", "LOOP", "SQUIRRELS")
 # The only variables the model process sees. Claude signs in from files under HOME.
 ENV_KEEP = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR",
             "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR")
-MUST_FIX_BAR = ("MUST FIX is only for real problems in the changes themselves: bugs, missing error "
-                "handling, security problems, secrets in the code, Kubernetes YAML mistakes, tests that "
-                "were weakened or skipped, and anything that breaks the rules in CLAUDE.md.")
+MUST_FIX_BAR = ("An item is MUST FIX only if it is one of four: (1) SECURITY: a security hole, or a bypass of "
+                "the guard or the merge gate; (2) DATA LOSS: loss or corruption of tickets, state or user data "
+                "in realistic conditions; (3) WRONG BEHAVIOR: wrong behavior in normal operation; (4) TESTS: "
+                "failing or weakened tests. Everything else is SHOULD FIX, including robustness against rare "
+                "or simultaneous failures (crash-path corner cases, unlikely races). If it is unclear whether "
+                "an item meets the bar, it is SHOULD FIX.")
 
 PROMPT = """\
 You are the supervisor of an automated code-review loop. A coding agent builds a
@@ -118,7 +121,9 @@ def _notes_text(t: dict) -> str:
 def build_prompt(t: dict, repo: Path, base: str, tip: str, history: list[dict]) -> str:
     """The text the model reads. Never longer than PROMPT_MAX: each section is clipped
     (the newest rounds and notes are the ones kept) and a final clip backs that up."""
-    verdicts = {k: r["result"] for k, r in ((t.get("verdict") or {}).get("reviews") or {}).items()}
+    v = t.get("verdict") or {}
+    # a verdict recorded for another commit says nothing about the tip
+    verdicts = {k: r["result"] for k, r in (v.get("reviews") or {}).items()} if v.get("commit") == tip else {}
     sections = {
         "spec": _clip(t["body"], SECTION_LIMITS["spec"]),
         "notes": _newest(_notes_text(t), SECTION_LIMITS["notes"]),
@@ -212,8 +217,10 @@ def parse_reply(text: str) -> dict:
             if current in fields:
                 raise SupervisorError("the supervisor's answer repeats a field")
             fields[current] = [m.group(2)]
-        elif current:
+        elif current and (current == "DESIGN CHANGE" or not line.strip()):
             fields[current].append(line)
+        elif line.strip():
+            raise SupervisorError("the supervisor's answer has text outside the fields asked for")
     got = {k: " ".join(v[0].split()) if k != "DESIGN CHANGE" else "\n".join(v).strip() for k, v in fields.items()}
     cls = got.get("CLASSIFICATION", "").upper()
     if cls not in CLASSES:
