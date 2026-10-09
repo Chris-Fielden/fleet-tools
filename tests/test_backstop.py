@@ -14,6 +14,10 @@ from test_oncall import oncall_tickets
 from test_review_watch import ntfy, no_dialog, rig, sent  # noqa: F401
 
 
+# The backstop waits for the supervisor to judge a failed commit, for at most this long (minutes).
+WAIT = sr.BACKSTOP_WAIT // 60 + 1
+
+
 def rounds(rig, n):
     """n different commits, each with a recorded FAIL; the last one is the branch tip."""
     for i in range(n):
@@ -32,8 +36,8 @@ def test_fifteen_rounds_close_it_with_the_analysis_and_one_needs_human_ping(rig,
     rig.settings["fail_rounds_threshold"] = 100
     tk.add_note(rig.id, "SUPERVISOR PROGRESS (commit abc1234): items are in different areas")
     rounds(rig, 15)
-    rig.cycle()
-    rig.cycle(1)
+    rig.cycle(WAIT)
+    rig.cycle(WAIT + 1)
     t = rig.get()
     assert t["status"] == "failed" and tk.review_rounds(t) == 15
     assert "review-round backstop: 15 review rounds" in t["close_note"]
@@ -51,7 +55,7 @@ def test_it_counts_every_round_even_when_the_supervisor_said_progress(rig, ntfy)
     state = {"classified": {rig.id: {c: "PROGRESS" for c in rig.get()["fail_commits"]}}, "pending": {}, "attempts": {}}
 
     sr.save_state(state)
-    rig.cycle()
+    rig.cycle(WAIT)
     assert rig.get()["status"] == "failed" and "review-round backstop" in rig.get()["close_note"]
 
 
@@ -67,7 +71,7 @@ def test_a_passing_tip_is_not_closed(rig, ntfy):
 def test_no_supervisor_note_is_said_plainly_and_a_forged_one_is_only_quoted(rig, ntfy):
     rig.settings["fail_rounds_threshold"] = 100
     rounds(rig, 15)
-    rig.cycle()
+    rig.cycle(WAIT)
     assert "no supervisor analysis was recorded" in rig.get()["close_note"]
 
 
@@ -75,7 +79,7 @@ def test_the_ping_is_sent_once(rig, ntfy):
     rig.settings["fail_rounds_threshold"] = 100
     rounds(rig, 15)
     for m in range(4):
-        rig.cycle(m)
+        rig.cycle(WAIT + m)
     assert len(no_dialog(ntfy)) == 1
 
 
@@ -88,7 +92,7 @@ def test_old_tickets_start_at_zero_rounds(rig, ntfy):
     del data["review_commits"]
     path.write_text(json.dumps(data))
     assert tk.review_rounds(rig.get()) == 0
-    rig.cycle()
+    rig.cycle(WAIT)
     assert rig.get()["status"] == "claimed"
 
 
@@ -96,5 +100,5 @@ def test_the_backstop_leaves_other_tickets_alone(rig, ntfy):
     rig.settings["fail_rounds_threshold"] = 100
     other = tk.create_ticket({"type": "build", "repo": "app", "branch": "task/other", "title": "other", "body": "b"})
     rounds(rig, 15)
-    rig.cycle()
+    rig.cycle(WAIT)
     assert tk.load_ticket(other["id"])["status"] == "open"

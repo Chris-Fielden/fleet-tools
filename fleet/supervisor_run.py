@@ -8,7 +8,7 @@ Threat model. The model reads text written by agents (notes, review items, commi
 test names) and runs as the human's user. Its answer is parsed into a closed set
 (PROGRESS, LOOP, SQUIRRELS) and can change exactly two things: one note on the ticket, and
 whether a PROGRESS commit counts toward `fail_rounds_threshold`; a LOOP also starts the
-restart described under step D below. Its text is never run or parsed into a command or path.
+restart described under step D below, and SQUIRRELS the mark described under step F. Its text is never run or parsed into a command or path.
 The classification is kept in $FLEET_HOME/supervisor.json, which agents cannot write; it is
 never read back from note text, so a forged "SUPERVISOR PROGRESS" note changes nothing.
 Only the watch thread writes that file; the worker only returns a result through a queue.
@@ -25,20 +25,37 @@ It never ships, merges, edits another ticket, stops another agent, or sends text
 session that has not been scanned for secrets. A pending step is dropped if the ticket or
 its branch moved on since it was recorded, and while one is pending the lost-agent relaunch
 leaves the ticket alone (and launch.relaunch refuses a ticket whose agent is listed), so one
-ticket never gets two agents. SQUIRRELS is only recorded for now (its action is a later step).
+ticket never gets two agents.
+
+Step F, the SQUIRRELS action. A SQUIRRELS verdict marks the ticket "ready with leftovers" on
+its exact commit and files ONE leftovers ticket (proposed, so a human approves it) that holds
+the full Codex review text. Threat model: the verdict comes from a model reading agent-written
+text, so the mark is only a label on one ticket at one commit, kept in supervisor.json where
+agents cannot write; the model's word is never enough. The dispatcher first checks, from the
+stored ticket, git and the saved review files, that the tip has a Codex FAIL and a Claude PASS,
+that the Codex review text can be read, and that the change's risk (stored level, every ticket
+on the branch, and the diff) is not high: a high-risk change is refused, and so is one whose
+risk cannot be worked out. The mark never ships, merges, closes, edits another ticket or
+lowers a risk level; shipping with leftovers is step G and stays human-only. The mark is for
+one commit: when the branch tip moves it no longer stands. A marked tip is not failed by the
+backstop, the circles rule or the stopped-after-FAIL rule, but BLOCKED and STALL still apply.
 """
 
 from __future__ import annotations
 
 import json
 import queue
+import re
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import dispatch as dp
 from . import fresh
+from . import kaneo
 from . import launch as lc
+from . import review_history as rh
+from . import risk as rk
 from . import supervisor as sv
 from . import ticket as tk
 
@@ -48,6 +65,8 @@ KEPT = 50             # classified commits kept per ticket (as tk.FAIL_COMMITS_M
 RESTART_ATTEMPTS = 3  # cycles a LOOP restart is tried before it is given up
 DESIGN_MAX = 3000     # characters of the model's DESIGN CHANGE that go into the new session
 PENDING_MAX = 20      # pending restarts kept
+LEFTOVERS_PARTS = 8   # notes of at most NOTE_MAX characters that carry the part of a review the body cannot hold
+BACKSTOP_WAIT = 10 * 60   # seconds the 15-round backstop waits for the supervisor to judge a FAIL commit
 
 
 def state_path() -> Path:
@@ -55,9 +74,10 @@ def state_path() -> Path:
 
 
 def load_state(warn=lambda m: None) -> dict:
-    """{classified: {tid: {commit: CLASS}}, attempts: {tid: {commit: n}}, pending: {tid: step}};
-    bad entries are dropped. A pending step is {commit, design, reason, tries}."""
-    state = {"classified": {}, "attempts": {}, "pending": {}}
+    """{classified: {tid: {commit: CLASS}}, attempts: {tid: {commit: n}}, pending: {tid: step},
+    leftovers: {tid: mark}}; bad entries are dropped. A pending step is {commit, design, reason,
+    tries}; a leftovers mark is {commit, reason, ticket, at}."""
+    state = {"classified": {}, "attempts": {}, "pending": {}, "leftovers": {}}
     try:
         data = json.loads(state_path().read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -81,7 +101,34 @@ def load_state(warn=lambda m: None) -> dict:
             warn(f"{state_path()}: dropped a malformed pending restart for {str(tid)[:20]!r}")
         elif len(state["pending"]) < PENDING_MAX:
             state["pending"][tid] = step
+    raw = data.get("leftovers")
+    for tid, m in (raw.items() if isinstance(raw, dict) else []):
+        mark = _valid_mark(tid, m)
+        if mark is None:
+            warn(f"{state_path()}: dropped a malformed leftovers mark for {str(tid)[:20]!r}")
+        else:
+            state["leftovers"][tid] = mark
     return state
+
+
+def _valid_mark(tid, m) -> dict | None:
+    """A leftovers mark read from disk, or None. The mark lets a human merge a failed review
+    (step G), so a damaged or edited entry must never be read as one."""
+    if not (isinstance(tid, str) and tk.ID_RE.fullmatch(tid) and isinstance(m, dict)):
+        return None
+    commit, reason, other, at = m.get("commit"), m.get("reason"), m.get("ticket"), m.get("at")
+    if not (isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit)
+            and isinstance(reason, str) and 1 <= len(reason) <= sv.REASON_MAX
+            and (other is None or (isinstance(other, str) and tk.ID_RE.fullmatch(other)))
+            and isinstance(at, str) and len(at) <= 40):
+        return None
+    return {"commit": commit, "reason": reason, "ticket": other, "at": at}
+
+
+def leftovers_for(state: dict, tid: str, commit: str) -> dict | None:
+    """The ticket's leftovers mark, if it is for exactly this commit."""
+    m = state.get("leftovers", {}).get(tid)
+    return m if isinstance(m, dict) and m.get("commit") == commit else None
 
 
 def _valid_step(tid, p) -> dict | None:
@@ -120,6 +167,7 @@ def pending_ids() -> frozenset:
 
 def prune(state: dict, live: set) -> None:
     state["pending"] = {k: v for k, v in state["pending"].items() if k in live}
+    state["leftovers"] = {k: v for k, v in state.get("leftovers", {}).items() if k in live}
     for key in ("classified", "attempts"):
         state[key] = {k: v for k, v in state[key].items() if k in live}
 
@@ -210,9 +258,10 @@ def reset() -> None:
     _RUNNER = None
 
 
-def collect(state: dict, warn) -> bool:
+def collect(state: dict, warn, settings: dict | None = None) -> bool:
     """Apply finished model calls. Returns True if `state` changed. A result is dropped as
-    stale unless the ticket is still claimed with a FAIL on that same commit."""
+    stale unless the ticket is still claimed with a FAIL on that same commit. With `settings`
+    a SQUIRRELS answer is acted on (see squirrels); without it, it is only recorded."""
     changed = False
     for tid, commit, reply, _usage, error in runner().drain():
         try:
@@ -238,7 +287,168 @@ def collect(state: dict, warn) -> bool:
         if reply["classification"] == "LOOP" and tid not in state["pending"]:
             state["pending"][tid] = {"commit": commit, "design": _clip_design(reply["design"]),
                                      "reason": reply["reason"], "tries": 0}
+        elif reply["classification"] == "SQUIRRELS" and settings is not None:
+            try:
+                squirrels(t, commit, reply["reason"], state, settings, warn)
+            except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+                dp.log("SUPERVISOR_REJECTED", f"{tid} {commit[:8]} SQUIRRELS not acted on: {type(exc).__name__}")
+                warn(f"{tid}: SQUIRRELS was not acted on: {exc}")
     return changed
+
+
+def awaiting(tickets: list[dict], state: dict, now: datetime) -> frozenset:
+    """Tickets whose latest FAIL commit the supervisor has not judged yet, for at most
+    BACKSTOP_WAIT seconds after the verdict: the 15-round backstop waits for these, so SQUIRRELS
+    is judged before it (EM-8 step E's documented order). Without a time limit a supervisor
+    that cannot run would hold a ticket open for ever."""
+    out = set()
+    for t in tickets:
+        v = t.get("verdict")
+        if t["status"] != "claimed" or v is None or v["result"] != "FAIL":
+            continue
+        tid, commit = t["id"], v["commit"]
+        if commit in state["classified"].get(tid, {}):
+            continue
+        if state["attempts"].get(tid, {}).get(commit, 0) >= ATTEMPTS and not runner().busy():
+            continue
+        try:
+            at = datetime.fromisoformat(v["at"].replace("Z", "+00:00"))
+        except (ValueError, AttributeError, KeyError):
+            continue
+        if 0 <= (now - at).total_seconds() < BACKSTOP_WAIT:
+            out.add(tid)
+    return frozenset(out)
+
+
+# --- the SQUIRRELS action ---------------------------------------------------------
+
+def _branch_level(t: dict, repo: Path) -> str | None:
+    """The change's risk level as the merge gate sees it (stored level, every ticket on the
+    branch, the diff against the base branch), or None when it cannot be worked out."""
+    try:
+        base = "main"
+        try:
+            rk._git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/main")
+        except rk.RiskError:
+            base = "master"
+        rev_range = f"{base}...{t['branch']}"
+        rules = rk.rules_for_range(repo, rev_range)
+        _, diff_level = rk.classify_all(rk.changed_files(repo, rev_range), rules)
+        stored, _ = rk.level_for_branch(tk.list_tickets(), t["branch"], rules, t["repo"])
+        return rk.higher(rk.higher(stored, rk.stored_level(t, rules)), diff_level)
+    except (rk.RiskError, tk.TicketError, tk.TicketInvalid, OSError):
+        return None
+
+
+def _codex_review(wt: Path, tip: str) -> tuple[Path, str] | None:
+    """(file, full text) of the newest saved Codex review of exactly `tip`, or None. The task
+    folder is agent-writable: links are never followed out of it."""
+    found = None
+    for path in sorted(rh._review_files(wt), key=lambda p: p.stat().st_mtime):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        info = rk.parse_review(text)
+        if info["commit"] == tip and info["kind"] == "codex":
+            found = (path, text, info["verdict"])
+    if found is None or found[2] != "FAIL" or not found[1].strip():
+        return None
+    return found[0], found[1]
+
+
+def squirrels_problem(t: dict, repo: Path, wt: Path, tip: str) -> tuple[str | None, Path | None, str]:
+    """(why SQUIRRELS cannot be acted on or None, Codex review file, its text). Facts from
+    the stored ticket, git and the saved reviews: the model's word counts for nothing here."""
+    v = t.get("verdict")
+    if t["status"] != "claimed" or v is None or v["commit"] != tip or _tip(repo, t["branch"]) != tip:
+        return "the ticket is not claimed with its latest verdict on the branch tip", None, ""
+    codex, claude = v["reviews"].get("codex"), v["reviews"].get("claude")
+    if codex is None or codex["result"] != "FAIL":
+        return "there is no Codex FAIL on the tip", None, ""
+    if claude is None or claude["result"] != "PASS":
+        return "the Claude review did not pass the tip", None, ""
+    level = _branch_level(t, repo)
+    if level is None:
+        return "the risk level of the change could not be worked out", None, ""
+    if level == "high":
+        return "the change is high risk: a failed review is not marked ready with leftovers", None, ""
+    review = _codex_review(wt, tip)
+    if review is None:
+        return "the saved Codex review of the tip could not be read", None, ""
+    return None, review[0], review[1]
+
+
+def _leftovers_ticket(t: dict) -> dict | None:
+    branch = f"task/leftovers-{t['id'].lower()}"
+    return next((o for o in tk.list_tickets() if o.get("parent") == t["id"] and o.get("branch") == branch
+                 and o["status"] in tk.ACTIVE_STATUSES), None)
+
+
+def _chunks(text: str) -> list[str]:
+    return [text[i:i + tk.NOTE_MAX] for i in range(0, len(text), tk.NOTE_MAX)][:LEFTOVERS_PARTS]
+
+
+def file_leftovers(t: dict, tip: str, review_file: Path, review_text: str, warn) -> dict:
+    """The ONE leftovers ticket of `t`, holding the full Codex review text of `tip` (what the
+    body cannot hold goes into notes on it). An active one filed earlier, by this action or by
+    `review.sh --propose-leftovers`, is reused: the text goes into its notes, once per commit.
+    Proposed, not open: it must start after the merge. Repeating it files nothing new."""
+    heading = f"Full Codex review of commit {tip[:7]} (FAIL):"
+    if tk.check_secrets("review", review_text):   # never copy what looks like a secret into a ticket
+        review_text = ("(not copied: the review text looked like it held a secret; read "
+                       f"{review_file.name} in the task folder of {t['id']})")
+    existing = _leftovers_ticket(t)
+    if existing is not None:
+        if not any(n["text"].startswith(heading) for n in existing.get("notes", [])):
+            for part in _chunks(f"{heading}\n{review_text}"):
+                tk.add_note(existing["id"], part)
+        return tk.load_ticket(existing["id"])
+    head = (f"Leftovers from {t['id']} ({sv._clip(t['title'], 100)}). The supervisor judged the Codex "
+            f"review of commit {tip[:7]} below the MUST FIX bar and the Claude review passed that commit. "
+            f"{heading}\n")
+    room = tk.BODY_MAX - len(head)
+    new = tk.create_ticket({"type": "fix", "repo": t["repo"], "branch": f"task/leftovers-{t['id'].lower()}",
+                            "parent": t["id"], "priority": "normal", "title": f"Leftovers from {t['id']}"[:100],
+                            "body": head + review_text[:room]}, needs_approval=True)
+    for part in _chunks(review_text[room:]):
+        try:
+            tk.add_note(new["id"], part)
+        except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+            warn(f"{new['id']}: could not save part of the review text: {exc}")
+            break
+    return new
+
+
+def squirrels(t: dict, tip: str, reason: str, state: dict, settings: dict, warn) -> bool:
+    """Mark ticket `t` ready with leftovers at `tip` and file the leftovers ticket. Returns True
+    when it was done; a refusal (and why) is logged and noted on the ticket. Safe to repeat."""
+    tid = t["id"]
+    repo = settings["projects_dir"] / t["repo"]
+    wt = repo / ".worktrees" / t["branch"].removeprefix("task/")
+    if repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir():
+        problem, review_file, text = "the repo is not under the projects folder", None, ""
+    else:
+        problem, review_file, text = squirrels_problem(t, repo, wt, tip)
+    if problem is not None:
+        dp.log("SUPERVISOR_REJECTED", f"{tid} {tip[:8]} SQUIRRELS not acted on: {problem}")
+        try:
+            tk.add_note(tid, f"SUPERVISOR: SQUIRRELS was not acted on for {tip[:7]}: {problem}.")
+        except (tk.TicketError, tk.TicketInvalid, OSError):
+            pass
+        return False
+    new = file_leftovers(t, tip, review_file, text, warn)
+    kaneo.mirror_quietly(new, warn)
+    state.setdefault("leftovers", {})[tid] = {"commit": tip, "reason": reason, "ticket": new["id"],
+                                              "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    save_state(state)   # the mark is on disk before anything is said about it
+    dp.log("LEFTOVERS", f"{tid} {tip[:8]} marked ready with leftovers; review text in {new['id']}")
+    try:
+        tk.add_note(tid, f"SUPERVISOR: ready with leftovers ({tip[:7]}): {reason}. The full Codex review is "
+                         f"in {new['id']}. The mark covers this commit only; it does not ship or merge anything."[:tk.NOTE_MAX])
+    except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+        warn(f"{tid}: could not save the leftovers note: {exc}")
+    return True
 
 
 def start_next(tickets: list[dict], state: dict, settings: dict, now: datetime, busy_ids, warn) -> bool:
