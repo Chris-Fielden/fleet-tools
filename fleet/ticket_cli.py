@@ -63,7 +63,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("fix-titles", help="retitle open tickets squashed from multi-line text (humans only)")
 
-    close = sub.add_parser("close", help="close an open, claimed or in-review ticket (humans only)")
+    close = sub.add_parser("close", help="close an open, claimed or in-review ticket; --done/--cancelled also re-close a failed one, with --note (humans only)")
     close.add_argument("id", type=tk.normalize_id)
     outcome = close.add_mutually_exclusive_group(required=True)
     for name in tk.CLOSE_OUTCOMES:

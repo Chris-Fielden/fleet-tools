@@ -830,7 +830,8 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
 
 
 def close_ticket(ticket_id: str, outcome: str, note: str | None = None) -> dict:
-    """Close an open, claimed or in-review ticket as done, failed or cancelled. Humans only."""
+    """Close an open, claimed or in-review ticket as done, failed or cancelled. Humans only.
+    A failed ticket can be closed again, but only as done or cancelled and only with a note."""
     creator = current_creator()
     if creator != "human":
         raise TicketError(f"only a human can close tickets (running as {creator})")
@@ -847,8 +848,12 @@ def close_ticket(ticket_id: str, outcome: str, note: str | None = None) -> dict:
             errors += check_secrets("close note", note)
         if errors:
             raise TicketInvalid(errors)
-    return set_status(ticket_id, CLOSE_OUTCOMES[outcome],
-                      allowed_from=("open", "claimed", "review"), close_note=note)
+    allowed = ("open", "claimed", "review")
+    if outcome != "failed":
+        allowed += ("failed",)
+        if note is None and load_ticket(ticket_id)["status"] == "failed":
+            raise TicketInvalid([f"--note is required to re-close failed {ticket_id} as {outcome}"])
+    return set_status(ticket_id, CLOSE_OUTCOMES[outcome], allowed_from=allowed, close_note=note)
 
 
 def raise_risk(ticket_id: str, level: str) -> dict:
