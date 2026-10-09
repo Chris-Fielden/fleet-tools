@@ -32,7 +32,7 @@ FIELDS = (
 )
 # Optional fields: may be absent from a stored ticket.
 OPTIONAL_FIELDS = ("close_note", "base_commit", "seq", "priority", "risk", "notes", "started_at",
-                   "oncall", "oncall_base", "fail_commits", "investigation")
+                   "oncall", "oncall_base", "fail_commits", "investigation", "review_commits")
 # oncall: true on the fix ticket the dispatcher files for the on-call agent.
 # oncall_base: the failed branch's tip when the ticket failed; the on-call branch
 # starts from exactly that commit, however long it waits for the on-call slot.
@@ -40,7 +40,10 @@ OPTIONAL_FIELDS = ("close_note", "base_commit", "seq", "priority", "risk", "note
 # ticket whose findings must hold a design before it is launched. A build ticket uses its parent.
 # fail_commits: every commit that got a recorded FAIL, oldest first (a verdict
 # only keeps the latest, and "going in circles" counts rounds).
+# review_commits: every commit that got a recorded verdict, PASS or FAIL, oldest first
+# (review rounds). Tickets already in flight when it was added start with none.
 CLOSE_NOTE_MAX = 500
+REVIEW_COMMITS_KEPT = 100   # review_commits keeps the newest this many
 FAIL_COMMITS_MAX = 50   # fail_commits keeps the newest this many (the going-in-circles threshold is far lower)
 NOTE_MAX = 4000
 REVIEW_KINDS = ("codex", "claude")
@@ -319,6 +322,11 @@ def validate_stored(data) -> list[str]:
     if "fail_commits" in data and not (
             isinstance(fails, list) and all(_is_str(c) and re.fullmatch(r"[0-9a-f]{40}", c) for c in fails)):
         errors.append("fail_commits must be a list of full commit ids")
+    rounds = data.get("review_commits")
+    if "review_commits" in data and not (
+            isinstance(rounds, list) and len(set(rounds)) == len(rounds)
+            and all(_is_str(c) and re.fullmatch(r"[0-9a-f]{40}", c) for c in rounds)):
+        errors.append("review_commits must be a list of unique full commit ids")
     inv = data.get("investigation")
     if "investigation" in data and not (_is_str(inv) and ID_RE.fullmatch(inv) and data["type"] == "fix"):
         errors.append("investigation must be a ticket id, on a fix ticket")
@@ -823,10 +831,17 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
                             "commit": commit, "reviewer": reviewer, "at": now, "reviews": reviews}
             if failed and commit not in t.get("fail_commits", []):
                 t["fail_commits"] = (t.get("fail_commits", []) + [commit])[-FAIL_COMMITS_MAX:]
+            if commit not in t.get("review_commits", []):
+                t["review_commits"] = (t.get("review_commits", []) + [commit])[-REVIEW_COMMITS_KEPT:]
             t["updated_at"] = now
             _write_atomic(_ticket_path(t["id"]), t)
             changed.append(t)
     return changed
+
+
+def review_rounds(t: dict) -> int:
+    """How many commits of the ticket have been reviewed (0 for a ticket that predates the field)."""
+    return len(t.get("review_commits", []))
 
 
 def close_ticket(ticket_id: str, outcome: str, note: str | None = None) -> dict:
