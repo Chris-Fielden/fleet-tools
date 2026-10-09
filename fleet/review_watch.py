@@ -304,6 +304,8 @@ def _dialog_ping(t: dict, agent: dict, state: dict, now: datetime) -> None:
     tab = dialog.sanitize(agent["tab_id"])[:40] if isinstance(agent.get("tab_id"), str) else ""
     tab = tab or "?"
     flat = dialog.one_line(tail)
+    if flat and tk.check_secrets("agent dialog", flat):   # fails closed: keep only the ids and the label
+        flat = ""
     dp.log("AGENT_DIALOG", f"{tid} tab={tab} {label}: {flat}")
     notify.notify_quietly(t, "dialog", detail="\x1f".join((label, tab, flat)))
 

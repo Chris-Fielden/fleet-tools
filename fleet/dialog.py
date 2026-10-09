@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import subprocess
+import threading
 import unicodedata
 
 READ_TIMEOUT = 10        # seconds herdr gets to print the pane
@@ -70,19 +71,24 @@ def read_pane(pane_id) -> str:
     try:
         cmd = shlex.split(os.environ.get("FLEET_HERDR", "herdr")) + [
             "pane", "read", pane_id, "--source", "recent", "--lines", str(READ_LINES), "--format", "text"]
-        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                              stdin=subprocess.DEVNULL) as proc:
-            try:
-                data, _ = proc.communicate(timeout=READ_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
-                return ""
-            if proc.returncode != 0:
-                return ""
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+        timer = threading.Timer(READ_TIMEOUT, proc.kill)
+        timer.start()
+        try:
+            data = proc.stdout.read(READ_MAX_BYTES + 1)   # bounded: never buffers more than the cap
+            if len(data) > READ_MAX_BYTES:
+                proc.kill()   # more than the cap: the rest is not wanted
+            proc.wait()
+        finally:
+            timer.cancel()
+            proc.stdout.close()
+        if len(data) > READ_MAX_BYTES:
+            data = data[:READ_MAX_BYTES]
+        elif proc.returncode != 0:
+            return ""   # also when the timer killed it
     except (OSError, ValueError, subprocess.SubprocessError):
         return ""
-    return data[-READ_MAX_BYTES:].decode("utf-8", errors="replace")
+    return data.decode("utf-8", errors="replace")
 
 
 def inspect(pane_id) -> tuple[str, str]:

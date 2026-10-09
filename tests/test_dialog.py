@@ -141,7 +141,8 @@ def test_a_secret_in_the_pane_never_reaches_the_phone(rig, ntfy, herdr_log, leak
     rig.set_agent("blocked", pane_id="w1:p3", tab_id="w1:t3")
     rig.cycle(0)
     assert len(ntfy.requests) == 1
-    assert key not in json.dumps(ntfy.requests[0]["body"]) and ntfy.requests[0]["body"]["message"] == "tab w1:t3"
+    assert key not in json.dumps(ntfy.requests[0]["body"])
+    assert key not in dp.log_path().read_text() and "tab=w1:t3 generic_menu:" in dialog_lines()[0] and ntfy.requests[0]["body"]["message"] == "tab w1:t3"
 
 
 def test_old_state_files_without_dialog_pinged_still_load(rig):
