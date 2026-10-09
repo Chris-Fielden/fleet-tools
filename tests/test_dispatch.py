@@ -95,13 +95,48 @@ def test_close_human_only(monkeypatch, capsys, var):
     assert tk.load_ticket(t["id"])["status"] == "open"
 
 
-@pytest.mark.parametrize("status", ["done", "failed", "cancelled"])
+@pytest.mark.parametrize("status", ["done", "cancelled"])
 def test_close_refused_from_other_statuses(status, capsys):
     t = mk()
     tk.set_status(t["id"], status, allowed_from=("open",))
     assert ticket_main(["close", t["id"], "--done"]) == 1
     assert "can only change from" in capsys.readouterr().err
     assert tk.load_ticket(t["id"])["status"] == status
+
+
+@pytest.mark.parametrize("flag, status", [("--done", "done"), ("--cancelled", "cancelled")])
+def test_failed_ticket_can_be_reclosed(flag, status):
+    t = mk()
+    tk.set_status(t["id"], "failed", allowed_from=("open",), close_note="old reason")
+    assert ticket_main(["close", t["id"], flag, "--note", "shipped by on-call"]) == 0
+    got = tk.load_ticket(t["id"])
+    assert got["status"] == status and got["close_note"] == "shipped by on-call"
+
+
+@pytest.mark.parametrize("flag", ["--done", "--cancelled"])
+def test_reclosing_failed_needs_a_note(flag, capsys):
+    t = mk()
+    tk.set_status(t["id"], "failed", allowed_from=("open",), close_note="old reason")
+    assert ticket_main(["close", t["id"], flag]) == 2
+    assert "--note is required" in capsys.readouterr().err
+    got = tk.load_ticket(t["id"])
+    assert got["status"] == "failed" and got["close_note"] == "old reason"
+
+
+def test_failed_cannot_be_closed_as_failed(capsys):
+    t = mk()
+    tk.set_status(t["id"], "failed", allowed_from=("open",))
+    assert ticket_main(["close", t["id"], "--failed", "--note", "x"]) == 1
+    assert "can only change from" in capsys.readouterr().err
+
+
+def test_reclosing_failed_human_only(monkeypatch, capsys):
+    t = mk()
+    tk.set_status(t["id"], "failed", allowed_from=("open",))
+    monkeypatch.setenv("CLAUDECODE", "1")
+    assert ticket_main(["close", t["id"], "--done", "--note", "x"]) == 1
+    assert "only a human" in capsys.readouterr().err
+    assert tk.load_ticket(t["id"])["status"] == "failed"
 
 
 def test_close_refused_from_proposed(monkeypatch, capsys):

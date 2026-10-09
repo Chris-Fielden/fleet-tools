@@ -107,6 +107,18 @@ def test_status_title_and_body_changes_update_the_same_card(kaneo):
     assert task["description"].startswith("New body\n\n```")
 
 
+@pytest.mark.parametrize("flag, column", [("--done", "done"), ("--cancelled", "done")])
+def test_reclosing_a_failed_ticket_moves_its_card(kaneo, flag, column):
+    tid = new_ticket()
+    edit_ticket(tid, status="failed", close_note="gave up")
+    run("sync")
+    failed_slug = only_task(kaneo)["status"]
+    r = run("close", tid, flag, "--note", "shipped by on-call")
+    assert r.returncode == 0, r.stderr
+    assert only_task(kaneo)["status"] != failed_slug
+    assert run("sync").stdout.count("unchanged") == 1   # the close already mirrored it
+
+
 def test_card_deleted_in_kaneo_is_recreated(kaneo):
     tid = new_ticket()
     kaneo.tasks.clear()
