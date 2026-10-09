@@ -20,6 +20,7 @@ from pathlib import Path
 from . import dispatch as dp
 from . import governor
 from . import kaneo
+from . import permissions
 from . import ticket as tk
 from . import tracker as tr
 
@@ -541,6 +542,7 @@ def guard_hook_settings() -> dict:
     bin_dir = HOOKS_DIR.parent.parent / "bin"
     statusline = bin_dir / "fleet-statusline"
     return {"hooks": {"PreToolUse": pre},
+            "permissions": permissions.research_permissions(),
             "statusLine": {"type": "command", "command": shlex.join(["python3", str(statusline)])}}
 
 
