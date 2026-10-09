@@ -41,7 +41,8 @@ def matches(pattern, command):
 def approx_covered(allow, command):
     """APPROXIMATION of Claude Code's rule (every subcommand must match an allow rule).
     It splits on every separator, even inside quotes, and does not parse $(...) or backticks,
-    so it only shows the rules do not trivially cover human-only commands, not real behaviour."""
+    so it only shows the rules do not trivially cover human-only commands, not real behaviour.
+    It also ignores word boundaries on `*`, quoting and redirections; do not treat it as proof."""
     parts = [p.strip() for p in SEPARATORS.split(command) if p.strip()]
     return bool(parts) and all(any(matches(r, p) for r in rules(allow)) for p in parts)
 
@@ -96,7 +97,7 @@ def test_approximation_limits_are_known(tmp_path):
     assert bash(hostile, tmp_path)
 
 
-def test_hooks_block_and_hook_files_are_wired():
+def test_research_hooks_mirror_repo_matchers():
     got = guard_hook_settings()["hooks"]["PreToolUse"]
     mine = SETTINGS["hooks"]["PreToolUse"]
     assert [g["matcher"] for g in got] == [g["matcher"] for g in mine]
