@@ -168,13 +168,13 @@ def _stop_agents(now: datetime, state: dict, emit, warn) -> bool:
     except lc.LaunchError as exc:
         warn(f"usage governor: cannot ask herdr which agents are running ({exc}); will try again")
         return False
-    by_id = {t["id"].lower(): t for t in tk.list_tickets() if t["status"] in ("claimed", "proposed", "open")}
+    all_tickets = {t["id"].lower(): t for t in tk.list_tickets()}
     ok = True
     deadline = time.monotonic() + STOP_BUDGET_SECONDS   # many agents must not hold up the cycle for minutes
     for a in agents:
         name = a["name"]
-        if name in state["stopped_agents"]:
-            continue
+        if name in state["stopped_agents"] and not state["stopped"]:
+            continue   # (once stopped, every agent still working is interrupted again, each cycle)
         try:
             # Let the current tool call finish: wait (bounded) for the agent to stop working
             # or to sit at a prompt, then interrupt whatever it is still doing.
@@ -188,8 +188,11 @@ def _stop_agents(now: datetime, state: dict, emit, warn) -> bool:
             warn(f"usage governor: could not interrupt {name} ({exc}); will try again")
             ok = False
             continue
-        state["stopped_agents"].append(name)
-        t = by_id.get(name)
+        if name not in state["stopped_agents"]:
+            state["stopped_agents"].append(name)
+        t = all_tickets.get(name)
+        if t is not None and t["status"] not in ("claimed", "proposed", "open"):
+            continue   # a ticket on its way to review: interrupted, but nothing to resume
         dp.log("AGENT_STOPPED", f"{name} interrupted at weekly {state['pct']:g}%")
         emit(f"{name}  stopped: weekly usage {state['pct']:g}% (resumes after the reset)")
         if t is None:   # a prep or reconcile agent: its job is held, not finished
@@ -211,13 +214,19 @@ def _resume_held(settings: dict, state: dict, emit, warn) -> None:
     except lc.LaunchError as exc:
         warn(f"usage governor: cannot ask herdr which agents are running ({exc}); will resume next cycle")
         return
+    jobs_kept = []
     for name in state["held_jobs"]:   # prep / reconcile: still in their tab, so just tell them to go on
-        if name in listed:
-            with contextlib.suppress(lc.LaunchError):
-                lc.herdr("agent", "prompt", name, "Weekly usage has reset; carry on with your job.")
-                emit(f"{name}  resumed after the usage reset")
-                dp.log("USAGE_RESUMED", f"{name} resumed after the weekly reset")
-    state["held_jobs"] = []
+        if name not in listed:
+            continue
+        try:
+            lc.herdr("agent", "prompt", name, "Weekly usage has reset; carry on with your job.")
+        except lc.LaunchError as exc:
+            warn(f"usage governor: {name}: {exc}; will try again")
+            jobs_kept.append(name)
+            continue
+        emit(f"{name}  resumed after the usage reset")
+        dp.log("USAGE_RESUMED", f"{name} resumed after the weekly reset")
+    state["held_jobs"] = jobs_kept
     keep = []
     for tid in state["held"]:
         try:
@@ -278,8 +287,9 @@ def evaluate(settings: dict, now: datetime, emit, warn) -> dict:
             dp.log("LAUNCH_PAUSED", f"weekly usage {used:g}% reached the limit of {pause if pause and used >= pause else hard}%; "
                                     f"no agent will be launched until the reset ({state['reset_at'] or 'time unknown'})")
             emit(f"usage governor: weekly usage {used:g}%, launches paused")
-        if stopping and not state["stopped"]:
-            if _stop_agents(now, state, emit, warn):
+        if stopping:
+            was_stopped = state["stopped"]
+            if _stop_agents(now, state, emit, warn) and not was_stopped:
                 state["stopped"] = True
                 dp.log("USAGE_STOP", f"weekly usage {used:g}% reached {hard}%; running agents stopped, "
                                      f"{len(state['held'])} ticket(s) held until the reset")
