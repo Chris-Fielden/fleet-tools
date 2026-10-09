@@ -60,8 +60,11 @@ def test_every_rule_is_narrow_bash():
         assert not r.startswith(("Agent", "Monitor"))
     assert set(pm.RESEARCH_ALLOW) <= set(pm.ALLOW)
     assert "Bash(git push *)" in SETTINGS["permissions"]["deny"]
-    for flag in ("--no-verify", "--amend"):
-        assert any(flag in d for d in SETTINGS["permissions"]["deny"]), flag
+    denies = rules(SETTINGS["permissions"]["deny"])
+    for command in ('git commit -m "x" --no-verify', 'git commit -m "x" --no-verify -a',
+                    'git commit -m "x" --amend', 'git commit -m "x" --amend --no-edit',
+                    'git commit -m "x" -n', 'git commit -m "x" -n -a'):
+        assert any(matches(d, command) for d in denies), command
 
 
 @pytest.mark.parametrize("command", HUMAN_ONLY)

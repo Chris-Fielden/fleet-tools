@@ -75,6 +75,7 @@
       "Bash(git push)",
       "Bash(git commit * --no-verify*)",
       "Bash(git commit * -n *)",
+      "Bash(git commit * -n)",
       "Bash(git commit * --amend*)"
     ]
   }

@@ -25,6 +25,7 @@ DENY = [
     # `git commit -m *` also matches later flags; these keep commits plain and reviewable.
     "Bash(git commit * --no-verify*)",
     "Bash(git commit * -n *)",
+    "Bash(git commit * -n)",
     "Bash(git commit * --amend*)",
 ]
 
