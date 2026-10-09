@@ -56,10 +56,12 @@ def test_every_rule_is_narrow_bash():
         inner = rules([r])[0]
         assert inner, r
         assert inner not in ("*", "") and not inner.startswith("*")
-        assert not re.match(r"(python|node|bash|sh|env|npm|npx|pip|uv|yarn|pnpm)", inner), r
+        assert not re.match(r"(?:\S*/)?(python|node|bash|sh|env|npm|npx|pip|uv|yarn|pnpm)\d*\b", inner), r
         assert not r.startswith(("Agent", "Monitor"))
     assert set(pm.RESEARCH_ALLOW) <= set(pm.ALLOW)
     assert "Bash(git push *)" in SETTINGS["permissions"]["deny"]
+    for flag in ("--no-verify", "--amend"):
+        assert any(flag in d for d in SETTINGS["permissions"]["deny"]), flag
 
 
 @pytest.mark.parametrize("command", HUMAN_ONLY)

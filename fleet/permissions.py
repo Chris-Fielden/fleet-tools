@@ -22,6 +22,10 @@ ALLOW = [
 DENY = [
     "Bash(git push *)",
     "Bash(git push)",
+    # `git commit -m *` also matches later flags; these keep commits plain and reviewable.
+    "Bash(git commit * --no-verify*)",
+    "Bash(git commit * -n *)",
+    "Bash(git commit * --amend*)",
 ]
 
 # Research folders (not a repo, only hooks + statusLine today): ticket access only.
