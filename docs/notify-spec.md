@@ -20,7 +20,7 @@ Only on a real transition, never on a re-run or a note:
 | `review_unrecorded` | A review for the current tip is saved in `.reviews/` but is not on the ticket (`ticket review-result` failed or was never run). |
 | `blocked`, `stalled` | No longer sent: a blocked (20 min) or stalled (45 min) agent is a true failure (see `oncall`). The names stay valid in `priorities`. |
 | `oncall` | The dispatcher closed a ticket as failed and filed an on-call ticket: "<ID> failed, on-call <OC ID> is on it". Low. |
-| `needs_human` | A failed ticket the on-call agent will not (or could not) fix: "<ID> needs a human, see notes". Low. |
+| `needs_human` | A failed ticket the on-call agent will not (or could not) fix, or one closed by the 15-review-round backstop: "<ID> needs a human, see notes". Low. |
 
 The last four (`ship`, `review_unrecorded`, `oncall`, `needs_human`) come from `dispatch --watch` (see `fleet/review_watch.py`). They
 are decided from the stored ticket (verdict, notes), git, the review files, herdr

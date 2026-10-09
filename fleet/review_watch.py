@@ -59,6 +59,9 @@ STALL_STATES = ("idle", "done", "blocked", "waiting")   # herdr states in which 
 STOPPED_AFTER = 5 * 60    # seconds an agent sits idle on a failed tip before the ticket fails
 UNRECORDED_GRACE = 2 * 60  # seconds review.sh gets to record a review it just saved
 LOG_TAIL = 256 * 1024
+BACKSTOP_ROUNDS = 15      # review rounds (commits with a recorded review) after which a still-FAILing ticket is closed
+BACKSTOP_REASON = "review-round backstop"   # starts the reason of a backstop failure
+ANALYSIS_MAX = 600        # characters of the supervisor's latest note kept in the backstop's close note
 MUST_FIX_PART = 500       # characters of a review's MUST FIX section per part of the on-call body
 MUST_FIX_PARTS = 6        # parts kept per review; the context before the spec is clipped to leave the spec whole
 # Dispatcher log kinds that show a ticket's work moving. (RECONCILE_SKIP and
@@ -278,6 +281,16 @@ def fail_rounds(t: dict, ignored: frozenset = frozenset()) -> int:
     return len(commits - ignored)
 
 
+def latest_analysis(t: dict) -> str:
+    """The supervisor's latest note on the ticket (its text only, clipped), for the backstop's
+    close note. Any author can write a note that looks like one, so this is quoted as text and
+    never acted on."""
+    for n in reversed(t.get("notes", [])):
+        if n["text"].startswith("SUPERVISOR "):
+            return _clip(" ".join(n["text"].split()), ANALYSIS_MAX)
+    return "no supervisor analysis was recorded"
+
+
 def _failed_reviewers(t: dict) -> str:
     v = t["verdict"]
     if v is None or v["result"] != "FAIL":
@@ -321,9 +334,15 @@ def _failure_reason(t: dict, repo: Path, tip: str, agent: dict | None, state: di
     failed_now = v is not None and v["result"] == "FAIL"
     agent_state = agent.get("agent_status") if agent else None
     reason = None
+    # 0. The backstop: PROGRESS rounds do not count below and a LOOP restarts the session, so
+    # this is what ends a ticket that would otherwise review for ever, whatever the supervisor
+    # said. (EM-8 step F's SQUIRRELS action is judged before this: a ticket it marks leaves the loop.)
+    total = tk.review_rounds(t)
+    if failed_now and total >= BACKSTOP_ROUNDS:
+        reason = f"{BACKSTOP_REASON}: {total} review rounds without a pass (limit {BACKSTOP_ROUNDS})"
     # 1. Going in circles.
     rounds = fail_rounds(t, progress)
-    if failed_now and rounds >= fail_rounds_threshold:
+    if reason is None and failed_now and rounds >= fail_rounds_threshold:
         reason = f"going in circles: {rounds} FAIL verdicts on different commits"
     # 2. The agent stopped without fixing the failed commit.
     if failed_now and v["commit"] == tip and agent_state in ("idle", "done"):
@@ -507,17 +526,21 @@ def _record_path(ticket_id: str) -> Path:
     return recovery_dir() / f"{ticket_id}.json"
 
 
-def write_recovery(t: dict, reason: str, commit: str) -> None:
+def write_recovery(t: dict, reason: str, commit: str, final: str | None = None) -> None:
     """Record, atomically, that this ticket has truly failed. This is the FIRST thing
     done; everything else (close, on-call ticket, notes, ping) is driven from the
-    record by `process_recoveries`. One record per ticket; raises OSError."""
+    record by `process_recoveries`. One record per ticket; raises OSError. `final` (the review-rounds backstop: the
+    supervisor's latest analysis) means no on-call ticket: a human takes it from here."""
     path = _record_path(t["id"])
     tk.refuse_real_store_in_tests(path)
     if path.exists():
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    tk._write_atomic(path, {"id": t["id"], "commit": commit, "reason": reason, "reviewer": _failed_reviewers(t),
-                            "rounds": fail_rounds(t), "at": _stamp(datetime.now(timezone.utc))})
+    rec = {"id": t["id"], "commit": commit, "reason": reason, "reviewer": _failed_reviewers(t),
+           "rounds": fail_rounds(t), "at": _stamp(datetime.now(timezone.utc))}
+    if final is not None:
+        rec["final"] = final
+    tk._write_atomic(path, rec)
 
 
 def pending_recoveries(warn) -> list[dict]:
@@ -531,7 +554,8 @@ def pending_recoveries(warn) -> list[dict]:
             ok = (isinstance(rec, dict) and isinstance(rec.get("id"), str) and path.stem == rec["id"]
                   and tk.ID_RE.fullmatch(rec["id"]) and all(isinstance(rec.get(k), str)
                                                           for k in ("commit", "reason", "reviewer", "at"))
-                  and isinstance(rec.get("rounds"), int))
+                  and isinstance(rec.get("rounds"), int)
+                  and (rec.get("final") is None or isinstance(rec["final"], str)))
         except (OSError, ValueError):
             ok = False
         if ok:
@@ -573,8 +597,10 @@ def _recover(rec: dict, settings: dict, state: dict, now: datetime, emit, warn) 
         return
     t = tk.load_ticket(tid)
     detail = f"{rec['reason']}; failed by: {rec['reviewer']}; FAIL rounds: {rec['rounds']}"
-    if tk.check_secrets("close note", detail):   # the reviewer name is free text: scan it like any note
-        detail = f"{rec['reason']}; FAIL rounds: {rec['rounds']} (reviewer name withheld)"
+    if rec.get("final") is not None:
+        detail += f"; supervisor: {rec['final']}"
+    if tk.check_secrets("close note", detail):   # the reviewer name and analysis are free text: scan like any note
+        detail = f"{rec['reason']}; FAIL rounds: {rec['rounds']} (reviewer name and analysis withheld)"
     # 1. close it as failed (its card moves to Failed)
     if t["status"] in ("claimed", "open"):
         t = tk.set_status(tid, "failed", allowed_from=("claimed", "open"),
@@ -594,6 +620,10 @@ def _recover(rec: dict, settings: dict, state: dict, now: datetime, emit, warn) 
         _note_once(tid, "Diagnosis:", diagnosis, warn)
         _note_once(original, "Diagnosis:", diagnosis, warn)
         ping = (original, "needs_human", None)
+    elif rec.get("final") is not None:   # the review-rounds backstop: no on-call attempt
+        _note_once(tid, "Needs a human:", f"Needs a human: {detail}.", warn)
+        lc._safe_log("NEEDS_HUMAN", tid)
+        ping = (tid, "needs_human", None)
     else:
         oc, why = _oncall_for(t, rec, detail, repo, settings, now, warn)
         if oc is not None:
@@ -694,7 +724,8 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
     reason = _failure_reason(t, repo, tip, agent, state, now, settings["fail_rounds_threshold"],
                             (progress or {}).get(t["id"], frozenset()))
     if reason:
-        write_recovery(t, reason, tip)   # first: everything else is driven from the record
+        final = latest_analysis(t) if reason.startswith(BACKSTOP_REASON) else None
+        write_recovery(t, reason, tip, final)   # first: everything else is driven from the record
 
 
 def _flag_stuck_oncall(settings: dict, warn) -> None:

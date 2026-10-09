@@ -489,3 +489,27 @@ claimed, get a note and are held (never judged failed or lost); one high ping (`
 sent and `AGENT_STOPPED` / `USAGE_STOP` logged. After the weekly reset time (or a fresh figure
 under the limit) `LAUNCH_RESUMED` is logged and held tickets get a new agent (`USAGE_RESUMED`).
 State: `$FLEET_HOME/governor.json`. `fleet status` shows a `usage` row.
+
+### The 15-round backstop (EM-8 step E)
+
+PROGRESS rounds do not count toward `fail_rounds_threshold` and a LOOP restarts the
+session, so a ticket could otherwise review for ever. When a claimed ticket's latest
+verdict is a FAIL and `review_commits` holds 15 or more commits (`BACKSTOP_ROUNDS` in
+`fleet/review_watch.py`; every reviewed commit counts, whatever the supervisor said), it
+truly fails with reason "review-round backstop". The recovery record carries the
+supervisor's latest note (`final`, clipped to 600 characters, quoted as text and never
+acted on; "no supervisor analysis was recorded" if there is none). Recovery then closes
+the ticket as failed with that analysis in the close note, files NO on-call ticket, adds a
+"Needs a human:" note and sends one low `needs_human` ping (queued once, as for any failure).
+`fail_rounds_threshold` still applies to counted rounds, as before.
+
+- **Threat model.** The backstop only closes this one ticket as failed and pings once. It
+  never ships, merges, deletes branches, stops agents or touches other tickets. Its only
+  input from agent-writable text is the supervisor note, which lands in a note and a
+  close note after the usual secret scan.
+- **Order with SQUIRRELS (step F).** SQUIRRELS is judged first: a ticket the SQUIRRELS
+  action marks for the human (leftovers) leaves the review loop and is not failed by the
+  backstop. The backstop is the last word for every ticket still FAILing at 15 rounds, so
+  F should act before the failure check runs and must not depend on rounds below 15.
+- **Tickets in flight.** `review_commits` starts at 0 for a ticket that predates it
+  (BD-67), so an old ticket needs 15 new rounds and is never failed on arrival.
