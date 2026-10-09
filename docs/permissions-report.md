@@ -22,10 +22,10 @@ Evidence is a ticket or note, not session-log counts (agents may not read sessio
 | Rule | Evidence | Why it is safe enough |
 |---|---|---|
 | `git add -A` | EM-11 spec: agents must commit before stopping (CLAUDE.md rule 2) | Exact; stages only. The guard blocks writes from the main checkout. |
-| `git commit -m *` | same | Only `-m`; commits locally. A message with `;`, `&`, `\|`, newline or `$(...)` is split or unmatched and prompts. |
+| `git commit -m *` | same | `-m` first, any later flags (e.g. `--amend`) also match; commits locally. A message with `;`, `&`, `\|`, newline or `$(...)` is split or unmatched and prompts. |
 | `scripts/check.sh` | EM-11 spec, CLAUDE.md rule 2 | Exact; the project's own check. |
 | `scripts/review.sh` | EM-11 spec, CLAUDE.md rule 3 | Exact; the mandated reviewer call (sends the branch diff to the other model, as the rulebook requires). |
-| `ticket note *` | EM-11 spec; ID-11 finding: research agents stall on it | Own-ticket note. Notes with `;`, `&`, `\|`, newline or `$(...)` prompt (documented, not fixed). |
+| `ticket note *` | EM-11 spec; ID-11 finding: research agents stall on it | Writes a note on any ticket ID (not tied to the agent's own). Notes with `;`, `&`, `\|`, newline or `$(...)` prompt (documented, not fixed). |
 | `ticket show *` | same | Read-only. |
 
 Research folders get only the two `ticket` rules.
@@ -33,7 +33,7 @@ Research folders get only the two `ticket` rules.
 ## Removed from the old list
 
 - `cat`, `head`, `tail`, `ls`, `wc`, `pwd`, `git status|diff|log|show`: the built-in read-only set already runs them; `git diff|log|show *` also accept `--output=FILE`.
-- `python3 -m pytest *`: runs repo code and accepts `-p` plugins; `scripts/check.sh` covers it.
+- `python3 -m pytest *`: runs repo code and accepts `-p` plugins; `scripts/check.sh` covers it. Trade-off: a single-file pytest run now prompts.
 - `scripts/ask-codex.sh *`: sends free text to an external model (network egress outside the allowlist).
 - `git add *`, `git commit *`, `scripts/check.sh *`, `scripts/review.sh *`: wider than the evidence (any flags or arguments).
 
