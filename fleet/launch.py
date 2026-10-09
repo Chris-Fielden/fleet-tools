@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import dispatch as dp
+from . import governor
 from . import kaneo
 from . import ticket as tk
 from . import tracker as tr
@@ -355,6 +356,9 @@ def start_agent(d: dp.Decision, folder: Path, workspace: str, warn, projects_dir
     fails after the tab exists, only that tab is closed."""
     ticket_id = d.ticket["id"]
     name = ticket_id.lower()
+    paused = governor.refusal()   # the backstop: every agent the fleet starts comes through here
+    if paused:
+        raise LaunchError(paused)
     try:
         created = herdr("tab", "create", "--workspace", workspace, "--cwd", str(folder),
                         "--label", ticket_id, "--no-focus")
@@ -396,6 +400,9 @@ def main_tip(repo: Path) -> str | None:
 def launch(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
     """Claim and launch one eligible ticket. Returns (exit code, message)."""
     t = d.ticket
+    paused = governor.refusal(settings)
+    if paused:   # before the claim: nothing to roll back
+        return 0, f"{t['id']}  not launched: {paused}"
     base = main_tip(d.repo_path)
     if base is None:
         return 1, f"cannot read the current commit of {d.repo_path}"
@@ -459,6 +466,9 @@ def launch_oncall(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
     folder and branch that start from the failed branch's tip (`d.base`). It
     uses its own slot, so no daily launch reservation is made."""
     t = d.ticket
+    paused = governor.refusal(settings)
+    if paused:   # no claim, no failed-attempt note: the ticket just waits
+        return 0, f"{t['id']}  on-call not launched: {paused}"
     main = main_tip(d.repo_path)
     if main is None or d.base is None:
         reason = f"cannot read the current commit of {d.repo_path}"
@@ -576,6 +586,9 @@ def launch_research(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
     On a failed launch the ticket goes back to the status it had."""
     t = d.ticket
     before = t["status"]
+    paused = governor.refusal(settings)
+    if paused:
+        return 0, f"{t['id']}  not launched: {paused}"
     problem = dp.research_problem(settings)
     if problem:
         return 1, f"{t['id']}  not launched: {problem}"
@@ -847,6 +860,11 @@ def relaunch(t: dict, settings: dict, warn, prompt: str | None = None, why: str 
     """Start a new agent for a claimed ticket in its existing task folder, with
     the standard prompt or the given one. The ticket stays claimed whether or
     not this works. `why` is added to the RELAUNCHED log line."""
+    paused = governor.refusal(settings)
+    if paused:   # the ticket stays claimed; it is held and gets its agent after the reset
+        governor.defer(t["id"])
+        _safe_log("RELAUNCH_DEFERRED", f"{t['id']} {paused}")
+        return 0, f"{t['id']}  relaunch deferred: {paused}"
     repo = settings["projects_dir"] / t["repo"]
     name = t["branch"].removeprefix("task/")
     d = dp.Decision(ticket=t, name=name, repo_path=repo, agent=t["assignee"],

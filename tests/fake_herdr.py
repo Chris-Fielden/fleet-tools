@@ -18,6 +18,16 @@ with open(os.environ["FAKE_HERDR_LOG"], "a") as fh:
     fh.write(json.dumps(args) + "\n")
 
 cmd = " ".join(args[:2])
+if cmd in ("agent wait", "agent send-keys"):   # the usage governor's safe stop; Escape stops the agent
+    wf = os.environ.get("FAKE_HERDR_WORLD")
+    if cmd == "agent send-keys" and wf:
+        w = json.load(open(wf))
+        for a in w["agents"]:
+            if a.get("name") == args[2]:
+                a["agent_status"] = "idle"
+        json.dump(w, open(wf, "w"))
+    print(json.dumps({"result": {}}))
+    sys.exit(0)
 world_file = os.environ.get("FAKE_HERDR_WORLD")
 world = json.load(open(world_file)) if world_file else None
 if world is not None and cmd in ("workspace list", "workspace create", "tab list", "tab close", "tab create", "tab focus", "agent list",

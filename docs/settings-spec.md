@@ -29,6 +29,8 @@ with a plain message.
 | `oncall_prefix` | `OC` | prefix for the on-call fix tickets filed after a true failure |
 | `max_oncall_per_day` | `3` | on-call attempts a day (local day in `timezone`); they do not count against `max_launches_per_day` |
 | `fresh_session_tokens` | `100000` | When a claimed ticket gets a FAIL verdict and its agent's session context is over this many tokens, dispatch closes that agent's tab and starts a fresh session on the same branch (logged `FRESH_SESSION`); 0 turns it off. Only Claude sessions can be measured; a Codex session is never replaced |
+| `pause_weekly_pct` | `90` | weekly plan usage (from the status line) at which no agent of any kind is launched: normal, urgent, on-call, investigations, reconcile, prep, relaunches, fresh sessions. Checked every dispatch cycle; logs `LAUNCH_PAUSED` and sends one low ping on crossing. Lifts at the weekly reset; 0 turns it off |
+| `hard_stop_weekly_pct` | `95` | weekly usage at which running agents are stopped too: each gets up to 20 s to finish its tool call, then is interrupted (Escape); work stays in its task folder; its ticket gets a note and is held (not failed) and a new agent starts after the weekly reset; one high ping. Shown in `fleet status`; 0 turns it off |
 | `fail_rounds_threshold` | `8` | FAIL verdicts on different commits (latest still FAIL) after which a claimed ticket is "going in circles" and truly fails; 1 or more |
 | `kaneo.workspace_id` | `null` | used when `kaneo.json` lacks it (the url stays in `kaneo.json`: it decides where the key is sent) |
 | `kaneo.project_icon` | `Layout` | icon of projects the mirror creates |

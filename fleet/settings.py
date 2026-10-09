@@ -55,6 +55,11 @@ DEFAULTS = {
     # A claimed ticket's agent session whose context has passed this many tokens
     # at the end of a review round is replaced by a fresh one (0 turns it off).
     "fresh_session_tokens": 100000,
+    # Usage governor (weekly plan usage, from the status line): at pause_weekly_pct no
+    # agent of any kind is launched; at hard_stop_weekly_pct running agents are stopped
+    # too. Both resume after the weekly reset. 0 turns a limit off.
+    "pause_weekly_pct": 90,
+    "hard_stop_weekly_pct": 95,
     # Non-secret Kaneo values. null means "use what kaneo.json says". The API
     # key and the url (which decides where the key is sent) stay in kaneo.json.
     "kaneo": {"workspace_id": None, "project_icon": "Layout"},
@@ -201,6 +206,11 @@ def _merge(settings: dict, given, path: Path) -> None:
     if "fresh_session_tokens" in given:
         settings["fresh_session_tokens"] = _whole(path, given, "fresh_session_tokens", 0,
                                                   "0 or more (0 turns it off)")
+    for key in ("pause_weekly_pct", "hard_stop_weekly_pct"):
+        if key in given:
+            settings[key] = _whole(path, given, key, 0, "0 to 100 (0 turns it off)")
+            if settings[key] > 100:
+                raise SettingsError(f"{path}: {key} must be a whole number, 0 to 100 (0 turns it off)")
     used = list(settings["id_prefixes"].values()) + [settings["emergency_prefix"], settings["oncall_prefix"]]
     if len(set(used)) != len(used):
         raise SettingsError(f"{path}: id prefixes must differ from each other and from emergency_prefix and oncall_prefix")

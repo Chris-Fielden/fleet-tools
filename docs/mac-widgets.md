@@ -22,7 +22,7 @@ that is not `tailscale serve` in front of it.
 
 Snapshot fields: `tokens` (Claude tokens for the last 5 hours, today and the
 week from local session logs; Codex logs hold only rate limits, so `codex` is
-null), `plan_usage`, `agents_running` (`id`, `minutes`), `ready_to_ship`,
+null), `plan_usage`, `governor` (`state` ok/paused/stopped, `weekly_pct`, `resumes_at`, `held`), `agents_running` (`id`, `minutes`), `ready_to_ship`,
 `launches` (`left_today`), `dispatch_alive`, `kaneo_url`. It contains no
 ticket text, paths or secrets.
 
