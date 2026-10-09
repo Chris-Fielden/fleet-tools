@@ -41,6 +41,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import dialog
 from . import dispatch as dp
 from . import fresh
 from . import governor
@@ -74,7 +75,8 @@ def state_path() -> Path:
 
 
 def _load_state(warn) -> dict:
-    state = {"sent": [], "blocked_since": {}, "stopped_since": {}, "seen": {}, "pending": [], "fresh": {}}
+    state = {"sent": [], "blocked_since": {}, "stopped_since": {}, "seen": {}, "pending": [], "fresh": {},
+             "dialog_pinged": {}}
     try:
         data = json.loads(state_path().read_text(encoding="utf-8"))
         if (isinstance(data, dict) and isinstance(data.get("sent"), list)
@@ -84,6 +86,9 @@ def _load_state(warn) -> dict:
             state.update(sent=[k for k in data["sent"] if isinstance(k, str)],
                          blocked_since=data["blocked_since"], seen=data["seen"],
                          stopped_since=data.get("stopped_since", {}),
+                         dialog_pinged={k: v for k, v in (data["dialog_pinged"]
+                                                          if isinstance(data.get("dialog_pinged"), dict) else {}).items()
+                                        if isinstance(k, str) and isinstance(v, str)},
                          fresh={k: v for k, v in (data["fresh"] if isinstance(data.get("fresh"), dict) else {}).items()
                                 if isinstance(k, str) and isinstance(v, str)},
                          pending=[p for p in data.get("pending", []) if isinstance(p, dict)
@@ -283,6 +288,24 @@ def _end_spells(ticket_id: str, state: dict) -> None:
     stopped-on-a-failure spell is running any more."""
     state["blocked_since"].pop(ticket_id, None)
     state["stopped_since"].pop(ticket_id, None)
+    state["dialog_pinged"].pop(ticket_id, None)
+
+
+def _dialog_ping(t: dict, agent: dict, state: dict, now: datetime) -> None:
+    """The first time a ticket's agent is seen blocked: log AGENT_DIALOG once with the
+    tail of its pane and send one low ping, so a person can answer before the
+    BLOCKED_AFTER rule fails the ticket. Read-only: nothing is ever sent to the pane.
+    Pane text is untrusted data (see dialog.py); only the fixed label drives anything."""
+    tid = t["id"]
+    if tid in state["dialog_pinged"]:
+        return
+    state["dialog_pinged"][tid] = _stamp(now)   # first, so an ntfy outage does not retry every cycle
+    label, tail = dialog.inspect(agent.get("pane_id"))
+    tab = dialog.sanitize(agent["tab_id"])[:40] if isinstance(agent.get("tab_id"), str) else ""
+    tab = tab or "?"
+    flat = dialog.one_line(tail)
+    dp.log("AGENT_DIALOG", f"{tid} tab={tab} {label}: {flat}")
+    notify.notify_quietly(t, "dialog", detail="\x1f".join((label, tab, flat)))
 
 
 def _failure_reason(t: dict, repo: Path, tip: str, agent: dict | None, state: dict,
@@ -311,12 +334,14 @@ def _failure_reason(t: dict, repo: Path, tip: str, agent: dict | None, state: di
         state["stopped_since"].pop(tid, None)
     # 3. An agent waiting for a person.
     if agent_state == "blocked":
+        _dialog_ping(t, agent, state, now)
         since = state["blocked_since"].setdefault(tid, _stamp(now))
         waited = (now - (_parse(since) or now)).total_seconds()
         if reason is None and waited >= BLOCKED_AFTER:
             reason = f"the agent was blocked waiting for input for {int(waited // 60)} min"
     else:
         state["blocked_since"].pop(tid, None)
+        state["dialog_pinged"].pop(tid, None)   # the blocked episode is over
     # 4. Nothing has happened for a long time. Only while herdr shows the agent idle,
     # done or waiting: a working agent can be silent for hours. The clock restarts when
     # the agent's status changes, so it counts from when the agent stopped working.
@@ -729,7 +754,7 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
         warn(f"on-call check: {exc}")
     process_recoveries(settings, state, now, emit, warn)
     live = {t["id"] for t in tickets} | locked
-    for name in ("blocked_since", "stopped_since", "seen", "fresh"):
+    for name in ("blocked_since", "stopped_since", "seen", "fresh", "dialog_pinged"):
         state[name] = {k: v for k, v in state[name].items() if k in live}
     # Keys of the failure pings stay: their ticket is closed, and the key is the record that it was sent.
     kept = [k for k in state["sent"] if k.split(":", 1)[0] in live]

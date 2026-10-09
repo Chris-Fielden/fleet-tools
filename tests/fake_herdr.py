@@ -5,6 +5,7 @@ FAKE_HERDR_LOG   file that gets one JSON line of arguments per call
 FAKE_HERDR_STATE status `agent list` reports for the agent (default: working)
 FAKE_HERDR_WORKSPACE label of the one workspace it knows (default: fleet)
 FAKE_HERDR_RUN_TEXT  what `pane run` prints instead of JSON; FAKE_HERDR_RUN_FAIL makes it exit 1
+FAKE_HERDR_PANE_TEXT  what `pane read` prints; FAKE_HERDR_PANE_FAIL makes it exit 1
 FAKE_HERDR_WORLD  optional JSON file {"workspaces": [...], "tabs": [...], "agents": [...]}
                   that `workspace list/create`, `tab list/close` and `agent list` read
                   and change, in herdr's real reply shapes
@@ -83,6 +84,12 @@ elif cmd == "pane run":
         print(os.environ["FAKE_HERDR_RUN_TEXT"])
         sys.exit(0)
     out = {"result": {}}
+elif cmd == "pane read":   # read-only: plain text, like `--format text`
+    if os.environ.get("FAKE_HERDR_PANE_FAIL"):
+        print("fake herdr: pane read failed", file=sys.stderr)
+        sys.exit(1)
+    sys.stdout.write(os.environ.get("FAKE_HERDR_PANE_TEXT", ""))
+    sys.exit(0)
 elif cmd == "workspace create":
     out = {"result": {"workspace": {"workspace_id": "w9", "label": args[args.index("--label") + 1]}}}
 elif cmd == "tab list":
