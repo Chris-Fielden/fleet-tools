@@ -777,7 +777,7 @@ def _rereview(t: dict, tip: str, agent: dict | None, settings: dict, state: dict
     if not entry["done"]:
         return "wait", t
     fresh = tk.load_ticket(tid)
-    if entry["problem"] is None:
+    if entry["problem"] is None or passed_for_tip(fresh, tip):   # or the agent got its own PASS on this tip
         return "passed", fresh
     v = fresh.get("verdict")
     if v is not None and v["result"] == "FAIL" and v["commit"] == tip:
