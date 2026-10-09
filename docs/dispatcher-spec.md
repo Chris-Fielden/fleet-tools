@@ -507,9 +507,46 @@ the ticket as failed with that analysis in the close note, files NO on-call tick
   never ships, merges, deletes branches, stops agents or touches other tickets. Its only
   input from agent-writable text is the supervisor note, which lands in a note and a
   close note after the usual secret scan.
-- **Order with SQUIRRELS (step F).** SQUIRRELS is judged first: a ticket the SQUIRRELS
-  action marks for the human (leftovers) leaves the review loop and is not failed by the
-  backstop. The backstop is the last word for every ticket still FAILing at 15 rounds, so
-  F should act before the failure check runs and must not depend on rounds below 15.
+- **Order with SQUIRRELS (step F).** SQUIRRELS is judged first. A ticket marked ready with
+  leftovers on its exact tip is skipped by the backstop (and by the circles and
+  stopped-after-FAIL rules). The marking happens at the start of the watch cycle, before
+  the failure check, and does not depend on the round count. Because the model answers
+  minutes after a FAIL is recorded, a still-unclassified FAIL commit also holds the
+  backstop back for at most `BACKSTOP_WAIT` (10 minutes after the verdict was recorded,
+  and only while the supervisor still has attempts left), so the 15th round gets its
+  SQUIRRELS verdict before it is failed. After that the backstop fires as before.
 - **Tickets in flight.** `review_commits` starts at 0 for a ticket that predates it
   (BD-67), so an old ticket needs 15 new rounds and is never failed on arrival.
+
+### The SQUIRRELS action (EM-8 step F)
+
+When the supervisor classifies a FAIL commit SQUIRRELS (reviewers chasing side issues), the
+dispatcher checks the facts itself and, if they hold:
+
+1. files ONE leftovers ticket (`fix`, proposed, branch `task/leftovers-<id>`, parent the
+   marked ticket) holding the full Codex review text of the tip: in the body, and in notes
+   on it for what the body cannot hold. An active leftovers ticket for the same parent
+   (for example from `review.sh --propose-leftovers`) is reused: the text goes into its
+   notes, once per commit. A review text that trips the secret scan is not copied (the
+   ticket points at the review file instead);
+2. marks the ticket "ready with leftovers" at that exact commit in
+   `$FLEET_HOME/supervisor.json` (`leftovers`: `{commit, reason, ticket, at}`) and adds
+   one note;
+3. queues ONE `leftovers` ping (default priority) per ticket, not per commit. A queued ping
+   is dropped, not sent, if the branch tip is no longer the marked commit.
+
+Refused (a note says why, nothing is filed): the ticket is not claimed with its latest
+verdict on the tip; the tip has no Codex FAIL or no Claude PASS; the saved Codex review
+cannot be read; or the change's risk is **high** or cannot be worked out (stored level,
+every ticket on the branch, and the diff, as the merge gate computes it).
+
+A marked tip is no longer failed by the backstop, the circles rule or the "agent stopped
+after a FAIL" rule. **BLOCKED and STALL still apply.** The mark covers one commit: once
+the branch tip moves it no longer stands and every rule applies again.
+
+- **Threat model.** The verdict comes from a model reading agent-written text, so it is
+  never enough on its own. The mark only labels one ticket on one commit and files one
+  leftovers ticket; it never ships, merges, closes anything, edits another ticket or lowers
+  a risk level. It lives in supervisor.json, which agents cannot write, and is never read
+  back from note text (a forged note marks nothing). Shipping with leftovers is step G and
+  stays human-only.

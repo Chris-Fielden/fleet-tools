@@ -67,7 +67,7 @@ MUST_FIX_PARTS = 6        # parts kept per review; the context before the spec i
 # Dispatcher log kinds that show a ticket's work moving. (RECONCILE_SKIP and
 # DECISION lines repeat every cycle and say nothing about the agent.)
 ACTIVITY_LOG_KINDS = ("LAUNCHED", "RELAUNCHED", "REVIEW_READY", "REVIEW_BACK")
-FAILURE_EVENTS = ("oncall", "needs_human")
+FAILURE_EVENTS = ("oncall", "needs_human", "leftovers")   # pings kept until sent, once per ticket
 LAUNCH_FAILED_NOTE = "Launch attempt failed:"   # written by launch.launch_oncall
 LAUNCH_ATTEMPTS = 3       # failed launches of one on-call ticket before it is given up
 FAILURE_KEYS_KEPT = 500   # sent-keys of closed tickets' failure pings; the oldest go first
@@ -97,7 +97,8 @@ def _load_state(warn) -> dict:
                                 if isinstance(k, str) and isinstance(v, str)},
                          pending=[p for p in data.get("pending", []) if isinstance(p, dict)
                                   and isinstance(p.get("id"), str) and p.get("event") in FAILURE_EVENTS
-                                  and isinstance(p.get("detail"), (str, type(None)))])
+                                  and isinstance(p.get("detail"), (str, type(None)))
+                                  and isinstance(p.get("commit"), (str, type(None)))])
         else:
             warn(f"{state_path()} has an unexpected shape; starting with an empty one")
     except FileNotFoundError:
@@ -206,8 +207,10 @@ def _ready_ping(t: dict, tip: str, settings: dict, now: datetime, state: dict, w
     _ping(t, "ship", f"{t['id']}:ship:{tip}", state, warn)  # a send that failed is retried
 
 
-def _queue_ping(ticket_id: str, event: str, state: dict, warn, detail: str | None = None) -> None:
-    """Queue the one ping of a failure (event oncall or needs_human), once per ticket
+def _queue_ping(ticket_id: str, event: str, state: dict, warn, detail: str | None = None,
+                commit: str | None = None) -> None:
+    """Queue the one ping of a failure (event oncall or needs_human, or leftovers: the ticket
+    was marked ready with leftovers at `commit`), once per ticket
     and event, and save it to disk at once: it is queued BEFORE the ticket is closed,
     so an interruption cannot lose it. `_retry_pending` sends it, and keeps trying
     every cycle (even though the closed ticket is no longer visited) until it
@@ -215,7 +218,7 @@ def _queue_ping(ticket_id: str, event: str, state: dict, warn, detail: str | Non
     if f"{ticket_id}:{event}" in state["sent"] or any(
             p["id"] == ticket_id and p["event"] == event for p in state["pending"]):
         return
-    state["pending"].append({"id": ticket_id, "event": event, "detail": detail})
+    state["pending"].append({"id": ticket_id, "event": event, "detail": detail, "commit": commit})
     try:
         _save_state(state)
     except OSError:
@@ -223,13 +226,32 @@ def _queue_ping(ticket_id: str, event: str, state: dict, warn, detail: str | Non
         raise   # nothing is closed until the ping is safely on disk
 
 
-def _retry_pending(state: dict, warn) -> None:
+def _leftovers_stands(ticket: dict, commit: str | None, settings: dict | None, warn) -> bool | None:
+    """Is a queued "ready with leftovers" ping still true? It is only while the ticket is still
+    claimed and its branch tip is the marked commit. None: cannot be checked here (no settings)."""
+    if settings is None:
+        return None
+    repo = settings["projects_dir"] / ticket["repo"]
+    tip = _tip(repo, ticket["branch"]) if repo.is_dir() else None
+    return (commit is not None and ticket["status"] in ("claimed", "review") and tip == commit
+            and sr.leftovers_for(sr.load_state(warn), ticket["id"], commit) is not None)
+
+
+def _retry_pending(state: dict, warn, settings: dict | None = None) -> None:
     keep = []
     for p in state["pending"]:
         try:
             ticket = tk.load_ticket(p["id"])
         except (tk.TicketError, tk.TicketInvalid):
             continue   # gone: nothing to tell anyone about
+        if p["event"] == "leftovers":
+            standing = _leftovers_stands(ticket, p.get("commit"), settings, warn)
+            if standing is None:
+                keep.append(p)
+                continue
+            if not standing:   # the branch tip moved: a ping about the old commit would be false
+                dp.log("LEFTOVERS_PING_DROPPED", f"{p['id']} the branch moved on; ping dropped")
+                continue
         if notify.notify_quietly(ticket, p["event"], warn, p.get("detail")):
             state["sent"].append(f"{p['id']}:{p['event']}")
         else:
@@ -327,18 +349,24 @@ def _dialog_ping(t: dict, agent: dict, state: dict, now: datetime) -> None:
 
 def _failure_reason(t: dict, repo: Path, tip: str, agent: dict | None, state: dict,
                     now: datetime, fail_rounds_threshold: int,
-                    progress: frozenset = frozenset()) -> str | None:
+                    progress: frozenset = frozenset(), leftovers: bool = False,
+                    waiting: bool = False) -> str | None:
     """Why this claimed ticket has truly failed, or None. Keeps the clocks for
-    the stopped and blocked spells in `state`."""
+    the stopped and blocked spells in `state`. `leftovers`: the supervisor marked this exact tip
+    ready with leftovers, so the rules about a failed tip (backstop, rounds, stopped after a
+    FAIL) leave it alone; BLOCKED and STALL still apply. `waiting`: the supervisor has not
+    judged the failed commit yet, so the backstop holds off a little (see sr.BACKSTOP_WAIT)."""
     tid, v = t["id"], t["verdict"]
     failed_now = v is not None and v["result"] == "FAIL"
     agent_state = agent.get("agent_status") if agent else None
     reason = None
     # 0. The backstop: PROGRESS rounds do not count below and a LOOP restarts the session, so
     # this is what ends a ticket that would otherwise review for ever, whatever the supervisor
-    # said. (EM-8 step F's SQUIRRELS action is judged before this: a ticket it marks leaves the loop.)
+    # said. SQUIRRELS is judged first (EM-8 step F): a ticket it marked leaves the loop, and the
+    # backstop waits for the supervisor's answer on the failed commit (at most sr.BACKSTOP_WAIT).
     total = tk.review_rounds(t)
-    if failed_now and total >= BACKSTOP_ROUNDS:
+    failed_now = failed_now and not leftovers
+    if failed_now and total >= BACKSTOP_ROUNDS and not waiting:
         reason = f"{BACKSTOP_REASON}: {total} review rounds without a pass (limit {BACKSTOP_ROUNDS})"
     # 1. Going in circles.
     rounds = fail_rounds(t, progress)
@@ -643,7 +671,7 @@ def _recover(rec: dict, settings: dict, state: dict, now: datetime, emit, warn) 
     # 3. queue the one ping (saved to disk; a send that fails is retried every cycle)
     _queue_ping(ping[0], ping[1], state, warn, ping[2])
     path.unlink(missing_ok=True)
-    _retry_pending(state, warn)
+    _retry_pending(state, warn, settings)
 
 
 def process_recoveries(settings: dict, state: dict, now: datetime, emit, warn) -> None:
@@ -667,7 +695,8 @@ def _move(t: dict, status: str, allowed_from: tuple, warn):
 
 def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
                now: datetime, state: dict, emit, warn, moved: list | None = None,
-               progress: dict | None = None) -> None:
+               progress: dict | None = None, marks: dict | None = None,
+               waiting: frozenset = frozenset()) -> None:
     repo = settings["projects_dir"] / t["repo"]
     if repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir():
         return
@@ -722,7 +751,8 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
         return   # a new session starts from here: judge it from the next cycle
     _unrecorded_pings(t, repo, tip, state, now, emit, warn)
     reason = _failure_reason(t, repo, tip, agent, state, now, settings["fail_rounds_threshold"],
-                            (progress or {}).get(t["id"], frozenset()))
+                            (progress or {}).get(t["id"], frozenset()),
+                            leftovers=(marks or {}).get(t["id"]) == tip, waiting=t["id"] in waiting)
     if reason:
         final = latest_analysis(t) if reason.startswith(BACKSTOP_REASON) else None
         write_recovery(t, reason, tip, final)   # first: everything else is driven from the record
@@ -749,6 +779,21 @@ def _flag_stuck_oncall(settings: dict, warn) -> None:
             reason = f"its task folder {folder.name} already exists"
         if reason is not None:
             write_recovery(oc, f"the on-call ticket cannot be launched: {reason}", oc.get("oncall_base") or "0" * 40)
+
+
+def _queue_leftovers_pings(marks: dict, sup: dict, state: dict, settings: dict, warn) -> None:
+    """The one "ready with leftovers" ping of each marked ticket whose mark still stands (the
+    branch tip is the marked commit). Worked out from the saved marks every cycle, so a crash
+    between marking and queueing loses nothing; `_queue_ping` sends it once per ticket, not once
+    per commit, and `_retry_pending` drops it if the tip moves before it goes out."""
+    for tid, commit in sorted(marks.items()):
+        try:
+            t = tk.load_ticket(tid)
+            if t["status"] not in ("claimed", "review") or not _leftovers_stands(t, commit, settings, warn):
+                continue
+            _queue_ping(tid, "leftovers", state, warn, sup["leftovers"][tid]["reason"], commit)
+        except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+            warn(f"{tid}: could not queue the leftovers ping: {exc}")
 
 
 def _save_supervisor(sup: dict, warn) -> None:
@@ -791,10 +836,12 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
         return
     state = _load_state(warn)
     sup = sr.load_state(warn)
-    if sr.collect(sup, warn):   # answers that came in since the last cycle count from this one
+    if sr.collect(sup, warn, settings):   # answers that came in since the last cycle count from this one
         _save_supervisor(sup, warn)
     progress = sr.progress_commits(sup)
-    _retry_pending(state, warn)
+    marks = {tid: m["commit"] for tid, m in sup["leftovers"].items()}
+    _queue_leftovers_pings(marks, sup, state, settings, warn)
+    _retry_pending(state, warn, settings)
     process_recoveries(settings, state, now, emit, warn)
     recovering = {r["id"] for r in pending_recoveries(warn)}   # a ticket with a record is never checked again
     recovering |= locked | set(skip) | governor.held_ids()   # stopped by the usage governor: not failed
@@ -807,12 +854,13 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
     except lc.LaunchError as exc:
         warn(f"cannot check agents for review status or alerts: {exc}")
         agents, known = {}, False
+    waiting = sr.awaiting(tickets, sup, now)   # the backstop waits for the supervisor on these
     moved: list[tuple[dict, str]] = []
     for t in tickets:
         if not known and t["status"] == "claimed":
             continue  # nothing here can be decided without herdr
         try:
-            _check_one(t, agents.get(t["id"].lower()), known, settings, now, state, emit, warn, moved, progress)
+            _check_one(t, agents.get(t["id"].lower()), known, settings, now, state, emit, warn, moved, progress, marks, waiting)
         except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
             warn(f"{t['id']}: {exc}")
     for new, tip in moved:   # judged against the final set of waiting tickets, not one at a time

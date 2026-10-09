@@ -45,6 +45,13 @@ and the first **MUST FIX** line of the saved review of the failed commit. All of
 comes from the stored ticket and the review file. The text is scanned with gitleaks; if
 that finds anything (or cannot run), only the one-line summary is sent.
 
+### Ready with leftovers
+
+`leftovers` (default priority, `broom`): the supervisor judged a failed review SQUIRRELS and
+the dispatcher marked the ticket ready with leftovers (EM-8 step F). One ping per ticket;
+it is dropped if the branch tip moves before it is sent. The message holds the id, type,
+status, title and the supervisor's one-line reason (secret-scanned, since it goes to a phone).
+
 ### Results of a web ship
 
 | Event | When |
@@ -56,7 +63,7 @@ that finds anything (or cannot run), only the one-line summary is sent.
 
 Each message carries its ntfy priority in the JSON body and in a `Priority`
 header. Defaults: `urgent`, `failed`, `blocked`, `review_failed`,
-`review_unrecorded` = `high`; `ready`, `ship`, `stalled` = `default`;
+`review_unrecorded` = `high`; `ready`, `ship`, `stalled`, `leftovers` = `default`;
 `proposed`, `investigated`, `oncall`, `needs_human` = `low`. (`blocked`, `stalled` and
 `review_failed` are no longer sent; their defaults only matter if you set them.) Override any of them in `notify.json`:
 `"priorities": {"stalled": "low", "ship": "high"}` (values: `min`, `low`,
