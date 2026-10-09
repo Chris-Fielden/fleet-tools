@@ -351,3 +351,14 @@ def test_a_job_saved_before_snapshots_existed_still_finishes(q, herdr_log, env, 
     set_agent_status(env, "prep", "idle")
     out, warns = finish_prep(settings)
     assert not any("changed the main checkout" in w for w in warns)
+
+
+def test_an_owed_needs_human_ping_survives_a_later_ready_list_ping(q, herdr_log, env, ntfy):
+    t, wt = in_review(q, "task/one", {"one.txt": "1"})
+    with prep._state() as st:
+        st["pings"].append({"kind": "human", "ids": [], "detail": "the prep agent changed the main checkout",
+                            "label": "PREP"})
+        prep._defer_ping(st, "list", [t["id"]])        # what the next pass's finish does
+        assert [p["kind"] for p in st["pings"]] == ["human", "list"]
+    prep.flush_pings(prep.dp.load_settings(), prep.datetime.now(prep.timezone.utc), lambda m: None)
+    assert "PREP needs a human, see notes" in [m[0] for m in sent(ntfy)]

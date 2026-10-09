@@ -858,7 +858,9 @@ def _defer_ping(st: dict, kind: str, ids: list[str]) -> None:
     and the individual pings of the tickets it names."""
     if kind == "list":
         older = [i for p in st["pings"] if p["kind"] == "list" for i in p["ids"]]
-        st["pings"] = [p for p in st["pings"] if p["kind"] != "list" and not set(p["ids"]) <= set(ids)]
+        # needs-human pings (no ticket ids) are never superseded by a ready ping
+        st["pings"] = [p for p in st["pings"]
+                       if p["kind"] == "human" or (p["kind"] != "list" and not set(p["ids"]) <= set(ids))]
         ids = list(dict.fromkeys(older + ids))
     st["pings"].append({"kind": kind, "ids": ids})
 
