@@ -49,6 +49,7 @@ from . import launch as lc
 from . import notify
 from . import prep
 from . import risk as rk
+from . import supervisor_run as sr
 from . import ticket as tk
 
 BLOCKED_AFTER = 20 * 60   # seconds an agent waits for input before the ticket fails
@@ -262,13 +263,14 @@ def _unrecorded_pings(t: dict, repo: Path, tip: str, state: dict, now: datetime,
 #     waiting (never while herdr shows it working).
 # Then the ticket is closed as failed and an on-call agent is filed (see _fail_ticket).
 
-def fail_rounds(t: dict) -> int:
-    """Different commits that got a recorded FAIL."""
+def fail_rounds(t: dict, ignored: frozenset = frozenset()) -> int:
+    """Different commits that got a recorded FAIL, except `ignored` ones (the supervisor
+    classified those rounds PROGRESS)."""
     v = t["verdict"]
     commits = set(t.get("fail_commits", []))
     if v is not None and v["result"] == "FAIL":
         commits.add(v["commit"])
-    return len(commits)
+    return len(commits - ignored)
 
 
 def _failed_reviewers(t: dict) -> str:
@@ -286,7 +288,8 @@ def _end_spells(ticket_id: str, state: dict) -> None:
 
 
 def _failure_reason(t: dict, repo: Path, tip: str, agent: dict | None, state: dict,
-                    now: datetime, fail_rounds_threshold: int) -> str | None:
+                    now: datetime, fail_rounds_threshold: int,
+                    progress: frozenset = frozenset()) -> str | None:
     """Why this claimed ticket has truly failed, or None. Keeps the clocks for
     the stopped and blocked spells in `state`."""
     tid, v = t["id"], t["verdict"]
@@ -294,7 +297,7 @@ def _failure_reason(t: dict, repo: Path, tip: str, agent: dict | None, state: di
     agent_state = agent.get("agent_status") if agent else None
     reason = None
     # 1. Going in circles.
-    rounds = fail_rounds(t)
+    rounds = fail_rounds(t, progress)
     if failed_now and rounds >= fail_rounds_threshold:
         reason = f"going in circles: {rounds} FAIL verdicts on different commits"
     # 2. The agent stopped without fixing the failed commit.
@@ -606,7 +609,8 @@ def _move(t: dict, status: str, allowed_from: tuple, warn):
 
 
 def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
-               now: datetime, state: dict, emit, warn, moved: list | None = None) -> None:
+               now: datetime, state: dict, emit, warn, moved: list | None = None,
+               progress: dict | None = None) -> None:
     repo = settings["projects_dir"] / t["repo"]
     if repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir():
         return
@@ -660,7 +664,8 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
     if fresh.refresh_if_large(t, agent, tip, settings, state, emit, warn):
         return   # a new session starts from here: judge it from the next cycle
     _unrecorded_pings(t, repo, tip, state, now, emit, warn)
-    reason = _failure_reason(t, repo, tip, agent, state, now, settings["fail_rounds_threshold"])
+    reason = _failure_reason(t, repo, tip, agent, state, now, settings["fail_rounds_threshold"],
+                            (progress or {}).get(t["id"], frozenset()))
     if reason:
         write_recovery(t, reason, tip)   # first: everything else is driven from the record
 
@@ -688,6 +693,36 @@ def _flag_stuck_oncall(settings: dict, warn) -> None:
             write_recovery(oc, f"the on-call ticket cannot be launched: {reason}", oc.get("oncall_base") or "0" * 40)
 
 
+def _save_supervisor(sup: dict, warn) -> None:
+    try:
+        sr.save_state(sup)
+    except OSError as exc:
+        warn(f"cannot save {sr.state_path()} ({exc}); a classification may be lost")
+
+
+def _run_supervisor(sup: dict, settings: dict, now: datetime, busy: set, warn) -> None:
+    """After the recovery records are written: let the supervisor look at ONE ticket whose
+    latest commit failed review, in the background. A ticket failing this cycle (it has a
+    record), or held or locked, is skipped. Nothing here waits for the model."""
+    try:
+        candidates = []
+        for t in tk.list_tickets():
+            v = t.get("verdict")
+            if t["status"] != "claimed" or v is None or v["result"] != "FAIL" or t["id"] in busy:
+                continue
+            repo = settings["projects_dir"] / t["repo"]
+            if repo.is_dir() and _tip(repo, t["branch"]) == v["commit"]:
+                candidates.append(t)
+        sr.start_next(candidates, sup, settings, now, busy, warn)
+    except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
+        warn(f"supervisor: {exc}")
+    live = {t["id"] for t in tk.list_tickets() if t["status"] in ("claimed", "review")}
+    before = json.dumps(sup, sort_keys=True)
+    sr.prune(sup, live)
+    if json.dumps(sup, sort_keys=True) != before:
+        _save_supervisor(sup, warn)
+
+
 def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
     """One watch cycle's pass over every claimed (or in-review) build or fix ticket.
     Tickets in `skip` (their agent was just sent a note) are not judged this cycle."""
@@ -697,6 +732,10 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
         warn(f"prep state unreadable ({exc}); not judging any ticket this cycle")
         return
     state = _load_state(warn)
+    sup = sr.load_state(warn)
+    if sr.collect(sup, warn):   # answers that came in since the last cycle count from this one
+        _save_supervisor(sup, warn)
+    progress = sr.progress_commits(sup)
     _retry_pending(state, warn)
     process_recoveries(settings, state, now, emit, warn)
     recovering = {r["id"] for r in pending_recoveries(warn)}   # a ticket with a record is never checked again
@@ -715,7 +754,7 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
         if not known and t["status"] == "claimed":
             continue  # nothing here can be decided without herdr
         try:
-            _check_one(t, agents.get(t["id"].lower()), known, settings, now, state, emit, warn, moved)
+            _check_one(t, agents.get(t["id"].lower()), known, settings, now, state, emit, warn, moved, progress)
         except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
             warn(f"{t['id']}: {exc}")
     for new, tip in moved:   # judged against the final set of waiting tickets, not one at a time
@@ -728,6 +767,7 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
     except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
         warn(f"on-call check: {exc}")
     process_recoveries(settings, state, now, emit, warn)
+    _run_supervisor(sup, settings, now, recovering | {r["id"] for r in pending_recoveries(warn)}, warn)
     live = {t["id"] for t in tickets} | locked
     for name in ("blocked_since", "stopped_since", "seen", "fresh"):
         state[name] = {k: v for k, v in state[name].items() if k in live}

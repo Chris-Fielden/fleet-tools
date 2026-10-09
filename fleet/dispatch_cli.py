@@ -17,6 +17,7 @@ from . import notify
 from . import prep
 from . import push_notes
 from . import review_watch
+from . import supervisor_run
 from . import ticket as tk
 
 
@@ -382,6 +383,8 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None, reload=
         print("\nwatch stopped", flush=True)
         lc._safe_log("WATCH_STOP", "interrupted")
         return 0
+    finally:
+        supervisor_run.shutdown()   # no orphan model process, also before the restart's exec
 
 
 def _exec_self(argv: list[str]) -> None:
