@@ -92,7 +92,31 @@ def _field(repo: Path, wt: Path, branch: str, name: str) -> str:
     return done.stdout.strip()
 
 
-def _review_if_needed(repo: Path, name: str, branch: str, script: Path) -> str | None:
+def _added_commits(repo: Path, old: str, tip: str) -> str:
+    """Which commits the branch gained after `old` (the commit a verdict or confirmation was
+    on), for a refusal or an offer: up to 8 one-line subjects, or that `old` is gone from it."""
+    if dp._git(repo, "merge-base", "--is-ancestor", old, tip).returncode != 0:
+        return f"it no longer contains {old[:8]} (the branch was rewritten)"
+    out = dp._git(repo, "log", "--oneline", "--no-decorate", "-n", "9", f"{old}..{tip}")
+    lines = out.stdout.strip().splitlines() if out.returncode == 0 else []
+    if not lines:
+        return "no commits were added"
+    more = " (and more)" if len(lines) > 8 else ""
+    return f"{len(lines[:8])} commit(s) added{more}: " + "; ".join(lines[:8])
+
+
+def _moved_past_verdict(repo: Path, t: dict | None, branch: str) -> str | None:
+    """When the ticket's recorded PASS is on a commit the branch has moved past: one line saying
+    which commits were added. None when there is nothing to say."""
+    v = (t or {}).get("verdict")
+    tip = dp._git(repo, "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}").stdout.strip()
+    if not v or v["result"] != "PASS" or not tip or v["commit"] == tip:
+        return None
+    return (f"{branch} has moved past the commit that passed review ({v['commit'][:8]}), "
+            f"now at {tip[:8]}: {_added_commits(repo, v['commit'], tip)}")
+
+
+def _review_if_needed(repo: Path, name: str, branch: str, script: Path, t: dict | None = None) -> str | None:
     """When the gate wants reviews and lacks them, run them now: both reviewers
     without asking at high risk, or (after a yes) the usual one when the tip
     has no review at all. The merge script still applies the gate afterwards.
@@ -110,10 +134,19 @@ def _review_if_needed(repo: Path, name: str, branch: str, script: Path) -> str |
         has_reviews = risk != "high" and _field(repo, wt, branch, "reviews")
     except _GateBroken as exc:
         return str(exc)
+    # A branch that moved past its PASS says so and offers the reviews of the new tip, whatever the
+    # risk level; no answer (or no terminal) refuses, as the web ship does.
+    moved = _moved_past_verdict(repo, t, branch) if risk == "high" or not has_reviews else None
+    if moved:
+        print(f"ship: {moved}")
+        if not _confirm(f"ship: run the reviews on {branch}'s new tip now?"):
+            return f"{branch} moved past its reviewed commit and was not re-reviewed; nothing was merged"
     env = dict(os.environ)
     if risk == "high":
         print(f"ship: {branch} is high risk and lacks passing reviews; running both reviewers")
         env["REVIEWER"] = "both"
+    elif moved:
+        pass   # the question above was the confirmation
     else:
         # Below high risk, only the case where the tip has no review at all
         # (small fixes committed after the review) is offered; a review that
@@ -149,7 +182,8 @@ def _unattended_answer(repo: Path, wt: Path, branch: str, name: str, expect: str
     gate again itself, including the checks."""
     tip = dp._git(repo, "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}").stdout.strip()
     if tip != expect:
-        return _fail(f"{branch} is now at {tip[:8]}, not the {expect[:8]} that was confirmed; nothing was merged")
+        return _fail(f"{branch} is now at {tip[:8]}, not the {expect[:8]} that was confirmed "
+                     f"({_added_commits(repo, expect, tip)}); nothing was merged")
     try:
         if _field(repo, wt, branch, "ok") != "yes":
             return _fail(f"not allowed: {_blocked_lines(repo, wt, branch)}; nothing was merged")
@@ -286,7 +320,9 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, pre
         # The detached job: the questions were asked on the terminal, and the reviews done there.
         tip = dp._git(repo, "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}").stdout.strip()
         if tip != preset[1]:
-            return _fail(f"{branch} is now at {tip[:8]}, not the {preset[1][:8]} that was confirmed; nothing was merged")
+            return _fail(f"{branch} is now at {tip[:8]}, not the {preset[1][:8]} that was confirmed "
+                         f"({_added_commits(repo, preset[1], tip)}); nothing was merged. "
+                         "Run the command again to review the new tip")
         answer = preset[0]
     elif expect:
         # No terminal: only a ticket already in review, at the confirmed commit.
@@ -299,7 +335,7 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, pre
         if isinstance(answer, int):
             return answer
     else:
-        problem = _review_if_needed(repo, name, branch, script)  # no preset: the unattended and list paths
+        problem = _review_if_needed(repo, name, branch, script, t)  # no preset: the unattended and list paths
         if problem:
             return _fail(problem)
 
@@ -542,7 +578,7 @@ def _prepare_detached(t: dict) -> tuple[str, str] | int:
         if isinstance(resolved, int):
             return resolved
         repo, branch, name, script, _ = resolved
-        problem = _review_if_needed(repo, name, branch, script)
+        problem = _review_if_needed(repo, name, branch, script, t)
         if problem:
             return _fail(problem)
         if dp._git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
