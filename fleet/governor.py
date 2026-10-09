@@ -169,6 +169,14 @@ def _stop_agents(now: datetime, state: dict, emit, warn) -> bool:
         warn(f"usage governor: cannot ask herdr which agents are running ({exc}); will try again")
         return False
     all_tickets = {t["id"].lower(): t for t in tk.list_tickets()}
+    from . import prep
+    try:
+        job_names = {j["name"] for j in prep._load()["jobs"]}
+    except OSError:
+        job_names = set()
+    # Only the fleet's own agents: a ticket's agent or a registered prep / reconcile job. Anything else
+    # in herdr belongs to a person and is left alone.
+    agents = [a for a in agents if a["name"] in all_tickets or a["name"] in job_names]
     ok = True
     deadline = time.monotonic() + STOP_BUDGET_SECONDS   # many agents must not hold up the cycle for minutes
     for a in agents:

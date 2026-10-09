@@ -50,3 +50,15 @@ def test_a_failed_interrupt_is_retried_and_a_lost_ping_is_resent(projects, herdr
     cycle(rig.settings)
     assert governor.load_state()["stopped"]
     assert [p for _, _, p in sent(ntfy)] == ["low", "high"]
+
+
+def test_agents_that_are_not_the_fleets_are_left_alone(projects, herdr_log, ntfy, env, monkeypatch):
+    rig = Rig(projects, env, monkeypatch)
+    world = json.loads(rig.world.read_text())
+    world["agents"].append({"name": "my-own-session", "agent_status": "working"})
+    rig.world.write_text(json.dumps(world))
+    usage(96, resets_in=timedelta(hours=3))
+    cycle(rig.settings)
+    keys = [c[2] for c in calls(herdr_log) if c[:2] == ["agent", "send-keys"]]
+    assert keys == [rig.id.lower()]
+    assert governor.load_state()["held_jobs"] == []
