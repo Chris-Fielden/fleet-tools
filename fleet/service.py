@@ -438,6 +438,14 @@ def _autostart_row() -> tuple[str, str, str]:
     return ("warn", "autostart", f"service file installed but the service is {answer}; run fleet autostart on")
 
 
+def _governor_row() -> tuple[str, str, str]:
+    from . import governor
+    g = governor.status()
+    if g["state"] == "ok":
+        return ("ok", "usage", "launches allowed")
+    return ("warn", "usage", g["message"])
+
+
 def status_rows() -> list[tuple[str, str, str]]:
     herdr_up = herdr_running()
     rows = [("ok" if herdr_up else "fail", "herdr", "running" if herdr_up else "not running (fleet start)")]
@@ -450,6 +458,7 @@ def status_rows() -> list[tuple[str, str, str]]:
     rows.append(_service_row("ntfy", notify.load_config, "/v1/health"))
     rows += _tailscale_rows()
     rows.append(_autostart_row())
+    rows.append(_governor_row())
     return rows
 
 

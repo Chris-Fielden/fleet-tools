@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import dispatch as dp
 from . import dupes
+from . import governor
 from . import kaneo
 from . import launch as lc
 from . import notify
@@ -133,6 +134,12 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     the alert pings. `clock` is the time source for the prep pass (default: real time)."""
     code = 0
     clock = clock or dp.Clock()
+    # Every cycle, whether or not anything is waiting: pause at the limit, stop at the hard limit,
+    # lift after the reset.
+    try:
+        governor.evaluate(settings, clock.now(), emit, warn)
+    except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired, lc.LaunchError) as exc:
+        warn(f"usage governor: {exc}")
     if checks is not None:   # --watch only; before anything mirrors, or a mirror would undo the drag
         _pull_board_priorities(emit, warn)
     _reconcile(settings, emit, warn)
@@ -151,7 +158,8 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
         emit(f"{t['id']}  investigation {t['status']}")
         kaneo.mirror_quietly(t, warn)
         notify.notify_quietly(t, "failed" if t["status"] == "failed" else "investigated", warn)
-    for t in lc.lost_agents(tk.list_tickets(), warn):
+    held = governor.held_ids()   # stopped on purpose: the governor restarts them after the reset
+    for t in lc.lost_agents([t for t in tk.list_tickets() if t["id"] not in held], warn):
         emit(f"{t['id']}  claimed, but its agent is not running in herdr (the tab died?); "
              f"task folder {t['repo']}/.worktrees/{t['branch'].removeprefix('task/')}")
         dp.log("AGENT_LOST", f"{t['id']} {t['assignee']} not listed in herdr")
@@ -171,6 +179,11 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     for line in lines:
         emit(line)
     tickets = tk.list_tickets()
+    paused = governor.refusal(settings, clock.now())
+    if paused:   # before any reservation, so a refused launch is never counted against the day
+        emit(f"nothing launched: {paused}")
+        dp.log("DECISION", f"nothing launched: {paused}")
+        return code
     # The on-call agent has its own slot: it starts at once, whatever the normal
     # queue is doing, and never counts against the daily launch limit.
     running = running_agents(tickets, warn)

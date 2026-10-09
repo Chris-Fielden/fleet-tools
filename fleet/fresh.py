@@ -189,6 +189,8 @@ def refresh_if_large(t: dict, agent: dict | None, tip: str, settings: dict, stat
     if size <= limit:
         handled[t["id"]] = v["commit"]
         return False
+    if lc.governor.refusal(settings):   # a fresh session could not start: keep the old one
+        return False
     tab = agent.get("tab_id")
     if not isinstance(tab, str):
         warn(f"{t['id']}: session is {size} tokens but its agent has no tab to close; not replacing it")

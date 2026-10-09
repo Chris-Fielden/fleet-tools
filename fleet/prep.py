@@ -356,6 +356,9 @@ def _start_job(kind: str, tickets: list[dict], settings: dict, warn) -> dict:
     the reservation (and start_agent closes the tab)."""
     if kind not in ("prep", "reconcile"):
         raise ValueError(kind)
+    paused = lc.governor.refusal(settings)
+    if paused:
+        raise lc.LaunchError(paused)
     problem = dp.research_problem(settings)   # the same rule for both kinds of agent
     if problem:
         raise lc.LaunchError(problem)
@@ -406,7 +409,7 @@ def maybe_start(settings: dict, now: datetime, emit, warn, reserve=None) -> None
             with _state() as st:   # prep_time came with nothing to reconcile: today's look is used up
                 st["prep_day"] = today
         return
-    problem = dp.research_problem(settings)
+    problem = lc.governor.refusal(settings) or dp.research_problem(settings)
     if problem:
         emit(f"prep pass not started: {problem}")
         return

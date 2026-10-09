@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 
 from . import dispatch as dp
 from . import kaneo
+from . import governor
 from . import planusage
 from . import service as sv
 from . import settings as st
@@ -93,6 +94,7 @@ def snapshot(now: datetime | None = None) -> dict:
         "plan_usage": {"claude": _claude_plan(planusage.load(now), tokens["claude"]),
                        "codex": {"five_hour": _codex_window(codex["five_hour"], now),
                                  "weekly": _codex_window(codex["weekly"], now)}},
+        "governor": governor.status(now),
         "agents_running": [{"id": t["id"], "minutes": _minutes(t, now)} for t in running],
         "ready_to_ship": sorted(t["id"] for t in tickets if t["status"] == "review"),
         "launches": {"used_today": used, "max_per_day": cap,

@@ -476,3 +476,16 @@ the next cycle without a restart. Changed keys are logged as `SETTINGS_RELOADED`
 stay in force, `SETTINGS_INVALID` is logged and one low-priority ping
 (`settings_invalid`) is sent, once per distinct problem until the file is valid
 again.
+
+### Usage governor (`fleet/governor.py`)
+
+Every cycle (before anything launches, even with an empty queue) the dispatcher reads the
+weekly figure saved by the status line. At `pause_weekly_pct` (90) it logs `LAUNCH_PAUSED`,
+sends one low ping (`usage_pause`) and refuses every agent launch: normal, urgent, on-call,
+investigations, prep, reconcile, relaunches and fresh sessions (the check is in each launch
+function and again in `launch.start_agent`). At `hard_stop_weekly_pct` (95) running agents are
+given up to 20 s to finish the current tool call, then interrupted (Escape); their tickets stay
+claimed, get a note and are held (never judged failed or lost); one high ping (`usage_stop`) is
+sent and `AGENT_STOPPED` / `USAGE_STOP` logged. After the weekly reset time (or a fresh figure
+under the limit) `LAUNCH_RESUMED` is logged and held tickets get a new agent (`USAGE_RESUMED`).
+State: `$FLEET_HOME/governor.json`. `fleet status` shows a `usage` row.

@@ -43,6 +43,7 @@ from pathlib import Path
 
 from . import dispatch as dp
 from . import fresh
+from . import governor
 from . import kaneo
 from . import launch as lc
 from . import notify
@@ -699,7 +700,7 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
     _retry_pending(state, warn)
     process_recoveries(settings, state, now, emit, warn)
     recovering = {r["id"] for r in pending_recoveries(warn)}   # a ticket with a record is never checked again
-    recovering |= locked | set(skip)
+    recovering |= locked | set(skip) | governor.held_ids()   # stopped by the usage governor: not failed
     tickets = sorted((t for t in tk.list_tickets()
                       if t["status"] in ("claimed", "review") and t["type"] in dp.LAUNCH_TYPES
                       and t.get("assignee") in tk.AGENTS and t["id"] not in recovering), key=tk.oldest_first_key)
