@@ -1,11 +1,10 @@
 """BD-70: the LOOP action - DESIGN CHANGE note, then a fresh session on the same branch.
 Fake claude, fake herdr, real git."""
 import json
-from datetime import datetime, timezone
-
-import pytest
+from datetime import timedelta
 
 from fleet import dispatch_cli
+from fleet import review_watch as rw
 from fleet import launch as lc
 from fleet import supervisor_run as sr
 from fleet import ticket as tk
@@ -181,3 +180,22 @@ def test_progress_and_squirrels_never_restart(sup, model, herdr_log):
     settle()
     sup.cycle(2)
     assert sr.load_state()["pending"] == {} and prompts(herdr_log) == []
+
+
+def test_a_note_prompted_ticket_waits_and_is_restarted_later(sup, model, herdr_log):
+    tabbed(sup)
+    looped(sup, model)
+    # this cycle the dispatcher just sent the ticket's agent a note: the step waits, it is not dropped
+    rw.check(sup.settings, sup.now + timedelta(minutes=2), sup.lines.append, sup.warnings.append, skip={sup.id})
+    assert sup.id in sr.load_state()["pending"] and prompts(herdr_log) == []
+    sup.cycle(3)
+    assert sr.load_state()["pending"] == {} and len(prompts(herdr_log)) == 1
+
+
+def test_a_failing_ticket_loses_its_step(sup, herdr_log):
+    tabbed(sup)
+    state = {"classified": {}, "attempts": {},
+             "pending": {sup.id: {"commit": sup.tip(), "design": DESIGN, "reason": "same flaw", "tries": 0}}}
+    both_fail(sup)
+    assert sr.continue_loops(state, sup.settings, {sup.id}, {sup.id}, lambda m: None, lambda m: None)
+    assert state["pending"] == {} and len(json.loads(sup.world.read_text())["tabs"]) == 1

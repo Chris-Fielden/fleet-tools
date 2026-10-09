@@ -7,8 +7,8 @@ thread; the cycle only starts it and, a cycle later, collects the answer.
 Threat model. The model reads text written by agents (notes, review items, commit subjects,
 test names) and runs as the human's user. Its answer is parsed into a closed set
 (PROGRESS, LOOP, SQUIRRELS) and can change exactly two things: one note on the ticket, and
-whether a PROGRESS commit counts toward `fail_rounds_threshold`. It never launches, stops,
-ships or edits anything, and its text is never run or parsed into a command or path.
+whether a PROGRESS commit counts toward `fail_rounds_threshold`; a LOOP also starts the
+restart described under step D below. Its text is never run or parsed into a command or path.
 The classification is kept in $FLEET_HOME/supervisor.json, which agents cannot write; it is
 never read back from note text, so a forged "SUPERVISOR PROGRESS" note changes nothing.
 Only the watch thread writes that file; the worker only returns a result through a queue.
@@ -113,7 +113,8 @@ def pending_ids() -> frozenset:
     start a second agent next to the one this restart is about to start."""
     try:
         return frozenset(load_state()["pending"])
-    except Exception:   # the lost-agent check must not die on this; relaunch itself refuses a listed agent
+    except Exception as exc:   # the lost-agent check must not die on this; relaunch itself refuses a listed agent
+        dp.log("SUPERVISOR_STATE", f"pending restarts could not be read ({type(exc).__name__})")
         return frozenset()
 
 
@@ -311,12 +312,14 @@ def _give_up(tid: str, p: dict, state: dict, why: str, emit) -> None:
         pass
 
 
-def continue_loops(state: dict, settings: dict, busy_ids, emit, warn) -> bool:
+def continue_loops(state: dict, settings: dict, failing_ids, waiting_ids, emit, warn) -> bool:
     """Carry each pending LOOP restart as far as it goes this cycle. Returns True if `state`
     changed. Steps: check the ticket and branch are as recorded (else drop the step and stop
     nothing), build and scan the restart text, stop that ticket's own agent, start a fresh
     session on the same branch. A failure before the stop leaves the agent running; a failed
-    start is retried next cycle, RESTART_ATTEMPTS times in all."""
+    start is retried next cycle, RESTART_ATTEMPTS times in all. A ticket in `failing_ids`
+    (it has a failure record) loses its step; one in `waiting_ids` (just sent a note, held by
+    the governor, being prepped) only waits: those are passing states, not reasons to give up."""
     changed = False
     for tid, p in sorted(state["pending"].items()):
         try:
@@ -333,12 +336,12 @@ def continue_loops(state: dict, settings: dict, busy_ids, emit, warn) -> bool:
             changed = True
             dp.log("SUPERVISOR_CANCELLED", f"{tid} {p['commit'][:8]} the ticket or branch moved on; restart dropped")
             continue
-        if tid in busy_ids:
-            if tid in lc.governor.held_ids():
-                continue   # stopped on purpose by the usage governor: wait
-            state["pending"].pop(tid)   # failing this cycle or being prepped: not ours to restart
+        if tid in failing_ids:
+            state["pending"].pop(tid)   # it is being closed as failed: nothing to restart
             changed = True
-            dp.log("SUPERVISOR_CANCELLED", f"{tid} {p['commit'][:8]} handled elsewhere this cycle; restart dropped")
+            dp.log("SUPERVISOR_CANCELLED", f"{tid} {p['commit'][:8]} the ticket is failing; restart dropped")
+            continue
+        if tid in waiting_ids:
             continue
         if lc.governor.refusal(settings):
             continue   # a new session could not start: keep the old one running
