@@ -857,7 +857,10 @@ def finish(settings: dict, now: datetime, emit, warn) -> None:
     except lc.LaunchError as exc:
         warn(f"cannot check the prep agents: {exc}")
         return
+    stopped = lc.governor.held_jobs()   # interrupted by the usage governor: not finished, resumed after the reset
     for job in jobs:
+        if job["name"] in stopped:
+            continue
         agent = agents.get(job["name"])
         started = _parse(job.get("started"))
         if not job.get("ready", True):

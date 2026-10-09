@@ -28,6 +28,7 @@ import contextlib
 import json
 import os
 import tempfile
+import time
 from datetime import datetime, timezone
 
 from . import dispatch as dp
@@ -36,6 +37,7 @@ from . import planusage
 from . import ticket as tk
 from .usage import _iso, _ts
 
+STOP_BUDGET_SECONDS = 60
 SAFE_POINT_MS = 20000   # how long an agent may keep working before it is interrupted
 IDLE_STATES = ("idle", "done")
 NOTE_PREFIX = "Usage governor:"
@@ -47,7 +49,7 @@ def state_path():
 
 def _empty() -> dict:
     return {"paused": False, "stopped": False, "reset_at": None, "since": None,
-            "pct": None, "held": [], "pinged": []}
+            "pct": None, "held": [], "held_jobs": [], "stopped_agents": [], "pinged": []}
 
 
 def load_state() -> dict:
@@ -62,7 +64,7 @@ def load_state() -> dict:
         for key in ("reset_at", "since"):
             out[key] = data[key] if isinstance(data.get(key), str) else None
         out["pct"] = data["pct"] if isinstance(data.get("pct"), (int, float)) else None
-        for key in ("held", "pinged"):
+        for key in ("held", "held_jobs", "stopped_agents", "pinged"):
             if isinstance(data.get(key), list):
                 out[key] = [x for x in data[key] if isinstance(x, str)]
     return out
@@ -89,9 +91,20 @@ def held_ids() -> frozenset:
     return frozenset(load_state()["held"])
 
 
+def held_jobs() -> frozenset:
+    """Names of prep and reconcile agents the governor stopped: their jobs are not finished
+    (and their tickets stay locked) until the governor resumes them."""
+    return frozenset(load_state()["held_jobs"])
+
+
 def _limits(settings: dict | None) -> tuple[int, int]:
-    from .settings import DEFAULTS
-    s = settings or DEFAULTS
+    from .settings import DEFAULTS, SettingsError, load_settings
+    if settings is None:   # the backstop in start_agent: use the settings in force, never just the defaults
+        try:
+            settings = load_settings()
+        except SettingsError:
+            settings = DEFAULTS
+    s = settings
     return s.get("pause_weekly_pct", DEFAULTS["pause_weekly_pct"]), \
         s.get("hard_stop_weekly_pct", DEFAULTS["hard_stop_weekly_pct"])
 
@@ -155,29 +168,40 @@ def _stop_agents(now: datetime, state: dict, emit, warn) -> bool:
     except lc.LaunchError as exc:
         warn(f"usage governor: cannot ask herdr which agents are running ({exc}); will try again")
         return False
-    by_id = {t["id"].lower(): t for t in tk.list_tickets() if t["status"] == "claimed"}
+    by_id = {t["id"].lower(): t for t in tk.list_tickets() if t["status"] in ("claimed", "proposed", "open")}
+    ok = True
+    deadline = time.monotonic() + STOP_BUDGET_SECONDS   # many agents must not hold up the cycle for minutes
     for a in agents:
         name = a["name"]
+        if name in state["stopped_agents"]:
+            continue
         try:
             # Let the current tool call finish: wait (bounded) for the agent to stop working
             # or to sit at a prompt, then interrupt whatever it is still doing.
-            with contextlib.suppress(lc.LaunchError):
-                lc.herdr_run("agent", "wait", name, "--until", "idle", "--until", "blocked",
-                             "--until", "done", "--timeout", str(SAFE_POINT_MS), timeout=SAFE_POINT_MS / 1000 + 10)
+            wait_ms = int(max(0.0, min(SAFE_POINT_MS / 1000, deadline - time.monotonic())) * 1000)
+            if wait_ms:
+                with contextlib.suppress(lc.LaunchError):
+                    lc.herdr_run("agent", "wait", name, "--until", "idle", "--until", "blocked",
+                                 "--until", "done", "--timeout", str(wait_ms), timeout=wait_ms / 1000 + 10)
             lc.herdr_run("agent", "send-keys", name, "esc")
         except lc.LaunchError as exc:
-            warn(f"usage governor: could not interrupt {name} ({exc})")
+            warn(f"usage governor: could not interrupt {name} ({exc}); will try again")
+            ok = False
             continue
+        state["stopped_agents"].append(name)
         t = by_id.get(name)
         dp.log("AGENT_STOPPED", f"{name} interrupted at weekly {state['pct']:g}%")
         emit(f"{name}  stopped: weekly usage {state['pct']:g}% (resumes after the reset)")
-        if t is not None and t["id"] not in state["held"]:
+        if t is None:   # a prep or reconcile agent: its job is held, not finished
+            if name not in state["held_jobs"]:
+                state["held_jobs"].append(name)
+        elif t["id"] not in state["held"]:
             state["held"].append(t["id"])
             with contextlib.suppress(tk.TicketError, tk.TicketInvalid):
                 tk.add_note(t["id"], f"{NOTE_PREFIX} agent stopped at weekly usage {state['pct']:g}%. Work is "
                                      f"left in its task folder; a new agent starts after the reset "
                                      f"({state['reset_at'] or 'time unknown'}).")
-    return True
+    return ok
 
 
 def _resume_held(settings: dict, state: dict, emit, warn) -> None:
@@ -187,6 +211,13 @@ def _resume_held(settings: dict, state: dict, emit, warn) -> None:
     except lc.LaunchError as exc:
         warn(f"usage governor: cannot ask herdr which agents are running ({exc}); will resume next cycle")
         return
+    for name in state["held_jobs"]:   # prep / reconcile: still in their tab, so just tell them to go on
+        if name in listed:
+            with contextlib.suppress(lc.LaunchError):
+                lc.herdr("agent", "prompt", name, "Weekly usage has reset; carry on with your job.")
+                emit(f"{name}  resumed after the usage reset")
+                dp.log("USAGE_RESUMED", f"{name} resumed after the weekly reset")
+    state["held_jobs"] = []
     keep = []
     for tid in state["held"]:
         try:
@@ -229,8 +260,8 @@ def evaluate(settings: dict, now: datetime, emit, warn) -> dict:
             dp.log("LAUNCH_RESUMED", f"weekly usage window reset or below the limit; launches allowed again "
                                      f"({'reset' if over else 'figure ' + format(w['used_percent'], 'g') + '%'})")
             emit("usage governor: launches allowed again")
-            state.update(paused=False, stopped=False, pinged=[], since=None)
-    if not (state["paused"] or state["stopped"]) and state["held"]:
+            state.update(paused=False, stopped=False, pinged=[], since=None, stopped_agents=[])
+    if not (state["paused"] or state["stopped"]) and (state["held"] or state["held_jobs"]):
         if json.dumps(state, sort_keys=True) != before:
             save_state(state)   # the relaunches below read the saved state: it must already say "lifted"
         _resume_held(settings, state, emit, warn)
@@ -247,17 +278,20 @@ def evaluate(settings: dict, now: datetime, emit, warn) -> dict:
             dp.log("LAUNCH_PAUSED", f"weekly usage {used:g}% reached the limit of {pause if pause and used >= pause else hard}%; "
                                     f"no agent will be launched until the reset ({state['reset_at'] or 'time unknown'})")
             emit(f"usage governor: weekly usage {used:g}%, launches paused")
-            if not stopping:
-                _ping(state, "usage_pause", "Launches paused",
-                      f"Weekly usage is {used:g}%. No new agents until the reset ({state['reset_at'] or 'time unknown'}).", warn)
         if stopping and not state["stopped"]:
             if _stop_agents(now, state, emit, warn):
                 state["stopped"] = True
                 dp.log("USAGE_STOP", f"weekly usage {used:g}% reached {hard}%; running agents stopped, "
                                      f"{len(state['held'])} ticket(s) held until the reset")
-                _ping(state, "usage_stop", "Agents stopped",
-                      f"Weekly usage is {used:g}%. Running agents were stopped; "
-                      f"{len(state['held'])} ticket(s) resume after the reset ({state['reset_at'] or 'time unknown'}).", warn)
+    # Pings are sent from the saved state, so one that could not be delivered is tried again next cycle.
+    when = state["reset_at"] or "time unknown"
+    if state["stopped"]:
+        _ping(state, "usage_stop", "Agents stopped",
+              f"Weekly usage is {state['pct'] or 0:g}%. Running agents were stopped; "
+              f"{len(state['held'])} ticket(s) resume after the reset ({when}).", warn)
+    elif state["paused"]:
+        _ping(state, "usage_pause", "Launches paused",
+              f"Weekly usage is {state['pct'] or 0:g}%. No new agents until the reset ({when}).", warn)
     if json.dumps(state, sort_keys=True) != before:
         try:
             save_state(state)

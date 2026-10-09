@@ -138,7 +138,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     # lift after the reset.
     try:
         governor.evaluate(settings, clock.now(), emit, warn)
-    except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired, lc.LaunchError) as exc:
+    except Exception as exc:   # noqa: BLE001 - the governor must never stop the rest of the cycle
         warn(f"usage governor: {exc}")
     if checks is not None:   # --watch only; before anything mirrors, or a mirror would undo the drag
         _pull_board_priorities(emit, warn)
@@ -151,15 +151,17 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     prompted: set[str] = set()
     if checks is not None:   # --watch only
         # Notes go first, before anything below decides that an idle agent has finished.
-        prompted = push_notes.push(tk.list_tickets(), emit, warn)
+        # (not to an agent the usage governor stopped: a note would wake it above the limit)
+        prompted = push_notes.push([t for t in tk.list_tickets() if t["id"] not in governor.held_ids()], emit, warn)
     for ticket_id, reason in lc.sweep_tabs(settings, warn):
         emit(f"{ticket_id}  stale tab swept: {reason}")
-    for t in lc.finish_investigations([t for t in tk.list_tickets() if t["id"] not in prompted], warn):
+    for t in lc.finish_investigations([t for t in tk.list_tickets()
+                                   if t["id"] not in prompted and t["id"] not in governor.held_ids()], warn):
         emit(f"{t['id']}  investigation {t['status']}")
         kaneo.mirror_quietly(t, warn)
         notify.notify_quietly(t, "failed" if t["status"] == "failed" else "investigated", warn)
-    held = governor.held_ids()   # stopped on purpose: the governor restarts them after the reset
-    for t in lc.lost_agents([t for t in tk.list_tickets() if t["id"] not in held], warn):
+    stopped = governor.held_ids()   # stopped on purpose: the governor restarts them after the reset
+    for t in lc.lost_agents([t for t in tk.list_tickets() if t["id"] not in stopped], warn):
         emit(f"{t['id']}  claimed, but its agent is not running in herdr (the tab died?); "
              f"task folder {t['repo']}/.worktrees/{t['branch'].removeprefix('task/')}")
         dp.log("AGENT_LOST", f"{t['id']} {t['assignee']} not listed in herdr")
@@ -181,8 +183,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     tickets = tk.list_tickets()
     paused = governor.refusal(settings, clock.now())
     if paused:   # before any reservation, so a refused launch is never counted against the day
-        emit(f"nothing launched: {paused}")
-        dp.log("DECISION", f"nothing launched: {paused}")
+        emit(f"nothing launched: {paused}")   # LAUNCH_PAUSED was logged when the pause began
         return code
     # The on-call agent has its own slot: it starts at once, whatever the normal
     # queue is doing, and never counts against the daily launch limit.
