@@ -30,6 +30,11 @@ def _isolated_environment(tmp_path, monkeypatch):
     # Never reach a real herdr: tests that need one point this at the fake.
     monkeypatch.setenv("FLEET_HERDR", str(tmp_path / "no-such-herdr"))
     monkeypatch.setenv("FLEET_GITLEAKS", str(_fake(tmp_path / "gl-clean", 0)))
+    # Never reach a real model: the watch may start the supervisor after any FAIL.
+    monkeypatch.setenv("FLEET_CLAUDE", str(tmp_path / "no-such-claude"))
+    yield
+    from fleet import supervisor_run
+    supervisor_run.reset()
 
 
 @pytest.fixture

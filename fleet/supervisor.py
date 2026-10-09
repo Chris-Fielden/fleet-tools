@@ -22,6 +22,8 @@ import os
 import re
 import signal
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 from . import dispatch as dp
@@ -159,10 +161,11 @@ def _kill_group(proc: subprocess.Popen) -> None:
         pass
 
 
-def run_model(prompt: str, cwd: Path) -> tuple[str, dict]:
+def run_model(prompt: str, cwd: Path, stop: threading.Event | None = None) -> tuple[str, dict]:
     """One fresh `claude -p` session. Returns (its answer, token usage). `cwd` is the
     human's own checkout, never the task folder (the agent can write there, and claude
-    reads project settings from where it runs). The prompt goes in on stdin."""
+    reads project settings from where it runs). The prompt goes in on stdin. When `stop`
+    is set (the watch is shutting down) the model's process group is killed at once."""
     if len(prompt) > PROMPT_MAX:
         raise SupervisorError(f"the supervisor prompt is {len(prompt)} characters, over the {PROMPT_MAX} cap")
     try:
@@ -171,12 +174,23 @@ def run_model(prompt: str, cwd: Path) -> tuple[str, dict]:
                                 start_new_session=True)
     except OSError as exc:
         raise SupervisorError(f"the supervisor model could not be run ({type(exc).__name__})") from None
+    deadline = time.monotonic() + MODEL_TIMEOUT
+    out, first = None, True
     try:
-        out, _ = proc.communicate(prompt, timeout=MODEL_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        _kill_group(proc)
-        proc.communicate()
-        raise SupervisorError(f"the supervisor model took longer than {MODEL_TIMEOUT} seconds") from None
+        while out is None:
+            if stop is not None and stop.is_set():
+                _kill_group(proc)
+                proc.communicate()
+                raise SupervisorError("the supervisor model was stopped")
+            left = deadline - time.monotonic()
+            if left <= 0:
+                _kill_group(proc)
+                proc.communicate()
+                raise SupervisorError(f"the supervisor model took longer than {MODEL_TIMEOUT} seconds")
+            try:
+                out, _ = proc.communicate(prompt if first else None, timeout=min(0.5, left))
+            except subprocess.TimeoutExpired:
+                first = False
     finally:
         _kill_group(proc)   # anything the model left running in its group goes too
     if proc.returncode != 0:
@@ -239,6 +253,15 @@ def note_text(reply: dict, tip: str) -> str:
     if reply["design"]:
         text += f"\nDESIGN CHANGE: {reply['design']}"
     return _clip(text, tk.NOTE_MAX)
+
+
+def ask(t: dict, repo: Path, base: str, tip: str, wt: Path, cwd: Path | None = None,
+        stop: threading.Event | None = None) -> tuple[dict, dict]:
+    """Ask the model about ticket `t` and parse the answer: (reply, usage). Reads only;
+    writes nothing, so it is safe to run off the watch cycle. Raises SupervisorError."""
+    history = rh.review_history(repo, wt, base, tip)
+    text, usage = run_model(build_prompt(t, repo, base, tip, history), cwd or repo, stop)
+    return parse_reply(text), usage
 
 
 def classify(tid: str, repo: Path, base: str, tip: str, wt: Path, cwd: Path | None = None) -> dict:
