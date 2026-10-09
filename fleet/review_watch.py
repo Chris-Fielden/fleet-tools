@@ -794,7 +794,14 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
     except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
         warn(f"on-call check: {exc}")
     process_recoveries(settings, state, now, emit, warn)
-    _run_supervisor(sup, settings, now, recovering | {r["id"] for r in pending_recoveries(warn)}, warn)
+    failing = {r["id"] for r in pending_recoveries(warn)}
+    busy = recovering | failing
+    try:
+        if sr.continue_loops(sup, settings, failing, busy, emit, warn):
+            _save_supervisor(sup, warn)
+    except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
+        warn(f"supervisor restart: {exc}")
+    _run_supervisor(sup, settings, now, busy | set(sup["pending"]), warn)
     live = {t["id"] for t in tickets} | locked
     for name in ("blocked_since", "stopped_since", "seen", "fresh", "dialog_pinged"):
         state[name] = {k: v for k, v in state[name].items() if k in live}
