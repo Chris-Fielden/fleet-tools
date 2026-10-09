@@ -123,6 +123,12 @@ def sent(ntfy):
     return [(r["body"]["title"], r["body"]["message"], r["priority"]) for r in ntfy.requests]
 
 
+def no_dialog(ntfy):
+    """The pings that are not EM-21's one "Agent dialog" ping for a blocked agent."""
+    return [(r["body"]["title"], r["body"]["message"], r["priority"]) for r in ntfy.requests
+            if not r["body"]["title"].startswith("Agent dialog")]
+
+
 # --- ready to ship -----------------------------------------------------------
 
 def test_pass_summary_and_idle_agent_moves_to_review_with_one_ping(rig, ntfy):
@@ -163,7 +169,7 @@ def test_a_busy_agent_is_not_ready(rig, ntfy, state):
     rig.finish()
     rig.set_agent(state)
     rig.cycle()
-    assert rig.get()["status"] == "claimed" and ntfy.requests == []
+    assert rig.get()["status"] == "claimed" and no_dialog(ntfy) == []
 
 
 def test_a_vanished_agent_is_not_ready(rig, ntfy):
@@ -407,11 +413,11 @@ def test_blocked_over_twenty_minutes_fails_the_ticket_with_one_low_ping(rig, ntf
     rig.set_agent("blocked")
     rig.cycle(0)
     rig.cycle(19)
-    assert ntfy.requests == [] and rig.get()["status"] == "claimed"
+    assert no_dialog(ntfy) == [] and rig.get()["status"] == "claimed"
     rig.cycle(21)
     rig.cycle(30)
     assert rig.get()["status"] == "failed" and "blocked" in rig.get()["close_note"]
-    assert [t[0] for t in sent(ntfy)] == oncall_ping(rig) and sent(ntfy)[0][2] == "low"
+    assert [t[0] for t in no_dialog(ntfy)] == oncall_ping(rig) and no_dialog(ntfy)[0][2] == "low"
 
 
 def test_stalled_for_forty_five_minutes_fails_the_ticket_with_one_low_ping(rig, ntfy):
@@ -465,7 +471,7 @@ def test_blocked_then_ready_then_blocked_again_starts_a_new_spell(rig, ntfy):
     rig.set_agent("blocked")
     rig.cycle(6)            # back to claimed; blocked afresh
     rig.cycle(22)           # 16 minutes into the new spell, 22 since the first
-    assert [t[0] for t in sent(ntfy)] == [f"{rig.id} ready to ship"]
+    assert [t[0] for t in no_dialog(ntfy)] == [f"{rig.id} ready to ship"]
     assert rig.get()["status"] == "claimed"
     rig.cycle(27)
     assert rig.get()["status"] == "failed"
@@ -514,15 +520,15 @@ def test_a_failure_ping_that_cannot_be_sent_is_retried_until_it_goes_through_the
         rig.set_agent("blocked")
         rig.cycle(0)
         rig.cycle(21)
-        assert rig.get()["status"] == "failed" and rig.warnings and len(fake.requests) == 1
+        assert rig.get()["status"] == "failed" and rig.warnings and len(fake.requests) == 2   # the dialog ping, then on-call's
         rig.cycle(22)                      # the ticket is closed, yet the ping is still tried
-        assert len(fake.requests) == 2
+        assert len(fake.requests) == 3
         fake.status = 200
         rig.cycle(23)
-        assert len(fake.requests) == 3 and fake.requests[-1]["body"]["title"] == f"{rig.id} failed, on-call OC-1 is on it"
+        assert len(fake.requests) == 4 and fake.requests[-1]["body"]["title"] == f"{rig.id} failed, on-call OC-1 is on it"
         rig.cycle(24)
         rig.cycle(25)
-        assert len(fake.requests) == 3     # delivered once: never again
+        assert len(fake.requests) == 4     # delivered once: never again
         assert len([t for t in tk.list_tickets() if t.get("oncall")]) == 1
         assert json.loads(rw.state_path().read_text())["pending"] == []
     finally:
@@ -539,7 +545,7 @@ def test_a_pending_failure_ping_survives_a_restart(rig):
         assert [p["event"] for p in json.loads(rw.state_path().read_text())["pending"]] == ["oncall"]
         fake.status = 200
         rig.cycle(22)                      # a fresh load of the same state file
-        assert fake.requests[-1]["body"]["title"].endswith("is on it") and len(fake.requests) == 2
+        assert fake.requests[-1]["body"]["title"].endswith("is on it") and len(fake.requests) == 3
     finally:
         fake.stop()
 
@@ -604,7 +610,7 @@ def test_messages_carry_no_body_or_notes(rig, ntfy):
     rig.set_agent("blocked")
     rig.cycle(0)
     rig.cycle(21)   # fails: the on-call ticket's body copies the spec, but no ping may
-    assert len(ntfy.requests) == 1
+    assert len(no_dialog(ntfy)) == 1
     assert "SECRET" not in json.dumps([r["body"] for r in ntfy.requests])
 
 
@@ -636,7 +642,7 @@ def test_priorities_can_be_overridden(rig, ntfy):
     rig.set_agent("blocked")
     rig.cycle(0)
     rig.cycle(21)
-    assert sent(ntfy)[0][2] == "max" and ntfy.requests[0]["body"]["priority"] == 5
+    assert no_dialog(ntfy)[0][2] == "max" and ntfy.requests[-1]["body"]["priority"] == 5
 
 
 @pytest.mark.parametrize("bad", [{"nonsense": "high"}, {"ship": "loud"}, {"ship": 4}, ["ship"],

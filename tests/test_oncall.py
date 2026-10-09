@@ -21,7 +21,7 @@ from fleet import ticket as tk
 from test_dispatch import calls, claim, git, herdr_log, make_repo, mk, projects  # noqa: F401
 from test_kaneo import API_KEY, write_config as write_kaneo_config
 from test_notify import write_config as write_ntfy_config
-from test_review_watch import Rig, ntfy, rig, sent  # noqa: F401
+from test_review_watch import Rig, no_dialog, ntfy, rig, sent  # noqa: F401
 from test_watch import FakeClock, watch
 
 
@@ -217,7 +217,7 @@ def test_a_stopped_agent_closes_the_ticket_and_launches_one_on_call_at_once(rig,
     # the normal slot is untouched: the other ticket still runs and the waiting one still waits
     assert tk.load_ticket(other["id"])["status"] == "claimed"
     assert tk.load_ticket(waiting["id"])["status"] == "open"   # at capacity: it did not take the on-call slot
-    assert [(t[0], t[2]) for t in sent(ntfy)] == [(f"{rig.id} failed, on-call OC-1 is on it", "low")]
+    assert [(t[0], t[2]) for t in no_dialog(ntfy)] == [(f"{rig.id} failed, on-call OC-1 is on it", "low")]
 
 
 @pytest.mark.parametrize("kind, minutes, stop, agent", [
@@ -231,7 +231,7 @@ def test_stall_and_block_launch_the_on_call_agent_too(rig, ntfy, herdr_log, kind
     assert {"stall": "stalled", "block": "blocked"}[kind] in rig.get()["close_note"]
     (oc,) = oncall_tickets()
     assert oc["status"] == "claimed" and agent_starts(herdr_log) == [oc["id"].lower()]
-    assert [(t[0], t[2]) for t in sent(ntfy)] == [(f"{rig.id} failed, on-call {oc['id']} is on it", "low")]
+    assert [(t[0], t[2]) for t in no_dialog(ntfy)] == [(f"{rig.id} failed, on-call {oc['id']} is on it", "low")]
 
 
 def test_a_permission_prompt_is_a_failure_not_something_to_answer(rig, ntfy, herdr_log):
@@ -245,7 +245,7 @@ def test_a_permission_prompt_is_a_failure_not_something_to_answer(rig, ntfy, her
 def test_no_event_pings_twice_for_the_same_ticket(rig, ntfy, herdr_log):
     stop_after_fail(rig)
     go(rig, 3, 12)
-    assert len(ntfy.requests) == 1 and len(oncall_tickets()) == 1
+    assert len(no_dialog(ntfy)) == 1 and len(oncall_tickets()) == 1
     assert agent_starts(herdr_log) == ["oc-1"]
     state = json.loads((tk.fleet_home() / "review-watch.json").read_text())
     assert state["pending"] == []   # delivered, nothing left to retry
@@ -299,7 +299,7 @@ def test_a_fourth_on_call_need_in_one_day_launches_nothing(rig, ntfy, herdr_log)
     assert rig.get()["status"] == "failed"
     assert len(oncall_tickets()) == 3 and agent_starts(herdr_log) == []
     assert "limit" in rig.get()["notes"][-1]["text"]
-    assert [(t[0], t[2]) for t in sent(ntfy)] == [(f"{rig.id} needs a human, see notes", "low")]
+    assert [(t[0], t[2]) for t in no_dialog(ntfy)] == [(f"{rig.id} needs a human, see notes", "low")]
 
 
 def test_the_on_call_cap_is_a_setting(rig, ntfy, herdr_log):

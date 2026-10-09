@@ -7,10 +7,12 @@ reasons.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
 import subprocess
+from pathlib import Path
 
 from . import dispatch as dp
 from . import settings as st
@@ -63,9 +65,28 @@ def _settings_rows() -> tuple[list[tuple[str, str, str]], dict | None]:
     return rows, cfg
 
 
+def _claude_dialog_row() -> tuple[str, str, str]:
+    """Claude Code's 'Teach auto mode about your environment?' dialog stalls an agent
+    unless skillOverrides sets auto-mode-setup to off. Only warns; prints no file content."""
+    path = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "settings.json"
+    what = "claude auto-mode"
+    fix = "set skillOverrides {\"auto-mode-setup\": \"off\"} in it"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return ("warn", what, f"{path} not found; {fix}")
+    except (OSError, ValueError):
+        return ("warn", what, f"{path} cannot be read as JSON; {fix}")
+    overrides = data.get("skillOverrides") if isinstance(data, dict) else None
+    if not isinstance(overrides, dict) or overrides.get("auto-mode-setup") != "off":
+        return ("warn", what, f"skillOverrides auto-mode-setup is not off in {path}; agents can stall on a dialog; {fix}")
+    return ("ok", what, "skillOverrides auto-mode-setup is off")
+
+
 def checks() -> list[tuple[str, str, str]]:
     rows, cfg = _settings_rows()
     rows += [_tool_row(*t) for t in TOOLS]
+    rows.append(_claude_dialog_row())
     if cfg is not None:
         try:
             rows += tr.get_tracker(settings=cfg).check()

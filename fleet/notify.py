@@ -35,7 +35,8 @@ TITLE_MAX = 60
 DEPRECATED_EVENTS = ("blocked", "review_failed", "stalled")
 EVENTS = ("ready", "urgent", "failed", "proposed", "investigated", "ship", "blocked",
           "review_failed", "review_unrecorded", "stalled", "oncall", "needs_human",
-          "shipped", "ship_failed", "dispatcher_down", "ship_list", "settings_invalid", "usage_pause", "usage_stop")
+          "shipped", "ship_failed", "dispatcher_down", "ship_list", "settings_invalid", "usage_pause", "usage_stop",
+          "dialog")
 _HEADLINE = {"ready": "Review ready", "urgent": "Urgent ticket", "failed": "Ticket failed",
              "proposed": "Follow-up proposed", "investigated": "Investigation done",
              "ship": "Ready to ship", "blocked": "Agent blocked", "review_failed": "Review FAILED",
@@ -44,7 +45,7 @@ _HEADLINE = {"ready": "Review ready", "urgent": "Urgent ticket", "failed": "Tick
              "shipped": "Shipped", "ship_failed": "Ship refused",
              "dispatcher_down": "Dispatcher down", "ship_list": "Ship list ready",
              "settings_invalid": "Settings invalid", "usage_pause": "Launches paused",
-             "usage_stop": "Agents stopped: weekly usage"}
+             "usage_stop": "Agents stopped: weekly usage", "dialog": "Agent dialog"}
 # ntfy's own names for its five priorities.
 PRIORITY_NUMBERS = {"min": 1, "low": 2, "default": 3, "high": 4, "max": 5}
 # Per event; override any of them under "priorities" in notify.json.
@@ -53,14 +54,15 @@ PRIORITIES = {"ready": "default", "urgent": "high", "failed": "high", "proposed"
               "review_failed": "high", "review_unrecorded": "high", "stalled": "default",
               "oncall": "low", "needs_human": "low", "shipped": "default", "ship_failed": "high",
               "dispatcher_down": "high", "ship_list": "default",
-              "settings_invalid": "low", "usage_pause": "low", "usage_stop": "high"}
+              "settings_invalid": "low", "usage_pause": "low", "usage_stop": "high",
+              "dialog": "low"}
 _TAGS = {"ready": ["mag"], "urgent": ["rotating_light"], "failed": ["x"], "proposed": ["bulb"],
          "investigated": ["mag_right"], "ship": ["white_check_mark"], "blocked": ["hand"],
          "review_failed": ["x"], "review_unrecorded": ["warning"], "stalled": ["hourglass"],
          "oncall": ["pager"], "needs_human": ["sos"], "shipped": ["rocket"],
          "ship_failed": ["no_entry"], "dispatcher_down": ["rotating_light"], "ship_list": ["package"],
          "settings_invalid": ["warning"], "usage_pause": ["pause_button"],
-         "usage_stop": ["octagonal_sign"]}
+         "usage_stop": ["octagonal_sign"], "dialog": ["hand"]}
 # Events about a failure: their message says why (see _failure_lines).
 FAILURE_EVENTS = ("failed", "oncall", "needs_human")
 # Events whose `detail` is the whole point (the result of a web ship).
@@ -223,6 +225,15 @@ def _message(ticket: dict, event: str, cfg: dict, detail: str | None = None) -> 
     elif event == "ship_list":   # `detail` is the whole message, e.g. "3 ready to ship, list ready"
         title = _short(detail or "ship list ready")
         text = "run `ship --list`"
+        detail = None
+    elif event == "dialog":   # `detail` is "label\x1ftab\x1fsanitized pane tail" (see review_watch)
+        label, tab, tail = ((detail or "").split("\x1f", 2) + ["", ""])[:3]
+        title = f"{_HEADLINE[event]}: {ticket['id']} ({_short(label, 30)})"
+        text = f"tab {_short(tab, 40)}"
+        if tail.strip():
+            full = f"{text} · {_short(tail, 300)}"
+            # Pane text is agent-controlled and this goes to a phone: never let a secret out.
+            text = full if not tk.check_secrets("notification", full) else text
         detail = None
     elif event == "needs_human":
         title = f"{ticket['id']} needs a human, see notes"
