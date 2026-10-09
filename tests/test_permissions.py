@@ -38,8 +38,10 @@ def matches(pattern, command):
     return re.fullmatch(regex, command, re.S) is not None
 
 
-def covered(allow, command):
-    """Claude Code's rule: every subcommand must match some allow rule."""
+def approx_covered(allow, command):
+    """APPROXIMATION of Claude Code's rule (every subcommand must match an allow rule).
+    It splits on every separator, even inside quotes, and does not parse $(...) or backticks,
+    so it only shows the rules do not trivially cover human-only commands, not real behaviour."""
     parts = [p.strip() for p in SEPARATORS.split(command) if p.strip()]
     return bool(parts) and all(any(matches(r, p) for r in rules(allow)) for p in parts)
 
@@ -61,8 +63,8 @@ def test_every_rule_is_narrow_bash():
 
 @pytest.mark.parametrize("command", HUMAN_ONLY)
 def test_no_allow_rule_covers_a_human_only_command(command):
-    assert not covered(pm.ALLOW, command)
-    assert not covered(pm.RESEARCH_ALLOW, command)
+    assert not approx_covered(pm.ALLOW, command)
+    assert not approx_covered(pm.RESEARCH_ALLOW, command)
 
 
 @pytest.mark.parametrize("command", [
@@ -77,10 +79,21 @@ def test_guard_still_blocks(command, tmp_path):
 
 
 def test_compound_with_human_only_command_is_not_covered():
-    assert covered(pm.ALLOW, "ticket note EM-1 done")
-    assert not covered(pm.ALLOW, "ticket note EM-1 done; ship EM-1")
-    assert not covered(pm.ALLOW, "ticket note EM-1 done\nticket close EM-1")
-    assert not covered(pm.ALLOW, "scripts/check.sh && git push")
+    assert approx_covered(pm.ALLOW, "ticket note EM-1 done")
+    assert not approx_covered(pm.ALLOW, "ticket note EM-1 done; ship EM-1")
+    assert not approx_covered(pm.ALLOW, "ticket note EM-1 done\nticket close EM-1")
+    assert not approx_covered(pm.ALLOW, "scripts/check.sh && git push")
+
+
+def test_approximation_limits_are_known(tmp_path):
+    # A quoted separator is split too (real Claude Code may not split it): the helper errs
+    # towards "not covered".
+    assert not approx_covered(pm.ALLOW, 'ticket note EM-1 "a; b"')
+    # Substitutions are not parsed, so the helper cannot judge a hostile one hidden in an
+    # allowed-looking command. The guard, not these rules, is what stops it.
+    hostile = "ticket note EM-1 $(sh" + "ip EM-1)"
+    assert approx_covered(pm.ALLOW, hostile)
+    assert bash(hostile, tmp_path)
 
 
 def test_hooks_block_and_hook_files_are_wired():

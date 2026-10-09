@@ -22,10 +22,10 @@ Evidence is a ticket or note, not session-log counts (agents may not read sessio
 | Rule | Evidence | Why it is safe enough |
 |---|---|---|
 | `git add -A` | EM-11 spec: agents must commit before stopping (CLAUDE.md rule 2) | Exact; stages only. The guard blocks writes from the main checkout. |
-| `git commit -m *` | same | `-m` first, any later flags (e.g. `--amend`) also match; commits locally. A message with `;`, `&`, `\|`, newline or `$(...)` is split or unmatched and prompts. |
+| `git commit -m *` | same | `-m` first, any later flags (e.g. `--amend`) also match; commits locally. Per the permissions doc (re-read 2026-10-09), separators split a command into subcommands that must each match, so a message with unquoted `;`, `&`, `\|` or a newline may prompt; not verified in a live session. |
 | `scripts/check.sh` | EM-11 spec, CLAUDE.md rule 2 | Exact; the project's own check. |
 | `scripts/review.sh` | EM-11 spec, CLAUDE.md rule 3 | Exact; the mandated reviewer call (sends the branch diff to the other model, as the rulebook requires). |
-| `ticket note *` | EM-11 spec; ID-11 finding: research agents stall on it | Writes a note on any ticket ID (not tied to the agent's own). Notes with `;`, `&`, `\|`, newline or `$(...)` prompt (documented, not fixed). |
+| `ticket note *` | EM-11 spec; ID-11 finding: research agents stall on it | Writes a note on any ticket ID (not tied to the agent's own). Notes with unquoted separators or substitutions may prompt (per the docs; not observed live; not fixed). |
 | `ticket show *` | same | Read-only. |
 
 Research folders get only the two `ticket` rules.
