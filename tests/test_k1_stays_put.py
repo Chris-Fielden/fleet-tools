@@ -139,6 +139,16 @@ def test_high_risk_needs_both_reviewers_to_settle(repo_ticket, world, herdr_log)
     assert len(prompts(herdr_log)) == 1
 
 
+def test_medium_risk_settles_on_a_sonnet_pass(repo_ticket, world, herdr_log):
+    repo, t = repo_ticket
+    start(t, world)
+    review(repo, who="Claude (sonnet)", name="claude.md")   # the gate accepts this below high risk
+    tk.record_verdict("task/demo", "app", "PASS", tip_of(repo), "claude sonnet")
+    tk.add_note(t["id"], "one more")
+    assert push() == ([], [])
+    assert prompts(herdr_log) == []
+
+
 def test_unreadable_review_file_means_not_settled_so_notes_flow(repo_ticket, world, herdr_log):
     repo, t = repo_ticket
     start(t, world)

@@ -81,7 +81,7 @@ def baseline(ticket: dict, overwrite: bool = False) -> None:
 def _settled(t: dict, settings: dict) -> bool:
     """Does the newest commit of the ticket's branch have a PASS from every reviewer the merge
     gate needs? Uses the gate's own code (risk.latest_reviews / check_reviews, the same level
-    and the same Claude-model rule). A review of an older commit never counts. Any trouble
+    and the same Claude-model rule, which only high risk has). A review of an older commit never counts. Any trouble
     working it out (git, review files) means NOT settled: notes then flow as before."""
     try:
         repo = settings["projects_dir"] / t["repo"]
@@ -97,10 +97,7 @@ def _settled(t: dict, settings: dict) -> bool:
         stored, _ = rk.level_for_branch(tk.list_tickets(), branch, rules, t["repo"])
         level = rk.higher(stored, diff_level)
         reviews = rk.latest_reviews(repo / ".worktrees" / branch.removeprefix("task/") / ".reviews", tip)
-        if rk.check_reviews(reviews, level):
-            return False
-        claude = reviews.get("claude")
-        return not (claude and not rk.STRONG_CLAUDE_RE.search(claude["reviewer"]))
+        return not rk.check_reviews(reviews, level)   # incl. the strong-Claude rule, at high risk only
     except Exception:   # deliberately broad: "could not tell" must mean "not settled", never a crash
         return False
 
