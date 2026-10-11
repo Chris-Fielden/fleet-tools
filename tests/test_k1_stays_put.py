@@ -377,6 +377,15 @@ def test_finish_task_runs_quiesce_between_push_and_worktree_removal():
     assert text.index('git push origin "$base"') < text.index('--quiesce "$ticket"') < text.index('git worktree remove "$wt"')
 
 
+def test_finish_task_keeps_worktree_and_branch_when_quiesce_fails():
+    import subprocess
+    path = __import__("pathlib").Path(__file__).resolve().parent.parent / "scripts" / "finish-task.sh"
+    text = path.read_text()
+    guard = text[text.index('--quiesce "$ticket"'):text.index('git worktree remove "$wt"')]
+    assert "exit 1" in guard and "left in place" in guard   # a failed quiesce stops before the removal
+    assert subprocess.run(["bash", "-n", str(path)]).returncode == 0
+
+
 def test_ship_quiesce_will_not_commit_what_looks_like_a_secret(repo_ticket, world, leaky_gitleaks, capsys):
     repo, t = repo_ticket
     world([{"name": t["id"].lower(), "agent_status": "idle", "tab_id": "w1:t1"}], [{"tab_id": "w1:t1", "label": t["id"]}])

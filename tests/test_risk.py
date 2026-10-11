@@ -516,6 +516,9 @@ def test_review_sh_rejects_unknown_reviewer(task, env):
 
 def finish(repo, answers, *flags, extra_env=None):
     e = dict(os.environ, FLEET_TICKET=TICKET, FLEET_HOME=os.environ["FLEET_HOME"])
+    # these tests are about the merge gate; the quiesce step (tested in test_k1_stays_put.py)
+    # must not depend on whatever `ship` is installed on this machine
+    e.setdefault("FLEET_SHIP", "true")
     e.update(extra_env or {})
     return subprocess.run(["bash", "scripts/finish-task.sh", "demo", *flags], cwd=repo,
                           input=answers, capture_output=True, text=True, env=e)
