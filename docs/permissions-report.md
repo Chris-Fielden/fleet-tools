@@ -22,7 +22,7 @@ Evidence is a ticket or note, not session-log counts (agents may not read sessio
 | Rule | Evidence | Why it is safe enough |
 |---|---|---|
 | `git add -A` | EM-11 spec: agents must commit before stopping (CLAUDE.md rule 2) | Exact; stages only. The guard blocks writes from the main checkout. |
-| `git commit -m *` | same | `-m` first, any later flags (e.g. `--amend`, `--no-verify`) also match (add a deny rule if git hooks ever become a gate); commits locally. Per the permissions doc (re-read 2026-10-09), separators split a command into subcommands that must each match, so a message with unquoted `;`, `&`, `\|` or a newline may prompt; not verified in a live session. |
+| `git commit -m *` | same | `-m` first, any later flags (e.g. `--amend`, `--no-verify`, `-n`) would match, so they are in the deny list (a message containing ` -n `, `--amend` or `--no-verify` is denied too, so avoid those substrings; combined short flags such as `-nm` are not covered, and nothing in the repo uses git hooks as a gate today); commits locally. Per the permissions doc (re-read 2026-10-09), separators split a command into subcommands that must each match, so a message with unquoted `;`, `&`, `\|` or a newline may prompt; not verified in a live session. |
 | `scripts/check.sh` | EM-11 spec, CLAUDE.md rule 2 | Exact; the project's own check. |
 | `scripts/review.sh` | EM-11 spec, CLAUDE.md rule 3 | Exact; the mandated reviewer call (sends the branch diff to the other model, as the rulebook requires). |
 | `ticket note *` | EM-11 spec; ID-11 finding: research agents stall on it | Writes a note on any ticket ID (not tied to the agent's own). Notes with unquoted separators or substitutions may prompt (per the docs; not observed live; not fixed). |
@@ -30,7 +30,33 @@ Evidence is a ticket or note, not session-log counts (agents may not read sessio
 
 Research folders get only the two `ticket` rules (for any ticket ID; tying `ticket note` to the agent's own ticket is a possible later guard change).
 
+`git add <path>`, `git add .` and single-file pytest runs also prompt (only `git add -A` is allowed); watch that unattended builders do not stall on them. The allow-list tests show only that patterns do not trivially match human-only commands, not that the list is safe.
+
 `scripts/review.sh` and `scripts/check.sh` are exact matches: forms with arguments or a prefix, such as `REVIEWER=both scripts/review.sh`, are not covered and may prompt or go to the auto-mode classifier.
+
+## Deny rules
+
+Deny rules beat allow rules. They may only get stricter: nothing here adds an
+allow rule or weakens the guard hooks. They also reach research agents through
+the `--settings` file (EM-25), but research agents have no commit allow rule,
+so the commit rules are inert there. Each rule is a literal pattern in
+`fleet/permissions.py` (`DENY`), and `.claude/settings.json` equals it (tested).
+
+| Rule | Why |
+|---|---|
+| `git push *` | Only the human pushes (CLAUDE.md rule 4). |
+| `git push` | Same, bare form. |
+| `git commit * --no-verify*` | Skips git hooks; `git commit -m *` would otherwise match it as a later flag. |
+| `git commit * -n *` | Short form of `--no-verify`, in the middle of a command. |
+| `git commit * -n` | Short form of `--no-verify`, as the last word. |
+| `git commit * --amend*` | Rewrites already reviewed history. |
+
+Known limits (not covered, and not claimed covered): combined short flags
+(`-nm`, `-an`), git long-option abbreviations (`--no-verif`, `--amen`),
+`git -c core.hooksPath=/dev/null commit`, and `--no-gpg-sign`. Any fix may
+only be an extra deny rule. A commit message containing ` -n `, `--amend` or
+`--no-verify` is denied too (false positive). `git commit -n -m x` (flag first)
+matches no allow rule, so it only prompts.
 
 ## Removed from the old list
 
