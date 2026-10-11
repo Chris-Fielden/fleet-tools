@@ -255,7 +255,7 @@ def test_once_launches_a_proposed_investigation(projects, herdr_log, env, capsys
     assert str(projects) in prompt[3]
     flags = [a for call in c for a in call if a.startswith("-")]
     assert set(flags) <= {"--workspace", "--cwd", "--label", "--no-focus", "--kind",
-                          "--pane", "--", "--model"}
+                          "--pane", "--", "--model", "--settings"}
     assert "to investigate" in capsys.readouterr().out
     assert not (projects / "ideas").exists()  # no task folder, no repo
 

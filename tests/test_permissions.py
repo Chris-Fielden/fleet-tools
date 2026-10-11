@@ -104,8 +104,20 @@ def test_research_hooks_mirror_repo_matchers():
     assert set(SETTINGS) == {"hooks", "statusLine", "permissions"}
 
 
-def test_research_settings_have_hooks_statusline_and_only_ticket_rules():
+def test_research_folder_settings_carry_no_permissions_block():
+    """Allow rules in a project file wait for workspace trust and raise a dialog (EM-25):
+    the folder file has hooks and statusLine only; the rules go on the launch command."""
     got = guard_hook_settings()
     assert "PreToolUse" in got["hooks"] and "statusLine" in got
-    assert got["permissions"]["allow"] == ["Bash(ticket note *)", "Bash(ticket show *)"]
-    assert got["permissions"]["deny"] == pm.DENY
+    assert set(got) == {"hooks", "statusLine"}
+
+
+def test_research_rules_file_is_exactly_the_em22_rules(tmp_path, monkeypatch):
+    from fleet.launch import research_rules_file
+    monkeypatch.setenv("FLEET_HOME", str(tmp_path / "fleet"))
+    path = Path(research_rules_file())
+    assert path.parent == tmp_path / "fleet" and path.name == "research-settings.json"
+    data = json.loads(path.read_text())
+    assert data == {"permissions": {"allow": pm.RESEARCH_ALLOW, "deny": pm.DENY}}
+    assert pm.RESEARCH_ALLOW == ["Bash(ticket note *)", "Bash(ticket show *)"]
+    assert pm.DENY == ["Bash(git push *)", "Bash(git push)"]

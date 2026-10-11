@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import risk as rk
+from . import startup_block
 from . import ticket as tk
 from .settings import (  # noqa: F401  (re-exported: callers use dp.load_settings etc.)
     DEFAULTS, MIN_WATCH_INTERVAL, SettingsError, load_settings, settings_path)
@@ -389,6 +390,9 @@ def _judge(t: dict, tickets: dict, claimed: list[dict], settings: dict, holders:
     if t["type"] not in LAUNCH_TYPES:
         d.skip = "handled in phase 4"
         return d
+    if t["id"] in startup_block.blocked_ids():
+        d.skip = BLOCKED_SKIP
+        return d
     # 1b. Investigate first (security-sensitive paths); no rules to judge by: fail closed
     if rules is None:
         d.skip = "the risk rules could not be read, so investigate-first can't be checked"
@@ -476,6 +480,9 @@ def started_today(tickets: list[dict], now: datetime | None = None) -> int:
                if t["type"] == "investigate" and t.get("started_at", "").startswith(today))
 
 
+BLOCKED_SKIP = "not launched: startup blocked, waiting for a human"
+
+
 def decide_investigations(tickets: list[dict], settings: dict, now: datetime | None = None) -> list[Decision]:
     """One Decision per waiting investigate ticket (proposed, or open once a
     human approved it): human-filed first, then oldest first. Only the first
@@ -490,10 +497,13 @@ def decide_investigations(tickets: list[dict], settings: dict, now: datetime | N
                      key=lambda t: (t["created_by"] != "human", *tk.oldest_first_key(t)))
     decisions = []
     picked = False
+    stuck = startup_block.research_hold()   # one stuck start holds every research launch
     for t in waiting:
         d = Decision(ticket=t, name=t["id"].lower(), agent=agent,
                      model=settings["models"].get(agent), research=True)
-        if folder_problem:
+        if stuck:
+            d.skip = f"{BLOCKED_SKIP} ({stuck}; fleet unblock {stuck})"
+        elif folder_problem:
             d.skip = folder_problem
         elif t["status"] == "proposed" and not settings["auto_investigate"]:
             d.skip = "auto_investigate is off; approve it to investigate"

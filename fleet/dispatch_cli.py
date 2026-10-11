@@ -11,6 +11,7 @@ from pathlib import Path
 from . import dispatch as dp
 from . import dupes
 from . import governor
+from . import startup_block
 from . import kaneo
 from . import launch as lc
 from . import notify
@@ -164,7 +165,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
         notify.notify_quietly(t, "failed" if t["status"] == "failed" else "investigated", warn)
     # held: stopped on purpose, the governor restarts them after the reset; looping: the supervisor's
     # LOOP restart is about to start their fresh session (a second agent would be a duplicate)
-    stopped = governor.held_ids() | supervisor_run.pending_ids()
+    stopped = governor.held_ids() | supervisor_run.pending_ids() | startup_block.blocked_ids()
     for t in lc.lost_agents([t for t in tk.list_tickets() if t["id"] not in stopped], warn):
         emit(f"{t['id']}  claimed, but its agent is not running in herdr (the tab died?); "
              f"task folder {t['repo']}/.worktrees/{t['branch'].removeprefix('task/')}")

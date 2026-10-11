@@ -382,7 +382,8 @@ def _start_job(kind: str, tickets: list[dict], settings: dict, warn) -> dict:
         prompt = (PREP_PROMPT if kind == "prep" else RECONCILE_PROMPT).format(manifest=manifest, report=report)
         agent = settings["builder"]
         d = dp.Decision(ticket={"id": job["label"]}, agent=agent, model=settings["models"].get(agent), prompt=prompt)
-        job["tab"] = lc.start_agent(d, folder, lc.ensure_workspace(settings["herdr_workspace"]), warn)
+        job["tab"] = lc.start_agent(d, folder, lc.ensure_workspace(settings["herdr_workspace"]), warn,
+                                  research_rules=True)
     except BaseException as exc:
         if not isinstance(exc, lc.AgentMayBeRunning):   # an agent that may be running keeps its locks
             with _state() as st:
