@@ -177,21 +177,30 @@ def push(tickets: list[dict], emit, warn, settings: dict | None = None) -> set[s
         for t in claimed:
             notes = t.get("notes") or []
             done = new[t["id"]]
-            # Skip notes by anyone else, then see whether the next one is the human's.
-            while done < len(notes) and notes[done].get("by") != "human":
+            # Leftovers (whoever saved them: review.sh runs in the agent's own environment) go to
+            # the leftovers ticket and never to the agent. Other notes by anyone else are skipped,
+            # then see whether the next one is the human's.
+            while done < len(notes):
+                text = notes[done].get("text") or ""
+                if LEFTOVERS_RE.fullmatch(text):
+                    if not _file_leftovers(t, text, warn):
+                        break   # could not be filed: it stays counted as not handled, tried next cycle
+                elif notes[done].get("by") == "human":
+                    break
                 done += 1
             new[t["id"]] = done
             if done >= len(notes):
                 continue
+            if LEFTOVERS_RE.fullmatch(notes[done].get("text") or ""):
+                continue   # could not be filed this cycle: never sent to the agent instead
             held = hold_reason(t, settings)
             if held:
-                # Leftovers go to the leftovers ticket and are counted; an ordinary note stays
-                # (it is delivered if the ticket stops being held) and is logged once.
-                while done < len(notes) and (notes[done].get("by") != "human"
-                                             or _file_leftovers(t, notes[done].get("text") or "", warn)):
-                    done += 1
-                new[t["id"]] = done
-                if done < len(notes) and (t["id"], done) not in _held_logged:
+                # An ordinary note stays (delivered if the ticket stops being held) and is logged
+                # once. Leftovers behind it are filed now (a repeat is a no-op) and never wait.
+                for later in notes[done + 1:]:
+                    if LEFTOVERS_RE.fullmatch(later.get("text") or ""):
+                        _file_leftovers(t, later["text"], warn)
+                if (t["id"], done) not in _held_logged:
                     _held_logged.add((t["id"], done))
                     try:
                         dp.log("NOTE_HELD", f"{t['id']} note {done + 1} of {len(notes)} not sent: {held}")

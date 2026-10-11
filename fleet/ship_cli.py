@@ -364,12 +364,37 @@ def _keep_unmerged(wt: Path, ticket_id: str) -> str | None:
     # A repo with no git identity must not stop the save: fall back to a fixed one for this commit.
     who = ["-c", "user.name=fleet", "-c", "user.email=fleet@localhost"] \
         if not git("config", "user.email").stdout.strip() else []
-    for args in (("checkout", "-b", name), ("add", "-A"),
-                 (*who, "commit", "--no-verify", "-q", "-m",
-                  f"{ticket_id}: changes left in the worktree after the merge (not merged)")):
-        done = git(*args)
-        if done.returncode != 0:
-            raise RuntimeError(f"git failed in {wt}: {(done.stderr or done.stdout).strip()}")
+    orig = git("symbolic-ref", "--short", "-q", "HEAD").stdout.strip()
+
+    def undo() -> None:   # leave the worktree exactly as it was found
+        git("reset", "-q")
+        if orig:
+            git("checkout", "-q", orig)
+        git("branch", "-D", name)
+
+    def refuse(why: str):
+        undo()
+        raise RuntimeError(why)
+
+    done = git("checkout", "-b", name)
+    if done.returncode != 0:
+        raise RuntimeError(f"git failed in {wt}: {(done.stderr or done.stdout).strip()}")
+    done = git("add", "-A")
+    if done.returncode != 0:
+        refuse(f"git add failed in {wt}: {(done.stderr or done.stdout).strip()}")
+    # Rule 6: nothing that looks like a secret goes into git, and these edits were never checked.
+    leaks = os.environ.get("FLEET_GITLEAKS") or "gitleaks"
+    try:
+        scan = subprocess.run([leaks, "git", "--staged", "--no-banner", "--redact", "--log-level", "error", str(wt)],
+                              capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        refuse(f"the changes could not be scanned for secrets ({exc})")
+    if scan.returncode != 0:
+        refuse("the changes look like they hold a secret (or the scan failed); nothing was committed")
+    # Commit hooks of the repo run: no --no-verify.
+    done = git(*who, "commit", "-q", "-m", f"{ticket_id}: changes left in the worktree after the merge (not merged)")
+    if done.returncode != 0:
+        refuse(f"git commit failed in {wt}: {(done.stderr or done.stdout).strip()}")
     return name
 
 

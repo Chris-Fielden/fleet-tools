@@ -123,21 +123,20 @@ def test_a_review_of_an_older_commit_does_not_settle(repo_ticket, world, herdr_l
 
 def test_high_risk_needs_both_reviewers_to_settle(repo_ticket, world, herdr_log):
     repo, t = repo_ticket
-    tk.set_risk(t["id"], "high") if hasattr(tk, "set_risk") else None
+    tk.raise_risk(t["id"], "high")
+    assert tk.load_ticket(t["id"])["risk"] == "high"
     start(t, world)
     review(repo)                                  # Codex only
     tk.record_verdict("task/demo", "app", "PASS", tip_of(repo), "codex")
-    risk = tk.load_ticket(t["id"]).get("risk")
     tk.add_note(t["id"], "x")
     out, _ = push()
-    if risk == "high":
-        assert out    # only one of two reviewers: not settled, the note goes out
-        review(repo, who="Claude Opus 4", name="claude.md")
-        tk.record_verdict("task/demo", "app", "PASS", tip_of(repo), "claude opus")
-        tk.add_note(t["id"], "y")
-        world([{"name": t["id"].lower(), "agent_status": "idle", "tab_id": "w1:t1"}])
-        assert push() == ([], [])
-        assert len(prompts(herdr_log)) == 1
+    assert out and len(prompts(herdr_log)) == 1   # one of two reviewers: not settled, the note goes out
+    review(repo, who="Claude Opus 4", name="claude.md")
+    tk.record_verdict("task/demo", "app", "PASS", tip_of(repo), "claude opus")
+    tk.add_note(t["id"], "y")
+    world([{"name": t["id"].lower(), "agent_status": "idle", "tab_id": "w1:t1"}])
+    assert push() == ([], [])
+    assert len(prompts(herdr_log)) == 1
 
 
 def test_unreadable_review_file_means_not_settled_so_notes_flow(repo_ticket, world, herdr_log):
@@ -190,15 +189,32 @@ def test_a_finished_leftovers_ticket_is_not_reused_by_the_push(repo_ticket, worl
     assert len(kids) == 2 and len([k for k in kids if k["status"] == "proposed"]) == 1
 
 
-def test_leftovers_behind_an_ordinary_held_note_wait_for_it(repo_ticket, world, herdr_log):
+def test_leftovers_behind_an_ordinary_held_note_are_filed_anyway(repo_ticket, world, herdr_log):
     repo, t = repo_ticket
     start(t, world)
     settle(repo, t)
     tk.add_note(t["id"], "ordinary")
     tk.add_note(t["id"], LEFT.format(sha7=tip_of(repo)[:7]))
     push()
-    assert json.loads(push_notes.state_path().read_text())[t["id"]] == 0
+    push()
+    assert json.loads(push_notes.state_path().read_text())[t["id"]] == 0   # the ordinary note is kept
     assert prompts(herdr_log) == []
+    [lo] = [x for x in tk.list_tickets() if x.get("parent") == t["id"]]
+    assert "b.py: add a test" in lo["body"]
+
+
+@pytest.mark.parametrize("who", ["CLAUDECODE", "CODEX_SANDBOX"])
+def test_leftovers_saved_by_an_agent_are_filed_too(repo_ticket, world, herdr_log, monkeypatch, who):
+    repo, t = repo_ticket     # review.sh runs inside the agent's environment: the note is not "human"
+    start(t, world)
+    settle(repo, t)
+    monkeypatch.setenv(who, "1")
+    tk.add_note(t["id"], LEFT.format(sha7=tip_of(repo)[:7]))
+    monkeypatch.delenv(who)
+    assert tk.load_ticket(t["id"])["notes"][-1]["by"] != "human"
+    push()
+    [lo] = [x for x in tk.list_tickets() if x.get("parent") == t["id"]]
+    assert "a.py: rename x" in lo["body"] and prompts(herdr_log) == []
 
 
 def test_a_ship_run_holds_the_notes_and_unreadable_state_holds_too(repo_ticket, world, herdr_log, env):
@@ -349,3 +365,29 @@ def test_ship_quiesce_refuses_inside_an_agent(repo_ticket, monkeypatch, capsys):
 def test_finish_task_runs_quiesce_between_push_and_worktree_removal():
     text = (__import__("pathlib").Path(__file__).resolve().parent.parent / "scripts" / "finish-task.sh").read_text()
     assert text.index('git push origin "$base"') < text.index('--quiesce "$ticket"') < text.index('git worktree remove "$wt"')
+
+
+def test_ship_quiesce_will_not_commit_what_looks_like_a_secret(repo_ticket, world, leaky_gitleaks, capsys):
+    repo, t = repo_ticket
+    world([{"name": t["id"].lower(), "agent_status": "idle", "tab_id": "w1:t1"}], [{"tab_id": "w1:t1", "label": t["id"]}])
+    wt = merged_with_worktree(repo, t)
+    (wt / "oops.txt").write_text("hunter2")
+    assert ship_main(["--quiesce", t["id"]]) == 1
+    assert "secret" in capsys.readouterr().err
+    assert git(repo, "for-each-ref", "refs/heads/keep").strip() == ""
+    assert git(wt, "rev-parse", "--abbrev-ref", "HEAD").strip() == "task/demo"   # as it was found
+    assert "oops.txt" in git(wt, "status", "--porcelain")
+
+
+def test_ship_quiesce_keeps_the_repos_commit_hooks(repo_ticket, world, capsys):
+    repo, t = repo_ticket
+    world([{"name": t["id"].lower(), "agent_status": "idle", "tab_id": "w1:t1"}], [{"tab_id": "w1:t1", "label": t["id"]}])
+    wt = merged_with_worktree(repo, t)
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho rejected by hook >&2\nexit 1\n")
+    hook.chmod(0o755)
+    (wt / "left.txt").write_text("x")
+    assert ship_main(["--quiesce", t["id"]]) == 1
+    assert "rejected by hook" in capsys.readouterr().err
+    assert git(repo, "for-each-ref", "refs/heads/keep").strip() == ""
+    assert git(wt, "rev-parse", "--abbrev-ref", "HEAD").strip() == "task/demo"
