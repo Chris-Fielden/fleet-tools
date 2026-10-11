@@ -133,16 +133,22 @@ def hold_reason(t: dict, settings: dict | None = None) -> str | None:
 
 def _file_leftovers(t: dict, text: str, warn) -> bool:
     """Put one SHOULD FIX leftovers note into the ticket's one leftovers ticket. True when it
-    is there (or was before), False when this is not such a note or it could not be filed."""
+    is handled: filed (or was before), or refused for a lasting reason (the leftovers ticket is
+    full, or the text looks like a secret): its text stays in the ticket's notes, so it is warned
+    about once and counted, and never blocks the human notes behind it. False when this is not
+    such a note or the disk failed (tried again next cycle)."""
     m = LEFTOVERS_RE.fullmatch(text)
     if not m:
         return False
     reviewer, sha, items = m.groups()
     try:
         new, what = tk.file_leftovers_items(t, f"From the {reviewer} review of {sha[:7]}:", items)
-    except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+    except OSError as exc:
         warn(f"{t['id']}: could not file SHOULD FIX leftovers: {exc}")
         return False
+    except (tk.TicketError, tk.TicketInvalid) as exc:
+        warn(f"{t['id']}: SHOULD FIX leftovers not filed ({exc}); they stay in the ticket's notes")
+        return True
     if what:
         kaneo.mirror_quietly(new, warn)
         try:

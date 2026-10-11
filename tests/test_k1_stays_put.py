@@ -184,6 +184,21 @@ def test_leftovers_notes_go_to_the_one_leftovers_ticket_not_the_agent(repo_ticke
     assert prompts(herdr_log) == []
 
 
+def test_a_full_leftovers_ticket_does_not_block_the_human_notes_behind(repo_ticket, world, herdr_log):
+    repo, t = repo_ticket
+    start(t, world)
+    tk.add_note(t["id"], LEFT.format(sha7=tip_of(repo)[:7]))
+    push()   # not settled: it is filed, which creates the leftovers ticket
+    for sha7 in ("abcdef0", "abcdef1"):   # each fills most of the 4000 characters the ticket body holds
+        tk.add_note(t["id"], f"SHOULD FIX leftovers from the Codex review of {sha7} (PASS):\n" + "\n".join(
+            f"{i}. {sha7} " + "x" * 90 for i in range(1, 30)))
+    tk.add_note(t["id"], "a human asks something")
+    out, warns = push()
+    assert any("not filed" in w for w in warns)             # warned once, with a reason
+    assert out and prompts(herdr_log)[-1][3].endswith("a human asks something")   # not blocked
+    assert json.loads(push_notes.state_path().read_text())[t["id"]] == 4   # all four notes handled
+
+
 def test_a_finished_leftovers_ticket_is_not_reused_by_the_push(repo_ticket, world):
     repo, t = repo_ticket
     start(t, world)
