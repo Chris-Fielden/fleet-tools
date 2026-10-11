@@ -1,5 +1,9 @@
 """The `ship` command: merge a ticket's work (in review, or still claimed) with its repo's own
-scripts/finish-task.sh, which keeps every check and prompt it has."""
+scripts/finish-task.sh, which keeps every check and prompt it has.
+
+`ship --quiesce ID` is the step finish-task.sh runs after the push and before it removes the
+worktree: the ticket's agent is stopped and its herdr tab closed (only that ticket's own), and
+changes the agent left in the worktree are saved to a keep/<id>-unmerged branch."""
 
 from __future__ import annotations
 
@@ -340,6 +344,69 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, pre
     return 0
 
 
+def _keep_unmerged(wt: Path, ticket_id: str) -> str | None:
+    """Commit what is left in the worktree `wt` (changes, new files) to a new branch
+    keep/<id>-unmerged and leave the worktree clean on it. Returns the branch name, or None when
+    there was nothing to save. Raises OSError / RuntimeError when git refuses."""
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(wt), *args], capture_output=True, text=True, timeout=120)
+
+    status = git("status", "--porcelain")
+    if status.returncode != 0:
+        raise RuntimeError(f"git status failed in {wt}: {status.stderr.strip()}")
+    if not status.stdout.strip():
+        return None
+    base = f"keep/{ticket_id.lower()}-unmerged"
+    name, n = base, 1
+    while git("rev-parse", "--verify", "--quiet", f"refs/heads/{name}").returncode == 0:
+        n += 1
+        name = f"{base}-{n}"
+    # A repo with no git identity must not stop the save: fall back to a fixed one for this commit.
+    who = ["-c", "user.name=fleet", "-c", "user.email=fleet@localhost"] \
+        if not git("config", "user.email").stdout.strip() else []
+    for args in (("checkout", "-b", name), ("add", "-A"),
+                 (*who, "commit", "--no-verify", "-q", "-m",
+                  f"{ticket_id}: changes left in the worktree after the merge (not merged)")):
+        done = git(*args)
+        if done.returncode != 0:
+            raise RuntimeError(f"git failed in {wt}: {(done.stderr or done.stdout).strip()}")
+    return name
+
+
+def _quiesce(ticket_id: str) -> int:
+    """Stop the merged ticket's agent and close its tab, then save leftover edits. Idempotent.
+    Only ever acts on a ticket whose branch is merged, and only on that ticket's own agent."""
+    try:
+        t = tk.load_ticket(ticket_id)
+        settings = dp.load_settings()
+    except (tk.TicketError, tk.TicketInvalid, dp.SettingsError) as exc:
+        return _fail(f"cannot quiesce {ticket_id}: {exc}")
+    repo = settings["projects_dir"] / str(t.get("repo"))
+    branch = t.get("branch") or ""
+    if not repo.is_dir() or repo.resolve().parent != settings["projects_dir"].resolve() or not branch.startswith("task/"):
+        return _fail(f"cannot quiesce {t['id']}: no repo folder or task branch")
+    if not dp.is_merged(repo, branch, t.get("base_commit")):
+        return _fail(f"{t['id']} is not merged; its agent is left alone")
+    ok, why = lc.quiesce_agent(t["id"], settings)
+    lc._safe_log("AGENT_QUIESCED" if ok else "AGENT_QUIESCE_FAILED", f"{t['id']} {why}")
+    if not ok:
+        return _fail(f"{t['id']} merged, but its agent could not be stopped ({why}); "
+                     "its worktree is left as it is")
+    _say(f"{t['id']} agent stopped ({why})")
+    wt = repo / ".worktrees" / branch.removeprefix("task/")
+    if not wt.is_dir():
+        return 0
+    try:
+        kept = _keep_unmerged(wt, t["id"])
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        return _fail(f"{t['id']} has changes in {wt} that could not be saved ({exc}); the worktree is kept")
+    if kept:
+        lc._safe_log("UNMERGED_KEPT", f"{t['id']} changes after the merge saved on {kept}")
+        _say(f"{t['id']} had changes after the merge: they are NOT in main, saved on branch {kept} "
+             f"(the worktree can now be removed)")
+    return 0
+
+
 def _ship_list() -> int:
     """Show the ship list and ship each ticket in order, with the merge script's own
     confirmation for each. Stops at the first failure and says why."""
@@ -580,6 +647,9 @@ def main(argv=None) -> int:
     p.add_argument("--status", metavar="ID", type=tk.normalize_id,
                    help="show how far a ship of ID got, or how it ended")
     p.add_argument("--job", metavar="ID", type=tk.normalize_id, help=argparse.SUPPRESS)
+    p.add_argument("--quiesce", metavar="ID", type=tk.normalize_id,
+                   help="after a merge: stop ID's agent, close its tab, save left-over edits "
+                        "(finish-task runs this itself)")
     p.add_argument("--tip", help=argparse.SUPPRESS)
     p.add_argument("--answer", help=argparse.SUPPRESS)
     p.add_argument("--list", action="store_true", help="ship every ticket on the ship list, in order")
@@ -592,6 +662,13 @@ def main(argv=None) -> int:
         if args.id or args.list or args.job:
             p.error("--status takes its ticket id and nothing else")
         return _status(args.status)
+    if args.quiesce:
+        if args.id or args.list or args.job or args.expect or args.status:
+            p.error("--quiesce takes its ticket id and nothing else")
+        who = tk.current_creator()
+        if who != "human":
+            return _fail(f"refusing to run inside an agent (running as {who}); only a human ships")
+        return _quiesce(args.quiesce)
     if args.job:
         if not (args.tip and args.answer) or args.id or args.list or args.expect:
             p.error("--job is internal: it needs --tip and --answer and nothing else")

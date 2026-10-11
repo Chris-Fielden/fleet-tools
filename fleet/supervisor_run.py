@@ -379,12 +379,6 @@ def squirrels_problem(t: dict, repo: Path, wt: Path, tip: str) -> tuple[str | No
     return None, review[0], review[1]
 
 
-def _leftovers_ticket(t: dict) -> dict | None:
-    branch = f"task/leftovers-{t['id'].lower()}"
-    return next((o for o in tk.list_tickets() if o.get("parent") == t["id"] and o.get("branch") == branch
-                 and o["status"] in tk.ACTIVE_STATUSES), None)
-
-
 def _chunks(text: str) -> list[str]:
     return [text[i:i + tk.NOTE_MAX] for i in range(0, len(text), tk.NOTE_MAX)][:LEFTOVERS_PARTS]
 
@@ -398,7 +392,7 @@ def file_leftovers(t: dict, tip: str, review_file: Path, review_text: str, warn)
     if tk.check_secrets("review", review_text):   # never copy what looks like a secret into a ticket
         review_text = ("(not copied: the review text looked like it held a secret; read "
                        f"{review_file.name} in the task folder of {t['id']})")
-    existing = _leftovers_ticket(t)
+    existing = tk.leftovers_ticket(t)
     if existing is not None:
         if not any(n["text"].startswith(heading) for n in existing.get("notes", [])):
             for part in _chunks(f"{heading}\n{review_text}"):
@@ -408,9 +402,7 @@ def file_leftovers(t: dict, tip: str, review_file: Path, review_text: str, warn)
             f"review of commit {tip[:7]} below the MUST FIX bar and the Claude review passed that commit. "
             f"{heading}\n")
     room = tk.BODY_MAX - len(head)
-    new = tk.create_ticket({"type": "fix", "repo": t["repo"], "branch": f"task/leftovers-{t['id'].lower()}",
-                            "parent": t["id"], "priority": "normal", "title": f"Leftovers from {t['id']}"[:100],
-                            "body": head + review_text[:room]}, needs_approval=True)
+    new = tk.create_leftovers_ticket(t, f"Leftovers from {t['id']}", head + review_text[:room], priority="normal")
     for part in _chunks(review_text[room:]):
         try:
             tk.add_note(new["id"], part)

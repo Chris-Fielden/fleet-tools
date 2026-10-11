@@ -169,6 +169,14 @@ if git remote get-url origin >/dev/null 2>&1; then
 else
   echo "No 'origin' remote, so nothing was pushed."
 fi
+# The ticket's agent must not keep writing into the worktree we are about to remove: stop it
+# and close its tab (only that ticket's own), and save anything it left uncommitted on a
+# keep/<ticket>-unmerged branch so the removal below does not refuse. Failure is not fatal.
+if [[ -n "$ticket" ]]; then
+  ship_cmd="${FLEET_SHIP:-ship}"
+  "$ship_cmd" --quiesce "$ticket" \
+    || echo "WARNING: could not stop the agent of $ticket cleanly; see the message above."
+fi
 git worktree remove "$wt"
 git branch -d "$branch"
 echo "Done: $name merged and cleaned up."

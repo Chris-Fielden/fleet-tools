@@ -790,6 +790,47 @@ def append_to_body(ticket_id: str, heading: str, items: str) -> dict | None:
     return ticket
 
 
+def leftovers_branch(parent_id: str) -> str:
+    return f"task/leftovers-{parent_id.lower()}"
+
+
+def leftovers_ticket(parent: dict) -> dict | None:
+    """The ONE active leftovers ticket of `parent` (a finished one is not reused), or None.
+    Every writer of leftovers (review.sh, the supervisor, the note push) finds it here."""
+    branch = leftovers_branch(parent["id"])
+    return next((o for o in list_tickets() if o.get("parent") == parent["id"]
+                 and o.get("branch") == branch and o["status"] in ACTIVE_STATUSES), None)
+
+
+def create_leftovers_ticket(parent: dict, title: str, body: str, create=None, **extra) -> dict:
+    """File the leftovers ticket of `parent`: a fix, proposed (not open: its branch would start
+    from main before the reviewed branch is merged, so a human approves it after the merge).
+    `create` is create_ticket or a tracker's create; both take (fields, needs_approval=True)."""
+    if len(body) > BODY_MAX:
+        body = body[:BODY_MAX - 15].rstrip() + "\n[...truncated]"
+    fields = {"type": "fix", "repo": parent["repo"], "branch": leftovers_branch(parent["id"]),
+              "parent": parent["id"], "title": title[:100], "body": body, **extra}
+    return (create or create_ticket)(fields, needs_approval=True)
+
+
+def file_leftovers_items(parent: dict, heading: str, items: str, create=None) -> tuple[dict, str | None]:
+    """Put review `items` under `heading` in the one leftovers ticket of `parent` (made if there
+    is none). Returns (ticket, what): what is "created", "added", or None when the same items
+    were already there (a repeat changes nothing). May raise TicketError / TicketInvalid /
+    OSError: the caller decides how loud that is."""
+    existing = leftovers_ticket(parent)
+    if existing is not None:
+        added = append_to_body(existing["id"], heading, items)
+        return (added or existing), ("added" if added else None)
+    title = " ".join(str(parent.get("title", "")).split())   # quoted in the body: one clipped line
+    if len(title) > 100:
+        title = title[:99].rstrip() + "…"
+    body = (f"Smaller review suggestions left over from {parent['id']} ({title}), "
+            f"kept out of that branch so its tip review stays valid.\n\n{heading}\n{items}")
+    new = create_leftovers_ticket(parent, f"Leftover review items from {parent['id']}", body, create)
+    return new, "created"
+
+
 def verdict_line(v: dict | None) -> str:
     """One line for a stored verdict, for `ticket show` and the card."""
     if v is None:

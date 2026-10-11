@@ -833,11 +833,12 @@ def retry_kept_tabs(ticket_ids: list[str], settings: dict, warn=lambda m: None) 
 
 
 def _close_tab_in(ticket_id: str, tabs: list[dict], agents: list[dict],
-                  by_label: bool = True) -> tuple[bool, str, str | None]:
+                  by_label: bool = True, own_only: bool = False) -> tuple[bool, str, str | None]:
     """Close the ticket's tab if the safety rules allow: (closed, reason, tab id).
     `by_label` allows falling back to a tab labelled with the ticket id when its
     agent is not listed; a retry on a later cycle must not, since by then the
-    label may belong to a tab the human opened."""
+    label may belong to a tab the human opened. `own_only`: the ticket is merged, so
+    its agent may be in any state; instead every agent in the tab must be this ticket's own."""
     agent = next((a for a in agents if a.get("name") == ticket_id.lower()), None)
     tab = None
     if agent is not None:
@@ -854,10 +855,17 @@ def _close_tab_in(ticket_id: str, tabs: list[dict], agents: list[dict],
     state = agent.get("agent_status") if agent is not None else tab.get("agent_status")
     # Closing a tab ends every pane in it, so every agent in it must be finished.
     in_tab = [a for a in agents if a.get("tab_id") == tab["tab_id"]]
-    for a in [{"agent_status": state}] + in_tab:
-        if a.get("agent_status") not in RESEARCH_DONE_STATES:
-            return False, (f"tab {tab['tab_id']} has an agent that is "
-                           f"{a.get('agent_status') or 'unknown'}, not idle or done"), None
+    if own_only:
+        if agent is None:
+            return False, "the ticket's own agent is not in that tab", None
+        others = [a.get("name") or "an unnamed agent" for a in in_tab if a.get("name") != ticket_id.lower()]
+        if others:
+            return False, f"tab {tab['tab_id']} also holds {', '.join(map(str, others))}; left open", None
+    else:
+        for a in [{"agent_status": state}] + in_tab:
+            if a.get("agent_status") not in RESEARCH_DONE_STATES:
+                return False, (f"tab {tab['tab_id']} has an agent that is "
+                               f"{a.get('agent_status') or 'unknown'}, not idle or done"), None
     if tab.get("focused") or any(a.get("focused") for a in in_tab):
         # Every agent in the tab is finished, so it is safe to move focus away first.
         others = [x for x in tabs if x is not tab and isinstance(x.get("tab_id"), str)
@@ -947,6 +955,49 @@ def stop_agent(ticket_id: str, settings: dict) -> tuple[bool, str]:
     except LaunchError as exc:
         return False, f"tab {tab['tab_id']} could not be closed ({exc})"
     return True, f"closed tab {tab['tab_id']}"
+
+
+QUIESCE_WAIT_SECONDS = 20   # most a merged ticket's agent is given to reach a prompt
+
+
+def quiesce_agent(ticket_id: str, settings: dict) -> tuple[bool, str]:
+    """The ticket was merged: stop ITS agent and close ITS tab, nothing else. (True, why) when
+    no agent of the ticket is left; (False, why) when it could not be stopped, in which case
+    the tab is left open. Safe to repeat. The steps, each of which can refuse:
+      1. identity: the agent is named after the ticket AND its tab is a tab of herdr_workspace
+         (an agent of that name elsewhere is not ours to touch);
+      2. Escape, after a bounded wait for it to reach a prompt (the governor's safe stop);
+      3. close that tab by its id, only if every agent in it is this ticket's own. A tab that is
+         merely LABELLED with the ticket id is never used: it may be a person's;
+      4. list the agents again and confirm the name is gone."""
+    name = ticket_id.lower()
+    try:
+        tabs, agents = _herdr_tabs(settings)
+    except LaunchError as exc:
+        return False, f"herdr could not be asked ({exc})"
+    agent = next((a for a in agents if a.get("name") == name), None)
+    if agent is None:
+        return True, "no agent is running"
+    if not any(x.get("tab_id") == agent.get("tab_id") for x in tabs):
+        return False, f"agent {name} is not in a tab of workspace {settings['herdr_workspace']}; left alone"
+    try:
+        with contextlib.suppress(LaunchError):   # a wait that times out is not a failure
+            herdr_run("agent", "wait", name, "--until", "idle", "--until", "blocked", "--until", "done",
+                      "--timeout", str(QUIESCE_WAIT_SECONDS * 1000), timeout=QUIESCE_WAIT_SECONDS + 10)
+        herdr_run("agent", "send-keys", name, "esc")
+        tabs, agents = _herdr_tabs(settings)   # what is true now, not before the wait
+    except LaunchError as exc:
+        return False, f"agent {name} could not be interrupted ({exc})"
+    closed, reason, _ = _close_tab_in(ticket_id, tabs, agents, by_label=False, own_only=True)
+    if not closed:
+        return False, reason
+    try:
+        still = any(a.get("name") == name for a in list_agents())
+    except LaunchError as exc:
+        return False, f"{reason}, but herdr could not confirm the agent is gone ({exc})"
+    if still:
+        return False, f"{reason}, but agent {name} is still listed"
+    return True, f"stopped agent {name}; closed {reason}"
 
 
 def lost_agents(tickets: list[dict], warn) -> list[dict]:
