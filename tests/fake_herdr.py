@@ -6,6 +6,7 @@ FAKE_HERDR_STATE status `agent list` reports for the agent (default: working)
 FAKE_HERDR_WORKSPACE label of the one workspace it knows (default: fleet)
 FAKE_HERDR_RUN_TEXT  what `pane run` prints instead of JSON; FAKE_HERDR_RUN_FAIL makes it exit 1
 FAKE_HERDR_PANE_TEXT  what `pane read` prints; FAKE_HERDR_PANE_FAIL makes it exit 1
+FAKE_HERDR_NOT_READY  makes `agent start` fail with herdr's agent_not_ready error (exit 1)
 FAKE_HERDR_WORLD  optional JSON file {"workspaces": [...], "tabs": [...], "agents": [...]}
                   that `workspace list/create`, `tab list/close` and `agent list` read
                   and change, in herdr's real reply shapes
@@ -19,6 +20,10 @@ with open(os.environ["FAKE_HERDR_LOG"], "a") as fh:
     fh.write(json.dumps(args) + "\n")
 
 cmd = " ".join(args[:2])
+if cmd == "agent start" and os.environ.get("FAKE_HERDR_NOT_READY"):
+    print(json.dumps({"error": {"code": "agent_not_ready", "message": "agent did not reach its prompt"}}),
+          file=sys.stderr)
+    sys.exit(1)
 if cmd in ("agent wait", "agent send-keys"):   # the usage governor's safe stop; Escape stops the agent
     wf = os.environ.get("FAKE_HERDR_WORLD")
     if cmd == "agent send-keys" and wf:

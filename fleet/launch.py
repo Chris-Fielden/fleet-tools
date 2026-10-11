@@ -21,6 +21,7 @@ from . import dispatch as dp
 from . import governor
 from . import kaneo
 from . import permissions
+from . import startup_block
 from . import ticket as tk
 from . import tracker as tr
 
@@ -105,6 +106,15 @@ class LaunchError(Exception):
     pass
 
 
+NOT_READY = "agent_not_ready"   # herdr's error code when the agent never reached its prompt
+
+
+class AgentNotReady(LaunchError):
+    """herdr could not get the agent ready to take a prompt (agent_not_ready): in
+    practice a workspace trust dialog, or a login, that only a person can answer.
+    Retrying would spend a daily launch and fail the same way."""
+
+
 class AgentMayBeRunning(LaunchError):
     """The launch failed but its tab could not be closed, so the agent might
     still be running. Nothing may be cleaned up and the claim must stay."""
@@ -124,8 +134,11 @@ def herdr(*args: str, timeout: float = 120) -> dict:
         raise LaunchError(f"herdr {args[0]} {args[1]} failed: {exc}") from None
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout).strip().splitlines()
-        raise LaunchError(f"herdr {args[0]} {args[1]} exited {proc.returncode}"
-                          + (f": {detail[0][:200]}" if detail else ""))
+        message = (f"herdr {args[0]} {args[1]} exited {proc.returncode}"
+                   + (f": {detail[0][:200]}" if detail else ""))
+        if NOT_READY in f"{proc.stderr}\n{proc.stdout}":   # anywhere in the output, not only line one
+            raise AgentNotReady(message)
+        raise LaunchError(message)
     try:
         data = json.loads(proc.stdout)
     except ValueError:
@@ -352,14 +365,18 @@ def record_writer(folder: Path, agent: str, ticket_id: str) -> None:
         raise LaunchError(f"cannot write the writer file: {exc}") from None
 
 
-def start_agent(d: dp.Decision, folder: Path, workspace: str, warn, projects_dir=None) -> str:
+def start_agent(d: dp.Decision, folder: Path, workspace: str, warn, projects_dir=None,
+                research_rules: bool = False) -> str:
     """Open the tab and start the agent. Returns the tab id. If anything
-    fails after the tab exists, only that tab is closed."""
+    fails after the tab exists, only that tab is closed. `research_rules`: the agent
+    gets the research allow/deny rules from the command line (--settings), not from
+    the folder's own settings file, so Claude Code shows no workspace trust dialog."""
     ticket_id = d.ticket["id"]
     name = ticket_id.lower()
     paused = governor.refusal()   # the backstop: every agent the fleet starts comes through here
     if paused:
         raise LaunchError(paused)
+    rules_file = research_rules_file() if research_rules else None   # before the tab: nothing to close
     try:
         created = herdr("tab", "create", "--workspace", workspace, "--cwd", str(folder),
                         "--label", ticket_id, "--no-focus")
@@ -374,8 +391,13 @@ def start_agent(d: dp.Decision, folder: Path, workspace: str, warn, projects_dir
     try:
         pane = _result(created, "root_pane", "pane_id")
         args = ["agent", "start", name, "--kind", d.agent, "--pane", pane]
+        extra = []
+        if rules_file is not None:
+            extra += ["--settings", rules_file]
         if d.model:
-            args += ["--", "--model", d.model]
+            extra += ["--model", d.model]
+        if extra:
+            args += ["--", *extra]
         herdr(*args)
         template = RESEARCH_PROMPT if d.research else ONCALL_PROMPT if d.oncall else PROMPT
         prompt = d.prompt or template.format(id=ticket_id, projects_dir=projects_dir,
@@ -404,6 +426,8 @@ def launch(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
     paused = governor.refusal(settings)
     if paused:   # before the claim: nothing to roll back
         return 0, f"{t['id']}  not launched: {paused}"
+    if t["id"] in startup_block.blocked_ids():
+        return 0, f"{t['id']}  not launched: startup blocked, waiting for a human (fleet unblock {t['id']})"
     base = main_tip(d.repo_path)
     if base is None:
         return 1, f"cannot read the current commit of {d.repo_path}"
@@ -434,6 +458,8 @@ def launch(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
                 kept = "; cleanup failed, so a human must look before this can be retried"
         tracker.set_status(t["id"], "open", allowed_from=("claimed",), assignee=None)
         _safe_log("LAUNCH_FAILED", f"{t['id']} {exc}")
+        if isinstance(exc, AgentNotReady):
+            kept += _startup_blocked(t, d.repo_path / ".worktrees" / d.name, "build", settings, warn)
         return 1, f"{t['id']}  launch failed: {exc}; ticket put back to open{kept}"
     _safe_log("LAUNCHED", f"{t['id']} {d.agent} ({d.model or 'default'}) tab {tab} in {d.worktree}")
     return 0, f"{t['id']}  launched {d.agent} ({d.model or 'default'}) in tab {tab}"
@@ -541,9 +567,54 @@ def guard_hook_settings() -> dict:
         raise LaunchError(f"the guard hook scripts are missing: {', '.join(missing) or 'none listed'}")
     bin_dir = HOOKS_DIR.parent.parent / "bin"
     statusline = bin_dir / "fleet-statusline"
+    # No "permissions" here: allow rules in a project file wait for workspace trust and make
+    # Claude Code show a dialog. The rules go on the command line (research_rules_file).
     return {"hooks": {"PreToolUse": pre},
-            "permissions": permissions.research_permissions(),
             "statusLine": {"type": "command", "command": shlex.join(["python3", str(statusline)])}}
+
+
+def research_rules_file() -> str:
+    """Write {"permissions": {allow, deny}} (permissions.research_permissions(), the one
+    source) to <fleet_home>/research-settings.json, outside every research folder, and
+    return its path for `claude --settings`. Same atomic write and no-symlink rule as
+    research_folder. The path must need no shell quoting: herdr types the command."""
+    target = tk.fleet_home() / "research-settings.json"
+    if target.is_symlink():
+        raise LaunchError(f"{target} is a symlink; not writing the research rules through it")
+    path = str(target.absolute())
+    if shlex.quote(path) != path:
+        raise LaunchError(f"{path} needs shell quoting (spaces or quotes); use a plain FLEET_HOME")
+    tk.refuse_real_store_in_tests(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".tmp-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"permissions": permissions.research_permissions()}, indent=2) + "\n")
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
+    return path
+
+
+def _startup_blocked(t: dict, folder: Path, kind: str, settings: dict, warn) -> str:
+    """The agent could not start (agent_not_ready). Mark the hold (so nothing retries and
+    no daily launch is spent), log it, and queue ONE needs_human ping that is kept until
+    sent. Never raises: the caller is already rolling back. Returns text for the message."""
+    ticket_id = t["id"]
+    _safe_log("STARTUP_BLOCKED", f"{ticket_id} not ready; folder {folder}")
+    try:
+        startup_block.mark(ticket_id, str(folder), kind)
+        from . import review_watch as rw   # here, not at the top: it imports this module
+        state = rw._load_state(warn)
+        rw._queue_ping(ticket_id, "needs_human", state, warn,
+                       f"agent not ready at startup (trust dialog?); folder {folder}")
+        rw._retry_pending(state, warn, settings)
+        rw._save_state(state)
+    except (OSError, tk.TicketError, tk.TicketInvalid) as exc:
+        warn(f"{ticket_id}: startup hold or ping not saved: {exc}")
+    return f"; startup blocked, waiting for a human (fleet unblock {ticket_id})"
 
 
 def research_folder(ticket_id: str, settings: dict) -> Path:
@@ -594,6 +665,9 @@ def launch_research(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
     problem = dp.research_problem(settings)
     if problem:
         return 1, f"{t['id']}  not launched: {problem}"
+    held = startup_block.research_hold()
+    if held:   # the backstop; the dispatcher already skips these before reserving a launch
+        return 0, f"{t['id']}  not launched: startup blocked ({held}), waiting for a human"
     # started_at is saved with the claim, so a start can never go uncounted;
     # a failed launch clears it again.
     tracker = tr.get_tracker(warn, settings)
@@ -602,7 +676,7 @@ def launch_research(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
         dp.log("CLAIMED", f"{t['id']} {d.agent} investigation")
         tab = start_agent(d, research_folder(t["id"], settings),
                           ensure_workspace(settings["herdr_workspace"]), warn,
-                          projects_dir=settings["projects_dir"])
+                          projects_dir=settings["projects_dir"], research_rules=True)
     except AgentMayBeRunning as exc:
         _safe_log("LAUNCH_FAILED", f"{t['id']} {exc}; ticket stays claimed, needs a human")
         return 1, (f"{t['id']}  launch failed: {exc}. The agent may still be running, so the "
@@ -610,7 +684,10 @@ def launch_research(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
     except (LaunchError, OSError, subprocess.TimeoutExpired) as exc:
         tracker.set_status(t["id"], before, allowed_from=("claimed",), assignee=None, started_at="")
         _safe_log("LAUNCH_FAILED", f"{t['id']} {exc}")
-        return 1, f"{t['id']}  launch failed: {exc}; ticket put back to {before}"
+        blocked = ""
+        if isinstance(exc, AgentNotReady):
+            blocked = _startup_blocked(t, settings["research_dir"] / t["id"], "research", settings, warn)
+        return 1, f"{t['id']}  launch failed: {exc}; ticket put back to {before}{blocked}"
     _safe_log("LAUNCHED", f"{t['id']} {d.agent} ({d.model or 'default'}) tab {tab} investigating")
     return 0, f"{t['id']}  launched {d.agent} ({d.model or 'default'}) to investigate, in tab {tab}"
 
@@ -897,6 +974,8 @@ def relaunch(t: dict, settings: dict, warn, prompt: str | None = None, why: str 
         governor.defer(t["id"])
         _safe_log("RELAUNCH_DEFERRED", f"{t['id']} {paused}")
         return 0, f"{t['id']}  relaunch deferred: {paused}"
+    if t["id"] in startup_block.blocked_ids():   # one failed start is enough: a human acts first
+        return 0, f"{t['id']}  relaunch held: startup blocked, waiting for a human (fleet unblock {t['id']})"
     repo = settings["projects_dir"] / t["repo"]
     name = t["branch"].removeprefix("task/")
     d = dp.Decision(ticket=t, name=name, repo_path=repo, agent=t["assignee"],
@@ -921,7 +1000,8 @@ def relaunch(t: dict, settings: dict, warn, prompt: str | None = None, why: str 
         return 1, f"{t['id']}  relaunch failed: {exc}. The agent may still be running; close the tab by hand"
     except (LaunchError, OSError, subprocess.TimeoutExpired) as exc:
         _safe_log("RELAUNCH_FAILED", f"{t['id']} {exc}")
-        return 1, f"{t['id']}  relaunch failed: {exc}; ticket stays claimed"
+        blocked = _startup_blocked(t, folder, "build", settings, warn) if isinstance(exc, AgentNotReady) else ""
+        return 1, f"{t['id']}  relaunch failed: {exc}; ticket stays claimed{blocked}"
     from . import push_notes   # here, not at the top: push_notes imports this module
     push_notes.baseline(read_by_agent, overwrite=True)   # the new agent read every note up to here
     _safe_log("RELAUNCHED", f"{t['id']} {d.agent} ({d.model or 'default'}) tab {tab} in {d.worktree}{why}")

@@ -34,6 +34,7 @@ FORWARDED = {
     "ticket": ("ticket_cli", "main", "tickets: new, list, show, note, approve, close ... (fleet ticket --help)"),
     "approve": ("ticket_cli", None, "approve a proposed ticket: fleet approve ID (human only)"),
     "alert": ("shortcuts_cli", "alert_main", "file an urgent ticket: fleet alert REPO TEXT (human only)"),
+    "unblock": ("startup_block", "main", "let the dispatcher launch again after an agent could not start: fleet unblock ID (human only)"),
     "idea": ("shortcuts_cli", "idea_main", "file an idea for review: fleet idea TEXT (human only)"),
 }
 
