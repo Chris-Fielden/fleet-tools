@@ -34,6 +34,30 @@ Research folders get only the two `ticket` rules (for any ticket ID; tying `tick
 
 `scripts/review.sh` and `scripts/check.sh` are exact matches: forms with arguments or a prefix, such as `REVIEWER=both scripts/review.sh`, are not covered and may prompt or go to the auto-mode classifier.
 
+## Deny rules
+
+Deny rules beat allow rules. They may only get stricter: nothing here adds an
+allow rule or weakens the guard hooks. They also reach research agents through
+the `--settings` file (EM-25), but research agents have no commit allow rule,
+so the commit rules are inert there. Each rule is a literal pattern in
+`fleet/permissions.py` (`DENY`), and `.claude/settings.json` equals it (tested).
+
+| Rule | Why |
+|---|---|
+| `git push *` | Only the human pushes (CLAUDE.md rule 4). |
+| `git push` | Same, bare form. |
+| `git commit * --no-verify*` | Skips git hooks; `git commit -m *` would otherwise match it as a later flag. |
+| `git commit * -n *` | Short form of `--no-verify`, in the middle of a command. |
+| `git commit * -n` | Short form of `--no-verify`, as the last word. |
+| `git commit * --amend*` | Rewrites already reviewed history. |
+
+Known limits (not covered, and not claimed covered): combined short flags
+(`-nm`, `-an`), git long-option abbreviations (`--no-verif`, `--amen`),
+`git -c core.hooksPath=/dev/null commit`, and `--no-gpg-sign`. Any fix may
+only be an extra deny rule. A commit message containing ` -n `, `--amend` or
+`--no-verify` is denied too (false positive). `git commit -n -m x` (flag first)
+matches no allow rule, so it only prompts.
+
 ## Removed from the old list
 
 - `cat`, `head`, `tail`, `ls`, `wc`, `pwd`, `git status|diff|log|show`: the built-in read-only set already runs them; `git diff|log|show *` also accept `--output=FILE`.

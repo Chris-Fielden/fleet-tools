@@ -125,4 +125,46 @@ def test_research_rules_file_is_exactly_the_em22_rules(tmp_path, monkeypatch):
     data = json.loads(path.read_text())
     assert data == {"permissions": {"allow": pm.RESEARCH_ALLOW, "deny": pm.DENY}}
     assert pm.RESEARCH_ALLOW == ["Bash(ticket note *)", "Bash(ticket show *)"]
-    assert pm.DENY == ["Bash(git push *)", "Bash(git push)"]
+    assert pm.DENY == [
+        "Bash(git push *)",
+        "Bash(git push)",
+        "Bash(git commit * --no-verify*)",
+        "Bash(git commit * -n *)",
+        "Bash(git commit * -n)",
+        "Bash(git commit * --amend*)",
+    ]
+
+
+BYPASS_COMMANDS = [
+    'git commit -m "x" --no-verify', 'git commit -m "x" --no-verify -a',
+    'git commit -m "x" --amend', 'git commit -m "x" --amend --no-edit',
+    'git commit -m "x" -n', 'git commit -m "x" -n -a',
+]
+
+
+@pytest.mark.parametrize("command", BYPASS_COMMANDS)
+def test_bypass_flags_match_the_allow_rule_and_a_deny_rule(command):
+    # Both match, so it is the deny rule that stops them.
+    assert any(matches(a, command) for a in rules(pm.ALLOW)), command
+    assert any(matches(d, command) for d in rules(pm.DENY)), command
+
+
+def test_plain_commit_is_not_denied():
+    assert not any(matches(d, 'git commit -m "x"') for d in rules(pm.DENY))
+    assert any(matches(a, 'git commit -m "x"') for a in rules(pm.ALLOW))
+
+
+def test_narrow_rule_check_rejects_path_and_versioned_interpreters():
+    pattern = r"(?:\S*/)?(python|node|bash|sh|env|npm|npx|pip|uv|yarn|pnpm)\d*\b"
+    for bad in ("/usr/bin/python3 *", "python3.12 *", "bash -c *"):
+        assert re.match(pattern, bad), bad
+    for ok in ("scripts/check.sh", "ticket note *", "git add -A"):
+        assert not re.match(pattern, ok), ok
+
+
+def test_allow_lists_are_unchanged_by_the_deny_work():
+    assert pm.ALLOW == [
+        "Bash(git add -A)", "Bash(git commit -m *)", "Bash(scripts/check.sh)",
+        "Bash(scripts/review.sh)", "Bash(ticket note *)", "Bash(ticket show *)",
+    ]
+    assert pm.RESEARCH_ALLOW == ["Bash(ticket note *)", "Bash(ticket show *)"]
