@@ -53,7 +53,7 @@ def _cmd_dry_run(settings: dict) -> int:
               + dp.decide_oncall(tickets, settings, running_agents(tickets, _warn))):
         print(d.line())
         if d.skip:
-            dp.log("DECISION", f"{d.ticket['id']} skip: {d.skip}")
+            d.log_skip()
         else:
             dp.log("DECISION", d.line())
     return 0
@@ -196,7 +196,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     for d in dp.decide_oncall(tickets, settings, running):
         if d.skip and not d.skip.startswith(dp.QUEUE_SKIPS):
             emit(f"{d.ticket['id']}  on-call not launched: {d.skip}")   # a blocker, not just a queue
-            dp.log("DECISION", f"{d.ticket['id']} skip: {d.skip}")
+            d.log_skip()
         if d.eligible:
             try:
                 oncall_code, message = lc.launch_oncall(d, settings, warn)
@@ -215,7 +215,8 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     for d in investigations:
         if d.eligible:
             if reserve is not None and not reserve():
-                emit(f"{d.ticket['id']}  not launched: daily launch limit reached")
+                d.skip = LIMIT_REACHED
+                emit(f"{d.ticket['id']}  not launched: {d.skip}")
                 break
             research_code, message = lc.launch_research(d, settings, warn)
             code = code or research_code
@@ -228,7 +229,9 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     for d in decisions:
         if d.eligible:
             if reserve is not None and not reserve():
-                emit(f"{d.ticket['id']}  not launched: daily launch limit reached")
+                d.skip = LIMIT_REACHED
+                emit(f"{d.ticket['id']}  not launched: {d.skip}")
+                d.log_skip()
                 return code
             build_code, message = lc.launch(d, settings, warn)
             emit(message)
@@ -241,9 +244,13 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
         emit("nothing to launch: no open tickets")
         dp.log("DECISION", "nothing to launch: no open tickets")
     for d in decisions + investigations:
+        d.skip = d.skip or "eligible but not launched this run"
         emit(f"nothing launched; {d.line()}")
-        dp.log("DECISION", f"{d.ticket['id']} skip: {d.skip}")
+        d.log_skip()
     return code
+
+
+LIMIT_REACHED = "daily launch limit reached, max_launches_per_day is spent"
 
 
 def dupes_path():
