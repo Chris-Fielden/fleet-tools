@@ -388,6 +388,7 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None, reload=
         return 0
     finally:
         supervisor_run.shutdown()   # no orphan model process, also before the restart's exec
+        review_watch.abandon_rereviews()   # no ticket stays reserved under a PID exec keeps
 
 
 def _exec_self(argv: list[str]) -> None:

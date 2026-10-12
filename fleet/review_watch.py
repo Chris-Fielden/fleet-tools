@@ -742,6 +742,22 @@ def wait_rereviews() -> None:
         th.join()
 
 
+def abandon_rereviews(wait: float = 5.0) -> None:
+    """Before the dispatcher restarts (exec keeps the PID and drops the threads) or stops: give the
+    re-reviews a moment, then release the shipping reservation of every one still running, so no
+    ticket stays reserved under a PID that will never finish it. A review script left running only
+    records a verdict of the exact commit it reviewed; the restarted watcher re-runs the re-review."""
+    with _REREVIEWS_LOCK:
+        running = [(k[0], e["thread"]) for k, e in _REREVIEWS.items()]
+    for _, th in running:
+        th.join(wait)
+    for tid, th in running:
+        if th.is_alive():
+            prep.release_shipping(tid)
+    with _REREVIEWS_LOCK:
+        _REREVIEWS.clear()
+
+
 def _rereview(t: dict, tip: str, agent: dict | None, settings: dict, state: dict, emit, warn) -> tuple[str, dict]:
     """Drive the re-review of a ticket whose tip is past its PASS. Returns ("wait", t) when
     nothing more is to be decided this cycle, ("passed", t) when the new tip was reviewed and

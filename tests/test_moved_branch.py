@@ -25,6 +25,7 @@ REVIEW_MODES = """#!/bin/bash
 echo "$(git rev-parse HEAD)" >> "$FAKE_REVIEW_LOG"
 case "${FAKE_REVIEW_MODE:-pass}" in
   none) exit 1 ;;
+  hang) sleep 3 ;;
   move) echo late > late.txt; git add -A; git -c user.name=T -c user.email=t@example.com commit -q -m late ;;
 esac
 result=PASS
@@ -382,3 +383,20 @@ def test_every_git_call_that_can_page_is_no_pager():
         if words[:1] == ["git"] and {"log", "diff", "show"} & set(words[1:3]):
             assert words[1] == "--no-pager", line
     assert "--no-pager" in inspect.getsource(dp._git)
+
+
+def test_a_restart_during_a_re_review_releases_its_reservation(scripted, ntfy, env, monkeypatch):
+    """EM-27 review: exec keeps the PID and drops the threads, so a reservation left behind would
+    block ship and the watcher for as long as the dispatcher lives."""
+    monkeypatch.setenv("FAKE_REVIEW_MODE", "hang")
+    scripted.passes()
+    scripted.summary()
+    scripted.set_agent("idle")
+    scripted.cycle()
+    scripted.commit("after the pass")
+    scripted.cycle(1)
+    assert any(r["id"] == scripted.id for r in prep._load()["shipping"])   # reserved while it runs
+    rw.abandon_rereviews(wait=0.1)                                         # what the restart does
+    assert not any(r["id"] == scripted.id for r in prep._load()["shipping"])
+    assert prep.reserve_shipping(scripted.id) is None                      # ship can take it again
+    prep.release_shipping(scripted.id)
