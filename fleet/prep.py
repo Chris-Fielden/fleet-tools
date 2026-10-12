@@ -311,7 +311,7 @@ def _plan(tickets: list[dict], settings: dict, state: dict, now: datetime) -> tu
     day at `prep_time` Pacific time (the first look at or after it)."""
     if len(_waiting(tickets, settings, state)) < 2 or not _fresh(tickets, settings, state):
         return None, False
-    open_work = any(d.skip is None or d.skip in AT_CAPACITY for d in dp.decide(tickets, settings))
+    open_work = any(d.eligible or d.skip in AT_CAPACITY for d in dp.decide(tickets, settings))
     claimed = any(t["status"] == "claimed" and t["type"] in dp.LAUNCH_TYPES and not t.get("oncall")
                   for t in tickets)
     if not open_work and not claimed:

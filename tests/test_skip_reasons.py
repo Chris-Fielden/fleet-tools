@@ -42,12 +42,12 @@ def test_refused_build_logs_the_limit_not_none(projects, herdr_log):
 
 
 def test_mixed_queue_never_logs_none(projects, herdr_log):
-    investigation()
-    investigation()
+    first = investigation()
     make_repo(projects, "app")
-    mk(branch="task/other")
+    build = mk(branch="task/other")
     run(reserve=lambda: False)
-    assert decision_lines()
+    for t in (first, build):   # each refused ticket gets exactly one line
+        assert len([x for x in decision_lines() if t["id"] in x]) == 1
     assert not any("None" in x for x in decision_lines())
 
 

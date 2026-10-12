@@ -232,6 +232,9 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
                 d.skip = LIMIT_REACHED
                 emit(f"{d.ticket['id']}  not launched: {d.skip}")
                 d.log_skip()
+                for inv in investigations:   # this return skips the loop below
+                    if inv.skip == LIMIT_REACHED:
+                        inv.log_skip()
                 return code
             build_code, message = lc.launch(d, settings, warn)
             emit(message)
