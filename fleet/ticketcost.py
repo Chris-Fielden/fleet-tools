@@ -3,10 +3,17 @@
 Read-only, like usage.py: nothing is written and no credential file is opened.
 Every session file is one agent launch or one review run. It belongs to a
 ticket through its working folder (`.../.worktrees/<name>` is branch
-`task/<name>`, which a ticket names in its `branch` field). A session whose
-first user message is the review prompt of scripts/review.sh counts as a
-review; any other session is build work. Only counts, ids, model names and
-times are kept: no prompt text, paths or other session content is returned.
+`task/<name>`, which a ticket names in its `branch` field). A research agent
+works in `<research_dir>/<ID>`, which is not a repo and has no branch: that
+session belongs to the investigate ticket <ID> (kind `research`). The folder
+must sit directly in research_dir and be named like a ticket id; only the
+first working folder of a session counts, and a research session is never
+matched by branch. The investigate ticket keeps its own usage: the build
+tickets filed from it are not merged into it, and it is not added to theirs.
+A session whose first user message is the review prompt of scripts/review.sh
+counts as a review; any other session is build work. Only counts, ids, model
+names and times are kept: no prompt text, paths or other session content is
+returned.
 
 Claude -- <config>/projects/**/*.jsonl: cwd, gitBranch, message.model and
   message.usage per assistant line (de-duplicated by (message.id, requestId)).
@@ -39,6 +46,28 @@ def _where(cwd) -> tuple[str, str] | None:
     return (m.group(1), f"task/{m.group(2)}") if m else None
 
 
+def _research_dir() -> Path | None:
+    from . import settings
+    try:
+        return settings.load_settings()["research_dir"]
+    except Exception:  # unreadable settings: research sessions are just not attributed
+        return None
+
+
+def _research_where(cwd, research_dir: Path | None) -> tuple[None, str] | None:
+    """(None, <ID>) for a research agent's folder `<research_dir>/<ID>`, or None."""
+    if research_dir is None or not isinstance(cwd, str) or not cwd:
+        return None
+    p = Path(cwd)
+    if p.parent not in (research_dir, research_dir.resolve()) or not tk.ID_RE.fullmatch(p.name):
+        return None
+    return (None, p.name)
+
+
+def _locate(cwd, research_dir):
+    return _where(cwd) or _research_where(cwd, research_dir)
+
+
 def _text(content) -> str:
     if isinstance(content, str):
         return content
@@ -59,17 +88,20 @@ def _session(agent, where, model, first_user, times, counted, since, tokens) -> 
     if not inside or not counted or where is None:
         return None
     start, end = min(inside), max(counted)
+    research = where[0] is None
+    review = first_user.strip().lower().startswith(REVIEW_MARK)
     return {
         "agent": agent, "model": model,
-        "kind": "review" if first_user.strip().lower().startswith(REVIEW_MARK) else "build",
-        "repo": where[0], "branch": where[1], "started_at": _iso(start), "ended_at": _iso(end),
+        "kind": "review" if review else "research" if research else "build",
+        "repo": None if research else where[0], "branch": None if research else where[1],
+        "ticket_hint": where[1] if research else None, "started_at": _iso(start), "ended_at": _iso(end),
         "duration_seconds": int((end - start).total_seconds()),
         "fresh_input": tokens[0], "output": tokens[1], "cache_read": tokens[2],
         "tokens": sum(tokens), "_start": min(times),
     }
 
 
-def _claude_session(path: Path, unreadable, since) -> dict | None:
+def _claude_session(path: Path, unreadable, since, research_dir=None) -> dict | None:
     where = model = None
     first_user = None
     times, counted, seen = [], [], set()
@@ -78,7 +110,7 @@ def _claude_session(path: Path, unreadable, since) -> dict | None:
         ts = _ts(obj.get("timestamp"))
         if ts is not None:
             times.append(ts)
-        where = where or _where(obj.get("cwd"))
+        where = where or _locate(obj.get("cwd"), research_dir)
         msg = obj.get("message")
         if not isinstance(msg, dict):
             continue
@@ -104,7 +136,7 @@ def _claude_session(path: Path, unreadable, since) -> dict | None:
     return _session("claude", where, model, first_user or "", times, counted, since, tot)
 
 
-def _codex_session(path: Path, unreadable, since) -> dict | None:
+def _codex_session(path: Path, unreadable, since, research_dir=None) -> dict | None:
     where = model = None
     first_user = None
     times, counted = [], []
@@ -118,7 +150,7 @@ def _codex_session(path: Path, unreadable, since) -> dict | None:
         if not isinstance(p, dict):
             continue
         if obj.get("type") in ("session_meta", "turn_context"):
-            where = where or _where(p.get("cwd"))
+            where = where or _locate(p.get("cwd"), research_dir)
             if isinstance(p.get("model"), str):
                 model = model or p["model"]
         elif obj.get("type") == "event_msg":
@@ -148,8 +180,10 @@ def _codex_session(path: Path, unreadable, since) -> dict | None:
 
 
 def sessions(home: Path | None = None, since: datetime | None = None,
-             now: datetime | None = None) -> list[dict]:
-    """Every attributable session file modified since `since` (default 7 days)."""
+             now: datetime | None = None, research_dir: Path | None = None) -> list[dict]:
+    """Every attributable session file modified since `since` (default 7 days).
+    `research_dir` defaults to the setting of that name."""
+    research_dir = research_dir or _research_dir()
     home = home or Path.home()
     now = now or datetime.now(timezone.utc)
     since = since or now - WEEK
@@ -159,7 +193,7 @@ def sessions(home: Path | None = None, since: datetime | None = None,
     for root, pattern, parse in ((claude, "*.jsonl", _claude_session),
                                  (codex, "rollout-*.jsonl", _codex_session)):
         for path in _files(root, pattern, since, bad):
-            s = parse(path, bad, since)
+            s = parse(path, bad, since, research_dir)
             if s and s["_start"] <= now:
                 out.append(s)
     return out
@@ -167,7 +201,11 @@ def sessions(home: Path | None = None, since: datetime | None = None,
 
 def _owner(tickets: list[dict], s: dict) -> str | None:
     """The ticket a session belongs to: of those on its branch, the newest one
-    created before the session began (a fix ticket may reuse the folder)."""
+    created before the session began (a fix ticket may reuse the folder). A
+    research session belongs to the investigate ticket it names, never by branch."""
+    if s.get("ticket_hint"):
+        t = next((t for t in tickets if t.get("id") == s["ticket_hint"]), None)
+        return t["id"] if t and t.get("type") == "investigate" else None
     mine = [t for t in tickets
             if t.get("branch") == s["branch"] and t.get("repo") == s["repo"]]
     if not mine:
@@ -187,19 +225,20 @@ def attribute(tickets: list[dict], found: list[dict]) -> list[dict]:
     return out
 
 
-def for_ticket(ticket: dict, home: Path | None = None) -> dict:
+def for_ticket(ticket: dict, home: Path | None = None, research_dir: Path | None = None) -> dict:
     created = _ts(ticket.get("created_at")) or datetime.now(timezone.utc) - WEEK
-    rows = [s for s in attribute(tk.list_tickets(), sessions(home, created - timedelta(minutes=1)))
+    rows = [s for s in attribute(tk.list_tickets(), sessions(home, created - timedelta(minutes=1), research_dir=research_dir))
             if s["ticket"] == ticket["id"]]
     total = {k: sum(s[k] for s in rows)
              for k in ("fresh_input", "output", "cache_read", "tokens", "duration_seconds")}
     return {"ticket": ticket["id"], "runs": len(rows), **total, "sessions": rows}
 
 
-def by_ticket(home: Path | None = None, now: datetime | None = None, limit: int = 10) -> list[dict]:
-    """Top tickets by tokens over the last 7 days, split build/review and by agent."""
+def by_ticket(home: Path | None = None, now: datetime | None = None, limit: int = 10,
+              research_dir: Path | None = None) -> list[dict]:
+    """Top tickets by tokens over the last 7 days, split build/research/review and by agent."""
     now = now or datetime.now(timezone.utc)
-    rows = attribute(tk.list_tickets(), sessions(home, now - WEEK, now))
+    rows = attribute(tk.list_tickets(), sessions(home, now - WEEK, now, research_dir))
     agg: dict[str, dict] = {}
     for s in rows:
         a = agg.setdefault(s["ticket"], {"ticket": s["ticket"], "tokens": 0, "runs": 0,
@@ -236,7 +275,8 @@ def _chain(by_id: dict, t: dict) -> set[str]:
     return out
 
 
-def card_usage(targets: list[dict], home: Path | None = None) -> dict[str, str]:
+def card_usage(targets: list[dict], home: Path | None = None,
+               research_dir: Path | None = None) -> dict[str, str]:
     """Ticket id -> the usage line for its Kaneo card, for those of `targets` that
     have any usage (the others are left out). A ticket's total includes the runs of
     the on-call tickets filed to fix it. Session files are read once for all targets."""
@@ -248,7 +288,7 @@ def card_usage(targets: list[dict], home: Path | None = None) -> dict[str, str]:
     chain = {t["id"]: _chain(by_id, t) for t in every}
     created = [_ts(t.get("created_at")) for t in every if wanted & chain[t["id"]]]
     start = min((c for c in created if c), default=datetime.now(timezone.utc) - WEEK)
-    rows = [s for s in attribute(every, sessions(home, start - timedelta(minutes=1)))
+    rows = [s for s in attribute(every, sessions(home, start - timedelta(minutes=1), research_dir=research_dir))
             if wanted & chain[s["ticket"]]]
     out: dict[str, str] = {}
     for tid in wanted:
