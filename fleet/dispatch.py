@@ -233,7 +233,14 @@ class Decision:
 
     @property
     def eligible(self) -> bool:
-        return self.skip is None
+        return not self.skip
+
+    def log_skip(self, fallback: str = "not launched: no reason recorded") -> str:
+        """Log this decision as a skip with a real reason (never None or empty)."""
+        if not self.skip:
+            self.skip = fallback
+        log("DECISION", f"{self.ticket['id']} skip: {self.skip}")
+        return self.skip
 
     @property
     def worktree(self) -> str:
