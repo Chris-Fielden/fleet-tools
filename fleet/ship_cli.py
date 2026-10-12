@@ -385,7 +385,7 @@ def _keep_unmerged(wt: Path, ticket_id: str) -> str | None:
     keep/<id>-unmerged and leave the worktree clean on it. Returns the branch name, or None when
     there was nothing to save. Raises OSError / RuntimeError when git refuses."""
     def git(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["git", "-C", str(wt), *args], capture_output=True, text=True, timeout=120)
+        return subprocess.run(["git", "--no-pager", "-C", str(wt), *args], capture_output=True, text=True, timeout=120)
 
     status = git("status", "--porcelain")
     if status.returncode != 0:
@@ -719,6 +719,9 @@ def main(argv=None) -> int:
                         "still at COMMIT and the gate passes with the reviews already on file; "
                         "sends one phone ping with the result")
     args = p.parse_args(argv)
+    # Nothing ship runs (the merge script included) may stop at a pager: a detached ship sat at
+    # `less (END)` overnight holding its reservation (EM-27).
+    os.environ["GIT_PAGER"] = "cat"
     if args.status:
         if args.id or args.list or args.job:
             p.error("--status takes its ticket id and nothing else")

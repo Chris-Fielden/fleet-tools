@@ -114,8 +114,8 @@ fi
 
 echo
 echo "== 3/5 What will be merged into $base ($commits commits)"
-git log --oneline "$base..$tip"
-git diff --stat "$base...$tip"
+git --no-pager log --oneline "$base..$tip"
+git --no-pager diff --stat "$base...$tip"
 
 echo
 if [[ -n "$override_reason" ]]; then

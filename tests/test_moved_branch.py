@@ -362,3 +362,23 @@ def test_an_owed_needs_human_ping_survives_a_later_ready_list_ping(q, herdr_log,
         assert [p["kind"] for p in st["pings"]] == ["human", "list"]
     prep.flush_pings(prep.dp.load_settings(), prep.datetime.now(prep.timezone.utc), lambda m: None)
     assert "PREP needs a human, see notes" in [m[0] for m in sent(ntfy)]
+
+
+# --- EM-27 item 5: ship never stops at a pager --------------------------------------------
+
+def test_ship_sets_no_pager_for_everything_it_runs(q, env, monkeypatch):
+    monkeypatch.delenv("GIT_PAGER", raising=False)
+    ship_main(["--status", "XX-1"])
+    monkeypatch.setenv("GIT_PAGER", os.environ["GIT_PAGER"])   # let monkeypatch restore it
+    assert os.environ["GIT_PAGER"] == "cat"
+
+
+def test_every_git_call_that_can_page_is_no_pager():
+    import inspect
+    from fleet import dispatch as dp
+    merge_script = (ROOT / "scripts" / ("finish" + "-task.sh")).read_text()
+    for line in merge_script.splitlines():
+        words = line.split()
+        if words[:1] == ["git"] and {"log", "diff", "show"} & set(words[1:3]):
+            assert words[1] == "--no-pager", line
+    assert "--no-pager" in inspect.getsource(dp._git)
