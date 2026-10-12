@@ -169,6 +169,21 @@ if git remote get-url origin >/dev/null 2>&1; then
 else
   echo "No 'origin' remote, so nothing was pushed."
 fi
+# The ticket's agent must not keep writing into the worktree we are about to remove: stop it
+# and close its tab (only that ticket's own), and save anything it left uncommitted on a
+# keep/<ticket>-unmerged branch so the removal below does not refuse. If the agent cannot be
+# stopped, leave the worktree and branch in place: the merge is done and pushed, only the
+# clean-up is pending (stop the agent by hand, then remove them).
+if [[ -n "$ticket" ]]; then
+  ship_cmd="${FLEET_SHIP:-ship}"
+  if ! "$ship_cmd" --quiesce "$ticket"; then
+    echo
+    echo "$name is merged and pushed, but the agent of $ticket could not be stopped (see above)."
+    echo "Clean-up is NOT done: the worktree $wt and branch $branch were left in place."
+    echo "Stop that agent, then:  git worktree remove \"$wt\" && git branch -d \"$branch\""
+    exit 1
+  fi
+fi
 git worktree remove "$wt"
 git branch -d "$branch"
 echo "Done: $name merged and cleaned up."

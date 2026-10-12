@@ -155,7 +155,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
         # Notes go first, before anything below decides that an idle agent has finished.
         # (none while the usage governor has stopped the fleet: a note would wake an agent above the limit)
         prompted = push_notes.push([] if governor.status()["state"] == "stopped" else tk.list_tickets(),
-                                   emit, warn)
+                                   emit, warn, settings)
     for ticket_id, reason in lc.sweep_tabs(settings, warn):
         emit(f"{ticket_id}  stale tab swept: {reason}")
     for t in lc.finish_investigations([t for t in tk.list_tickets()

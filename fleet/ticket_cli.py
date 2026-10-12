@@ -295,29 +295,15 @@ def _save_leftovers(args, info: dict, changed: list, review_text: str) -> None:
     if not args.propose_leftovers:
         return
     parent = changed[0]
-    branch = f"task/leftovers-{parent['id'].lower()}"
     try:
         heading = f"From the {info['reviewer']} review of {info['commit'][:7]}:"
-        existing = next((o for o in tk.list_tickets()
-                         if o.get("parent") == parent["id"] and o.get("branch") == branch
-                         and o["status"] in tk.ACTIVE_STATUSES), None)  # a finished one is not reused
-        if existing:  # one grouped ticket per reviewed ticket: add this reviewer's new items
-            added = tk.append_to_body(existing["id"], heading, items)
-            if added:
-                print(f"{added['id']} leftover items added from the {info['reviewer']} review")
-                kaneo.mirror_quietly(added, _warn)
-            return
-        body = (f"Smaller review suggestions left over from {parent['id']} "
-                f"({parent['title']}), kept out of that branch so its tip review stays valid.\n\n"
-                f"{heading}\n{items}")
-        if len(body) > tk.BODY_MAX:
-            body = body[:tk.BODY_MAX - 15].rstrip() + "\n[...truncated]"
-        # Proposed, not open: its branch would start from main before the
-        # reviewed branch is merged, so a human approves it after the merge.
-        new = _tracker().create({
-            "type": "fix", "repo": parent["repo"], "branch": branch, "parent": parent["id"],
-            "title": f"Leftover review items from {parent['id']}", "body": body}, needs_approval=True)
-        print(f"{new['id']} proposed for the leftover SHOULD FIX items")
+        # One grouped ticket per reviewed ticket (the helper reuses an active one, or files it)
+        ticket, what = tk.file_leftovers_items(parent, heading, items, _tracker().create)
+        if what == "created":
+            print(f"{ticket['id']} proposed for the leftover SHOULD FIX items")
+        elif what == "added":
+            print(f"{ticket['id']} leftover items added from the {info['reviewer']} review")
+            kaneo.mirror_quietly(ticket, _warn)
     except (tk.TicketError, tk.TicketInvalid, st.SettingsError, OSError, UnicodeDecodeError) as exc:
         _warn(f"could not propose a leftovers ticket for {parent['id']}: {exc}")
 

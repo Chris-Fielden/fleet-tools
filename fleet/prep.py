@@ -182,6 +182,12 @@ def locked_ids() -> set[str]:
     return _busy(_load())
 
 
+def shipping_ids() -> set[str]:
+    """Ids of tickets a running `ship` holds right now (a dead process holds nothing).
+    Raises OSError when the state cannot be read: callers must fail closed."""
+    return {r["id"] for r in _load()["shipping"] if _alive(r["pid"])}
+
+
 def reserve_shipping(ticket_id: str) -> str | None:
     """Claim a ticket for `ship`, atomically with the agent reservations (same lock as _start_job).
     Returns a one-line problem, or None when it is now reserved."""
