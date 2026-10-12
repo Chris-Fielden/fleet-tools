@@ -116,7 +116,9 @@ class Rig:
 
 @pytest.fixture
 def rig(projects, env, herdr_log, monkeypatch):
-    return Rig(projects, env, monkeypatch)
+    yield Rig(projects, env, monkeypatch)
+    rw.wait_rereviews()   # no re-review thread outlives its test's FLEET_HOME
+    rw._REREVIEWS.clear()
 
 
 def sent(ntfy):
@@ -266,6 +268,7 @@ def test_back_to_claimed_when_the_tip_moves_or_the_agent_is_busy(rig, ntfy):
     rig.commit("more")
     rig.cycle(3)
     assert rig.get()["status"] == "claimed"
+    rw.wait_rereviews()   # the idle agent's new commit starts a re-review (it cannot run in this rig)
     rig.verdict()
     rig.summary("new summary")
     rig.cycle(4)

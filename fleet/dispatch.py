@@ -179,7 +179,7 @@ def research_dir_problem(settings: dict) -> str | None:
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", "--no-optional-locks", "-C", str(repo), *args],
+        ["git", "--no-pager", "--no-optional-locks", "-C", str(repo), *args],
         capture_output=True, text=True, timeout=60,
     )
 

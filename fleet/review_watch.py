@@ -13,6 +13,10 @@
   for 20 minutes, or it had no activity for 45 minutes while its agent was idle or waiting. It is then closed as
   failed and an on-call fix ticket is filed (launched by the dispatch cycle in
   its own slot); see _fail_ticket. A mid-loop FAIL verdict never pings.
+* A commit landing after a PASS (the tip is past the commit the PASS is on, and its agent has
+  stopped) clears the ready state and re-runs check.sh and the reviews on that exact tip in the
+  background; see "a commit after the PASS" below. It ends in the usual ready ping, the usual
+  FAIL handling, or one "needs a human" ping: never a ticket left claimed with no action.
 * The only ping here besides "ready to ship" is a review that ran but could
   not be recorded; failures ping once, low ("on-call is on it" or "needs a
   human").
@@ -38,6 +42,7 @@ import contextlib
 import json
 import re
 import subprocess
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -148,6 +153,22 @@ def passed_for_tip(t: dict, tip: str) -> bool:
     v = t["verdict"]
     return (v is not None and v["result"] == "PASS" and v["commit"] == tip
             and kaneo.ready_to_ship(t))
+
+
+def moved_past_pass(t: dict, tip: str) -> bool:
+    """The recorded verdict is a PASS on a commit the branch is no longer at (a commit landed
+    after it, or the branch was rewritten): that verdict says nothing about this tip."""
+    v = t.get("verdict")
+    return v is not None and v["result"] == "PASS" and v["commit"] != tip
+
+
+def vouched_by_rereview(t: dict) -> bool:
+    """The dispatcher's own re-review note stands after the recorded verdict: the tip was checked
+    and passed by it, so no agent has to be around to say so."""
+    v = t["verdict"]
+    return v is not None and any(
+        n["by"] == "human" and n["at"] >= v["at"] and n["text"].startswith(prep.PASS_NOTE_PREFIX)
+        and REREVIEW_NOTE in n["text"] for n in t.get("notes", []))
 
 
 def _last_activity(t: dict, repo: Path, tip: str, agent: dict | None, state: dict,
@@ -682,6 +703,131 @@ def process_recoveries(settings: dict, state: dict, now: datetime, emit, warn) -
             warn(f"{rec['id']}: recovery is not finished and will be retried next cycle ({exc})")
 
 
+# --- a commit after the PASS -----------------------------------------------------------
+# Threat model: a moved branch must never ship on an old verdict, and a re-review always runs on
+# the exact new tip. The gate and ready_to_ship already refuse a verdict of another commit; this
+# is what makes the ticket move on instead of sitting claimed with nobody looking at it. Once the
+# tip is past its PASS and its agent has stopped (idle, done, or gone), the ready state is
+# cleared (back to claimed) and the dispatcher runs prep.validate on THAT commit in the
+# background: check.sh, then the reviews its risk level needs, with the task folder and the branch
+# both required to be at it before and after. Meanwhile the ticket is reserved like a ship, so
+# `ship` and the prep pass keep off it. A PASS then goes through the normal ready flow (one
+# "ready to ship" ping); a FAIL is the normal mid-loop FAIL (the true-failure rules ping), a
+# ticket with no agent gets a new one; anything else (no verdict recorded: check.sh failed,
+# review.sh crashed, the branch moved again) is a note and one needs-human ping per tip.
+
+_REREVIEWS: dict[tuple[str, str], dict] = {}   # in memory: a restarted dispatcher re-runs it (pings are deduped)
+_REREVIEWS_LOCK = threading.Lock()
+REREVIEW_NOTE = ("the branch moved past its PASS; scripts/check.sh and the required reviews of "
+                 "this exact commit passed.")
+
+
+def _rereview_thread(t: dict, tip: str, settings: dict, entry: dict) -> None:
+    try:
+        try:
+            problem = prep.validate(t, settings, expect=tip, note=REREVIEW_NOTE)
+        except Exception as exc:   # a thread must always leave a result behind
+            problem = f"the re-review could not finish ({_clip(str(exc), 150)})"
+        entry["problem"] = problem
+        entry["done"] = True
+    finally:
+        prep.release_shipping(t["id"])   # last: the ticket is judged again only after the result is stored
+
+
+def wait_rereviews() -> None:
+    """Block until the background re-reviews are done (a one-shot run, and tests)."""
+    with _REREVIEWS_LOCK:
+        threads = [e["thread"] for e in _REREVIEWS.values()]
+    for th in threads:
+        th.join()
+
+
+def abandon_rereviews(wait: float = 5.0) -> None:
+    """Before the dispatcher restarts (exec keeps the PID and drops the threads) or stops: give the
+    re-reviews a moment, then release the shipping reservation of every one still running, so no
+    ticket stays reserved under a PID that will never finish it. A review script left running only
+    records a verdict of the exact commit it reviewed; the restarted watcher re-runs the re-review."""
+    with _REREVIEWS_LOCK:
+        running = [(k[0], e["thread"]) for k, e in _REREVIEWS.items()]
+    for _, th in running:
+        th.join(wait)
+    for tid, th in running:
+        if th.is_alive():
+            prep.release_shipping(tid)
+    with _REREVIEWS_LOCK:
+        _REREVIEWS.clear()
+
+
+def _rereview(t: dict, tip: str, agent: dict | None, settings: dict, state: dict, emit, warn) -> tuple[str, dict]:
+    """Drive the re-review of a ticket whose tip is past its PASS. Returns ("wait", t) when
+    nothing more is to be decided this cycle, ("passed", t) when the new tip was reviewed and
+    passed (t reloaded), ("failed", t) when it did not (t reloaded; judged by the normal rules)."""
+    tid, old = t["id"], t["verdict"]["commit"]
+    key = (tid, tip)
+    with _REREVIEWS_LOCK:
+        entry = _REREVIEWS.get(key)
+    if entry is None:
+        if t["status"] == "review":   # the ready state goes first, whatever happens next
+            new = _move(t, "claimed", ("review",), warn)
+            if not new:
+                return "wait", t
+            emit(f"{tid}  back to In Progress (a commit landed after the PASS)")
+            dp.log("REVIEW_BACK", f"{tid} back to claimed: tip {tip[:8]} is past the PASS on {old[:8]}")
+            kaneo.mirror_quietly(new, warn)
+            t = new
+        problem = prep.reserve_shipping(tid)   # no ship or prep pass touches it meanwhile
+        if problem:
+            warn(f"{tid}: re-review waits: {problem}")
+            return "wait", t
+        entry = {"done": False, "problem": None}
+        entry["thread"] = threading.Thread(target=_rereview_thread, args=(t, tip, settings, entry),
+                                           name=f"rereview-{tid}", daemon=True)
+        with _REREVIEWS_LOCK:
+            for k in [k for k in _REREVIEWS if k[0] == tid]:   # an older tip's result is of no use now
+                del _REREVIEWS[k]
+            _REREVIEWS[key] = entry
+        entry["thread"].start()
+        emit(f"{tid}  {tip[:8]} landed after the PASS on {old[:8]}: re-checking and re-reviewing it")
+        dp.log("REREVIEW_STARTED", f"{tid} {tip[:8]} is past the PASS on {old[:8]}")
+        return "wait", t
+    if not entry["done"]:
+        return "wait", t
+    fresh = tk.load_ticket(tid)
+    if entry["problem"] is None or passed_for_tip(fresh, tip):   # or the agent got its own PASS on this tip
+        return "passed", fresh
+    v = fresh.get("verdict")
+    if v is not None and v["result"] == "FAIL" and v["commit"] == tip:
+        if agent is None and not entry.get("relaunched"):   # nobody is on it: the normal FAIL loop needs an agent
+            entry["relaunched"] = True
+            prep.relaunch_sent_back(fresh, settings, emit, warn)
+            return "wait", fresh
+        return "failed", fresh   # a FAIL is the usual mid-loop FAIL: the true-failure rules take it from here
+    _rereview_problem(fresh, tip, entry["problem"], state, warn)
+    return "failed", fresh
+
+
+def _rereview_problem(t: dict, checked: str, problem: str, state: dict, warn) -> None:
+    """A re-review of `checked` ended without a verdict: a note and one needs-human ping per tip."""
+    tid = t["id"]
+    detail = _clip(f"the re-review of {checked[:8]} did not complete: {problem}", 250)
+    _note_once(tid, f"Needs a human: the re-review of {checked[:8]}", f"Needs a human: {detail}.", warn)
+    if _ping(t, "needs_human", f"{tid}:rereview:{checked}", state, warn, detail):
+        dp.log("NEEDS_HUMAN", f"{tid} {detail}")
+
+
+def _settle_stale_rereviews(t: dict, tip: str, state: dict, warn) -> None:
+    """A finished re-review of a tip the branch is no longer at (it moved while review.sh ran, or
+    after): drop it, and say if it ended without a verdict, so that is never silent. A newer
+    commit past the PASS then starts its own re-review as usual."""
+    with _REREVIEWS_LOCK:
+        old = [(k, e) for k, e in _REREVIEWS.items() if k[0] == t["id"] and k[1] != tip and e["done"]]
+        for k, _ in old:
+            del _REREVIEWS[k]
+    for (_, checked), entry in old:
+        if entry["problem"] is not None:
+            _rereview_problem(t, checked, entry["problem"], state, warn)
+
+
 # --- the cycle -----------------------------------------------------------------
 
 def _move(t: dict, status: str, allowed_from: tuple, warn):
@@ -706,6 +852,21 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
     agent_state = agent.get("agent_status") if agent else None
     stopped = agent_state in ("idle", "done")
     earned = passed_for_tip(t, tip) and has_summary_after_review(t)
+
+    _settle_stale_rereviews(t, tip, state, warn)
+    with _REREVIEWS_LOCK:
+        rereviewing = (t["id"], tip) in _REREVIEWS   # its result is taken up here once it is in
+    if agents_known and (agent is None or stopped) and (rereviewing or moved_past_pass(t, tip)):
+        outcome, t = _rereview(t, tip, agent, settings, state, emit, warn)
+        if outcome == "wait":
+            return
+        if outcome == "passed":   # no agent left to wait for: the new PASS is judged like any ready ticket
+            stopped = True
+            earned = passed_for_tip(t, tip) and has_summary_after_review(t)
+        else:
+            earned = False
+    elif agents_known and agent is None and earned and vouched_by_rereview(t):
+        stopped = True   # re-reviewed and passed, then the dispatcher restarted before the ticket moved on
 
     if t["status"] == "review":
         # Leave it alone if herdr cannot be asked; a vanished agent is not busy.

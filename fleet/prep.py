@@ -16,6 +16,10 @@ never touches the ticket store. The dispatcher (a human's process) then:
     back to `claimed` and stays off the list;
   * writes the ship list to $FLEET_HOME/ship-list.txt and sends one ping.
 
+A job records, per repo, the base branch's tip and the main checkout's HEAD, branch and status
+when it starts (ID-7 item K). If any of them differ when it finishes, its whole result is refused:
+nothing is re-checked, cancelled or listed, and one needs-human ping is sent.
+
 `ship` can also start a short reconcile agent of the same kind when a merge
 conflicts anyway. Tickets handed to an agent are "locked" while it works: the
 watch loop leaves them alone. State lives in $FLEET_HOME/prep.json. Plain Python.
@@ -136,8 +140,9 @@ def _load() -> dict:
         raise OSError(f"{path} has an unexpected shape")
     data["shipping"] = shipping
     pings = data.get("pings", [])   # ready pings deferred until no follow-up pass can lock their tickets
-    data["pings"] = [p for p in pings if isinstance(p, dict) and p.get("kind") in ("list", "ship")
-                     and isinstance(p.get("ids"), list)] if isinstance(pings, list) else []
+    data["pings"] = [p for p in pings if isinstance(p, dict) and p.get("kind") in ("list", "ship", "human")
+                     and isinstance(p.get("ids"), list)
+                     and (p["kind"] != "human" or isinstance(p.get("detail"), str))] if isinstance(pings, list) else []
     for key in ("prep_day", "limit_day"):   # date strings; absent in older files
         if not isinstance(data.get(key), str):
             data[key] = ""
@@ -262,6 +267,36 @@ def _branch_risk(t: dict, settings: dict) -> str:
     return t.get("risk") or "medium"
 
 
+def snapshot(repo: Path) -> dict:
+    """What a prep or reconcile agent must leave alone in a repo's main checkout (ID-7 item K): the
+    base branch's tip, the checkout's HEAD and checked-out branch, and its `git status`. A part that
+    cannot be read is None, so it compares equal to itself next time."""
+    def one(*args: str) -> str | None:
+        out = dp._git(repo, *args)
+        return out.stdout.strip() if out.returncode == 0 else None
+    return {"main": tip_of(repo, dp.main_branch(repo) or "main"), "head": one("rev-parse", "--verify", "--quiet", "HEAD"),
+            "ref": one("symbolic-ref", "-q", "HEAD"), "status": one("status", "--porcelain")}
+
+
+def changed_since_start(job: dict, settings: dict) -> list[str]:
+    """What differs from the job's start snapshot, one "repo: what" line per repo. A job saved
+    before snapshots existed has none and compares equal."""
+    start = job.get("snapshot")
+    if not isinstance(start, dict):
+        return []
+    labels = {"main": "the base branch tip", "head": "HEAD", "ref": "the checked-out branch",
+              "status": "the working tree"}
+    found = []
+    for name, before in sorted(start.items()):
+        if not isinstance(before, dict) or not isinstance(name, str):
+            continue
+        now = snapshot(settings["projects_dir"] / name)
+        diff = [text for key, text in labels.items() if before.get(key) != now.get(key)]
+        if diff:
+            found.append(f"{name}: {', '.join(diff)}")
+    return found
+
+
 def _manifest(tickets: list[dict], settings: dict) -> dict:
     out = []
     for t in tickets:
@@ -378,7 +413,8 @@ def _start_job(kind: str, tickets: list[dict], settings: dict, warn) -> dict:
         name = "prep" if kind == "prep" else f"prep-{tickets[0]['id'].lower()}"
         job = {"name": name, "label": name.upper(), "kind": kind, "ids": [t["id"] for t in tickets],
                "tips": {t["id"]: tip_of(_repo(t, settings), t["branch"]) for t in tickets},
-               "started": _stamp(datetime.now(timezone.utc)), "tab": None, "tries": 0, "ready": False}
+               "started": _stamp(datetime.now(timezone.utc)), "tab": None, "tries": 0, "ready": False,
+               "snapshot": {r: snapshot(settings["projects_dir"] / r) for r in sorted({t["repo"] for t in tickets})}}
         st["jobs"].append(job)
     try:
         folder = lc.research_folder(FOLDER_ID, settings)
@@ -463,14 +499,24 @@ def _run(cmd: list[str], cwd: Path, timeout: int, env=None) -> int:
         return -1
 
 
-def validate(t: dict, settings: dict) -> str | None:
+def _on_commit(repo: Path, wt: Path, branch: str, expect: str) -> bool:
+    """The branch AND the task folder's HEAD are exactly at `expect` (what review.sh would review)."""
+    head = dp._git(wt, "rev-parse", "--verify", "--quiet", "HEAD")
+    return tip_of(repo, branch) == expect and head.returncode == 0 and head.stdout.strip() == expect
+
+
+def validate(t: dict, settings: dict, expect: str | None = None, note: str | None = None) -> str | None:
     """Re-check a branch the agent changed: a clean task folder, scripts/check.sh, and the
     reviews its risk level needs (scripts/review.sh decides how many and records the verdict
     on the ticket). On success a "Prep pass: re-checked at" note is saved after the new verdict. Returns a
-    one-line problem, or None."""
+    one-line problem, or None. `expect` (a full commit id) makes the re-check exact: it only runs
+    while the branch and its folder are at that commit, and the verdict and note are only taken if
+    they still are afterwards; `note` replaces the default text after the commit id."""
     repo, wt = _repo(t, settings), _worktree(t, settings)
     if not wt.is_dir():
         return f"task folder {wt.name} is gone"
+    if expect and not _on_commit(repo, wt, t["branch"], expect):
+        return f"the branch is not at {expect[:8]} (the commit to re-check)"
     status = dp._git(wt, "status", "--porcelain")
     if status.returncode != 0 or status.stdout.strip():
         return "the task folder has uncommitted changes"
@@ -492,13 +538,15 @@ def validate(t: dict, settings: dict) -> str | None:
     env.setdefault("FLEET_TICKET", str(Path(__file__).resolve().parent.parent / "bin" / "ticket"))
     if _run(["bash", "scripts/review.sh"], wt, REVIEW_TIMEOUT, env) != 0:
         return "the review did not pass"
+    if expect and not _on_commit(repo, wt, t["branch"], expect):
+        return f"the branch moved while {expect[:8]} was being re-checked"
     tip = tip_of(repo, t["branch"])
     fresh = tk.load_ticket(t["id"])
     v = fresh["verdict"]
     if not (v and v["result"] == "PASS" and v["commit"] == tip and kaneo.ready_to_ship(fresh)):
         return "no passing review of the new tip is recorded on the ticket"
-    tk.add_note(t["id"], f"{PASS_NOTE_PREFIX} {tip[:8]}: the branch was changed; "
-                         "scripts/check.sh and the required reviews passed.")
+    tk.add_note(t["id"], f"{PASS_NOTE_PREFIX} {tip[:8]}: "
+                         + (note or "the branch was changed; scripts/check.sh and the required reviews passed."))
     return None
 
 
@@ -810,9 +858,48 @@ def _defer_ping(st: dict, kind: str, ids: list[str]) -> None:
     and the individual pings of the tickets it names."""
     if kind == "list":
         older = [i for p in st["pings"] if p["kind"] == "list" for i in p["ids"]]
-        st["pings"] = [p for p in st["pings"] if p["kind"] != "list" and not set(p["ids"]) <= set(ids)]
+        # needs-human pings (no ticket ids) are never superseded by a ready ping
+        st["pings"] = [p for p in st["pings"]
+                       if p["kind"] == "human" or (p["kind"] != "list" and not set(p["ids"]) <= set(ids))]
         ids = list(dict.fromkeys(older + ids))
     st["pings"].append({"kind": kind, "ids": ids})
+
+
+def _refuse_changed(job: dict, changed: list[str], emit, warn) -> None:
+    """The agent of a job left the main checkout different from how the job found it (ID-7 item K).
+    Its result is refused whole: nothing is re-checked, cancelled or listed, the tickets are
+    unlocked as they were, and ONE needs-human ping is owed (kept until it is sent). A branch the
+    agent did move is caught by review_watch, which re-reviews any tip past its PASS."""
+    what = _clip("; ".join(changed), 250)
+    msg = (f"the {job['name']} agent changed the main checkout while it worked ({what}); its result was "
+           f"refused: nothing was re-checked, cancelled or listed, and its tickets ({', '.join(job['ids'])}) "
+           "were left as they were")
+    with _state() as st:
+        st["jobs"] = [j for j in st["jobs"] if j["name"] != job["name"]]
+        st["pings"].append({"kind": "human", "ids": [], "detail": _clip(msg, 280), "label": job["label"]})
+    _forget_checks(job["name"])
+    for i in job["ids"]:
+        with contextlib.suppress(tk.TicketError, tk.TicketInvalid):
+            tk.add_note(i, _clip(f"{NOTE_PREFIX} refused the {job['name']} agent's result: it changed the main "
+                                 f"checkout ({what}). Needs a human.", tk.NOTE_MAX))
+    dp.log("PREP_FAILED", _clip(msg, 300))
+    emit(f"{job['label']}  {msg}")
+    warn(msg)
+
+
+def _flush_human(warn) -> None:
+    """Send the owed needs-human pings of refused jobs, once each; a send that fails stays owed."""
+    with _state() as st:
+        owed = [p for p in st["pings"] if p["kind"] == "human"]
+        if not owed:
+            return
+        keep = []
+        for p in owed:
+            stub = {"id": str(p.get("label") or "PREP"), "type": "build", "status": "review",
+                    "title": "prep agent changed the main checkout"}
+            if not notify.notify_quietly(stub, "needs_human", warn, p["detail"]):
+                keep.append(p)
+        st["pings"] = [p for p in st["pings"] if p["kind"] != "human"] + keep
 
 
 def flush_pings(settings: dict, now: datetime, warn) -> None:
@@ -820,15 +907,17 @@ def flush_pings(settings: dict, now: datetime, warn) -> None:
     tickets and its own ping speaks for them). A send that fails stays recorded and is retried on
     the next cycle; tickets no longer in review are dropped."""
     try:
+        _flush_human(warn)   # needs-human pings never wait for a pass
         state = _load()
-        if not state["pings"] or any(j["kind"] == "prep" for j in state["jobs"]):
+        if (not any(p["kind"] != "human" for p in state["pings"])
+                or any(j["kind"] == "prep" for j in state["jobs"])):
             return
         tickets = tk.list_tickets()
         if _pass_follows(tickets, settings, state, now):
             return
         in_review = {t["id"]: t for t in review_tickets(tickets)}
         busy = _busy(state)
-        done = list(state["pings"])
+        done = [p for p in state["pings"] if p["kind"] != "human"]
         keep = []
         for p in done:
             ids = [i for i in p["ids"] if i in in_review]
@@ -882,6 +971,17 @@ def finish(settings: dict, now: datetime, emit, warn) -> None:
             if started is not None and now - started > JOB_MAX:
                 warn(f"the {job['name']} agent has been working for over {JOB_MAX}; its tickets stay locked "
                      "until it stops (close its tab by hand if it is stuck)")
+            continue
+        try:
+            changed = changed_since_start(job, settings)
+        except (OSError, subprocess.TimeoutExpired) as exc:   # cannot tell: fail closed, try next cycle
+            warn(f"{job['name']}: cannot compare the main checkout with how the job found it ({exc})")
+            continue
+        if changed:
+            _refuse_changed(job, changed, emit, warn)
+            if agent is not None:
+                closed, reason = lc.close_finished_tab(job["label"], settings)
+                emit(f"{job['label']}  tab {'closed' if closed else 'kept'}: {reason}")
             continue
         try:
             (_finish_prep if job["kind"] == "prep" else _finish_reconcile)(job, settings, now, emit, warn)
