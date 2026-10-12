@@ -208,3 +208,88 @@ def test_a_timed_run_always_has_its_tokens_counted(env):
     by = {s["agent"]: s for s in c["sessions"]}
     assert by["claude"]["duration_seconds"] == 120 and by["codex"]["duration_seconds"] == 180
     assert c["duration_seconds"] == 300
+
+
+def investigate(branch="task/investigate-x"):
+    return tk.create_ticket({"type": "investigate", "repo": "fleet-tools", "branch": branch,
+                             "title": "Look into it", "body": "Details."})
+
+
+def test_research_session_is_attributed_to_its_investigate_ticket(env):
+    t = investigate()
+    home = env / "home"
+    rd = home / "fleet-research"
+    now = datetime.now(timezone.utc)
+    claude_file(home, "a", str(rd / t["id"]), "SECRET-PROMPT", now, [(10, 20, 30, 40), (1, 2, 3, 4)])
+    c = tc.for_ticket(t, home, research_dir=rd)
+    assert c["runs"] == 1 and c["tokens"] == 10 + 20 + 30 + 40 + 1 + 2 + 3 + 4  # repeated line counted once
+    assert c["duration_seconds"] == 120
+    assert c["sessions"][0]["kind"] == "research"
+    assert tc.usage_line(c) != "none found"
+    dump = json.dumps(c)
+    assert "SECRET-PROMPT" not in dump and str(rd) not in dump
+    rows = tc.by_ticket(home, now + timedelta(hours=1), research_dir=rd)
+    assert rows[0]["ticket"] == t["id"] and "research/claude" in rows[0]["split"]
+    assert t["id"] in tc.card_usage([t], home, research_dir=rd)
+
+
+def test_research_dir_setting_is_used_by_default(env):
+    t = investigate()
+    home = env / "home"
+    now = datetime.now(timezone.utc)
+    claude_file(home, "a", str(Path.home() / "fleet-research" / t["id"]), "x", now, [(1, 1, 1, 1)])
+    assert tc.for_ticket(t, home)["runs"] == 1
+
+
+def test_research_folder_must_be_exact_and_ticket_known(env):
+    t = investigate()
+    home = env / "home"
+    rd = home / "fleet-research"
+    now = datetime.now(timezone.utc)
+    for i, cwd in enumerate([home / "other" / t["id"], rd / "sub" / t["id"], rd / (t["id"] + "-copy"),
+                             rd / "notes", rd / "ID-999"]):
+        claude_file(home, f"n{i}", str(cwd), "x", now, [(1, 1, 1, 1)])
+    assert tc.for_ticket(t, home, research_dir=rd)["runs"] == 0
+    assert tc.by_ticket(home, now + timedelta(hours=1), research_dir=rd) == []
+
+
+def test_custom_research_dir_and_reruns(env):
+    t = investigate()
+    home = env / "home"
+    rd = env / "elsewhere"
+    now = datetime.now(timezone.utc)
+    claude_file(home, "a", str(rd / t["id"]), "x", now, [(1, 1, 1, 1)])
+    claude_file(home, "b", str(rd / t["id"]), "x", now, [(2, 2, 2, 2)])
+    c = tc.for_ticket(t, home, research_dir=rd)
+    assert c["runs"] == 2 and c["tokens"] == 4 + 8
+    assert tc.for_ticket(t, home, research_dir=home / "fleet-research")["runs"] == 0
+
+
+def test_research_session_is_not_matched_by_branch_or_to_builds(env):
+    inv = investigate("task/shared")
+    build = ticket("task/shared")
+    home = env / "home"
+    rd = home / "fleet-research"
+    now = datetime.now(timezone.utc)
+    claude_file(home, "a", str(rd / inv["id"]), "x", now, [(1, 1, 1, 1)])
+    claude_file(home, "b", str(env / "fleet-tools/.worktrees/shared"), "x", now, [(5, 5, 5, 5)])
+    assert tc.for_ticket(inv, home, research_dir=rd)["tokens"] == 4
+    assert tc.for_ticket(build, home, research_dir=rd)["tokens"] == 20
+    # first working folder wins: a research session that later enters a worktree stays research
+    d = home / ".claude/projects/p"
+    path = d / "a.jsonl"
+    extra = json.dumps({"type": "assistant", "timestamp": z(now + timedelta(minutes=5)),
+                        "cwd": str(env / "fleet-tools/.worktrees/shared"), "requestId": "rz",
+                        "message": {"id": "mz", "model": "m", "usage": {"input_tokens": 100}}})
+    path.write_text(path.read_text() + extra + "\n")
+    assert tc.for_ticket(inv, home, research_dir=rd)["tokens"] == 104
+    assert tc.for_ticket(build, home, research_dir=rd)["tokens"] == 20
+
+
+def test_research_session_outside_the_window_is_left_out(env):
+    t = investigate()
+    home = env / "home"
+    rd = home / "fleet-research"
+    claude_file(home, "a", str(rd / t["id"]), "x",
+                datetime.now(timezone.utc) - timedelta(days=2), [(1, 1, 1, 1)])
+    assert tc.for_ticket(t, home, research_dir=rd)["runs"] == 0
