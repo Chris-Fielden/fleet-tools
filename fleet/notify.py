@@ -300,10 +300,12 @@ def send_alert(event: str, title: str, text: str) -> bool:
                    "priority": PRIORITY_NUMBERS[cfg["priorities"][event]], "tags": _TAGS[event]}
         sent = _post(cfg, message, cfg["priorities"][event])
     except NotConfigured:
-        log_ping("PING_FAILED", "fleet", event, "notifications are off (no notify.json)")
-        raise
+        raise   # notifications are off: no line, as for a ticket ping
     except NotifyError as exc:
         log_ping("PING_FAILED", "fleet", event, str(exc))
+        raise
+    except Exception as exc:  # e.g. a malformed priorities entry: still one line, then the caller sees it
+        log_ping("PING_FAILED", "fleet", event, type(exc).__name__)
         raise
     log_ping("PING_SENT", "fleet", event)
     return sent
@@ -340,12 +342,17 @@ def log_ping(kind: str, ticket_id: str, event: str, reason: str = "") -> None:
         pass
 
 
-def notify_quietly(ticket: dict, event: str | None, warn=None, detail: str | None = None) -> bool:
+def notify_quietly(ticket: dict, event: str | None, warn=None, detail: str | None = None,
+                   log_unconfigured: bool = False) -> bool:
     """Send a notification for a real transition. Never raises: the ticket is
     already saved. `warn` receives a one-line message (default: stderr).
     Returns False only when a configured server could not be reached, so a
-    caller that remembers what it has sent can try again later. Every ping
-    leaves a PING_SENT or PING_FAILED line in dispatch.log, with the reason."""
+    caller that remembers what it has sent can try again later. Every attempt
+    leaves a PING_SENT or PING_FAILED line in dispatch.log (event and ticket id,
+    plus the reason for a failure). Notifications that are off, and events that
+    notify.json filters out, write no line, except when `log_unconfigured` is set
+    for a ping somebody is waiting on (the prep ship list), which records that
+    it could not be sent."""
     if event is None:
         return True
     if warn is None:
@@ -355,7 +362,8 @@ def notify_quietly(ticket: dict, event: str | None, warn=None, detail: str | Non
     try:
         sent = send(ticket, event, detail)
     except NotConfigured:
-        log_ping("PING_FAILED", tid, event, "notifications are off (no notify.json)")
+        if log_unconfigured:
+            log_ping("PING_FAILED", tid, event, "notifications are off (no notify.json)")
         return True   # nothing to retry
     except NotifyError as exc:
         log_ping("PING_FAILED", tid, event, str(exc))
@@ -367,6 +375,4 @@ def notify_quietly(ticket: dict, event: str | None, warn=None, detail: str | Non
         return False
     if sent:
         log_ping("PING_SENT", tid, event)
-    else:
-        log_ping("PING_FAILED", tid, event, "filtered out by notify.json settings")
-    return True
+    return True   # not sent because notify.json filters the event: nothing to log or retry
