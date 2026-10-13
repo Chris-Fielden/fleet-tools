@@ -441,7 +441,7 @@ earlier tickets. It writes `report-prep.json`: `order`, per-ticket `summary` and
 report): only proposes cancelling each named duplicate: a `[prep proposal]` note on both tickets and a
 `PROPOSED CANCEL` line on the ship list, nothing cancelled until a human confirms (the
 context comparison counts only files under `tests/` or named `test_*`); every ping, sent or not,
-leaves a `PING_SENT` or `PING_FAILED` line in dispatch.log, and the one ship-list ping speaks
+leaves a `PING_SENT` or `PING_FAILED` line in dispatch.log (nothing is logged when notifications are off, except that the ship list and owed pings record that they could not be sent), and the one ship-list ping speaks
 for every ticket it names; reads every branch's tip from git and, for each that moved,
 re-runs `scripts/check.sh` and `scripts/review.sh` (which applies the reviews the risk level
 needs) in its task folder, then saves a `Prep pass:` note after the new verdict (the review
