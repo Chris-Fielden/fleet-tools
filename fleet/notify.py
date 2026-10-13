@@ -320,6 +320,16 @@ def _post(cfg: dict, message: dict, priority: str) -> bool:
     return True
 
 
+def _log_ping(kind: str, ticket: dict, event: str) -> None:
+    """One fleet log line per attempt: the event name and ticket id only (never
+    the title, body, detail or token). A log that cannot be written is ignored."""
+    try:
+        from . import dispatch as dp
+        dp.log(kind, f"{ticket.get('id', '?')} {event}")
+    except Exception:  # best effort: the ping path must never fail a command
+        pass
+
+
 def notify_quietly(ticket: dict, event: str | None, warn=None, detail: str | None = None) -> bool:
     """Send a notification for a real transition. Never raises: the ticket is
     already saved. `warn` receives a one-line message (default: stderr).
@@ -330,16 +340,21 @@ def notify_quietly(ticket: dict, event: str | None, warn=None, detail: str | Non
     if warn is None:
         def warn(message):
             print(f"ticket: {message}", file=sys.stderr)
+    sent = False
     try:
-        send(ticket, event, detail)
+        sent = send(ticket, event, detail)
     except NotConfigured:
         pass
     except NotifyError as exc:
+        _log_ping("PING_FAILED", ticket, event)
         warn(f"warning: {ticket.get('id', 'ticket')} saved, but the phone notification "
              f"was not sent ({exc})")
         return False
     except Exception as exc:  # best effort: nothing here may fail a command
+        _log_ping("PING_FAILED", ticket, event)
         warn(f"warning: {ticket.get('id', 'ticket')} saved, but the phone notification "
              f"was not sent ({type(exc).__name__})")
         return False
+    if sent:
+        _log_ping("PING_SENT", ticket, event)
     return True
