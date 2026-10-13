@@ -1,0 +1,36 @@
+// Alloy tails the dispatcher log and pushes it to Loki. (Promtail is end of
+// life, 2026-03-02; Alloy replaces it.)
+// Lines look like: 2026-10-13T06:35:14Z LAUNCHED BD-91 ...
+
+local.file_match "fleet" {
+  path_targets = [{
+    "__path__" = "/fleet-home/dispatch.log",
+    "job"      = "fleet",
+  }]
+}
+
+loki.source.file "fleet" {
+  targets    = local.file_match.fleet.targets
+  forward_to = [loki.process.fleet.receiver]
+}
+
+loki.process "fleet" {
+  // The event name is a small fixed set, so it is safe as a label.
+  stage.regex {
+    expression = "^(?P<ts>\\S+) (?P<kind>[A-Z][A-Z0-9_]+)"
+  }
+  stage.timestamp {
+    source = "ts"
+    format = "RFC3339"
+  }
+  stage.labels {
+    values = { kind = "" }
+  }
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://127.0.0.1:3100/loki/api/v1/push"
+  }
+}

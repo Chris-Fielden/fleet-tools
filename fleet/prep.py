@@ -939,7 +939,7 @@ def _flush_human(warn) -> None:
         for p in owed:
             stub = {"id": str(p.get("label") or "PREP"), "type": "build", "status": "review",
                     "title": "prep agent changed the main checkout"}
-            if not notify.notify_quietly(stub, "needs_human", warn, p["detail"]):
+            if not notify.notify_quietly(stub, "needs_human", warn, p["detail"], log_unconfigured=True):
                 keep.append(p)
         st["pings"] = [p for p in st["pings"] if p["kind"] != "human"] + keep
 
@@ -979,9 +979,10 @@ def flush_pings(settings: dict, now: datetime, warn) -> None:
                 continue
             if p["kind"] == "list":
                 stub = {"id": "list", "type": "build", "status": "review", "title": "ship list"}
-                sent = notify.notify_quietly(stub, "ship_list", warn, f"{len(ids)} ready to ship, list ready")
+                sent = notify.notify_quietly(stub, "ship_list", warn, f"{len(ids)} ready to ship, list ready",
+                                              log_unconfigured=True)
             else:
-                sent = notify.notify_quietly(in_review[ids[0]], "ship", warn)
+                sent = notify.notify_quietly(in_review[ids[0]], "ship", warn, log_unconfigured=True)
             if not sent:
                 keep.append(dict(p, ids=ids))
         with _state() as st:

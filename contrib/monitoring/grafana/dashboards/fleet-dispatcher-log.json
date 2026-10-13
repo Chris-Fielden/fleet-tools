@@ -1,0 +1,102 @@
+{
+  "uid": "fleet-dispatcher-log",
+  "title": "Fleet dispatcher log",
+  "tags": [
+    "fleet"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Events per 5 minutes",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "fleet-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "fleet-loki"
+          },
+          "expr": "sum by (kind) (count_over_time({job=\"fleet\"}[5m]))",
+          "legendFormat": "{{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Failures",
+      "type": "logs",
+      "datasource": {
+        "type": "loki",
+        "uid": "fleet-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "fleet-loki"
+          },
+          "expr": "{job=\"fleet\"} |~ \"FAILED|GAVE_UP|NEEDS_HUMAN|SUPERVISOR_REJECTED\""
+        }
+      ],
+      "options": {
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      }
+    },
+    {
+      "id": 3,
+      "title": "dispatch.log",
+      "type": "logs",
+      "datasource": {
+        "type": "loki",
+        "uid": "fleet-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 24,
+        "h": 14
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "fleet-loki"
+          },
+          "expr": "{job=\"fleet\"}"
+        }
+      ],
+      "options": {
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      }
+    }
+  ]
+}
