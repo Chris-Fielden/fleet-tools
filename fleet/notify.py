@@ -294,10 +294,19 @@ def send_alert(event: str, title: str, text: str) -> bool:
     NotConfigured or NotifyError."""
     if event not in EVENTS:
         raise NotifyError(f"unknown event: {event}")
-    cfg = load_config()
-    message = {"topic": cfg["topic"], "title": _short(title, 120), "message": text[:BODY_MAX],
-               "priority": PRIORITY_NUMBERS[cfg["priorities"][event]], "tags": _TAGS[event]}
-    return _post(cfg, message, cfg["priorities"][event])
+    try:
+        cfg = load_config()
+        message = {"topic": cfg["topic"], "title": _short(title, 120), "message": text[:BODY_MAX],
+                   "priority": PRIORITY_NUMBERS[cfg["priorities"][event]], "tags": _TAGS[event]}
+        sent = _post(cfg, message, cfg["priorities"][event])
+    except NotConfigured:
+        log_ping("PING_FAILED", "fleet", event, "notifications are off (no notify.json)")
+        raise
+    except NotifyError as exc:
+        log_ping("PING_FAILED", "fleet", event, str(exc))
+        raise
+    log_ping("PING_SENT", "fleet", event)
+    return sent
 
 
 def _post(cfg: dict, message: dict, priority: str) -> bool:
@@ -320,26 +329,44 @@ def _post(cfg: dict, message: dict, priority: str) -> bool:
     return True
 
 
+def log_ping(kind: str, ticket_id: str, event: str, reason: str = "") -> None:
+    """One dispatch.log line for a ping: PING_SENT or PING_FAILED, with the reason. Ids, event
+    names and reasons only. Best effort: a log that cannot be written never changes the ping."""
+    try:
+        from . import dispatch as dp
+        text = f"{event} {ticket_id}" + (f": {_short(reason, 160)}" if reason else "")
+        dp.log(kind, text)
+    except Exception:
+        pass
+
+
 def notify_quietly(ticket: dict, event: str | None, warn=None, detail: str | None = None) -> bool:
     """Send a notification for a real transition. Never raises: the ticket is
     already saved. `warn` receives a one-line message (default: stderr).
     Returns False only when a configured server could not be reached, so a
-    caller that remembers what it has sent can try again later."""
+    caller that remembers what it has sent can try again later. Every ping
+    leaves a PING_SENT or PING_FAILED line in dispatch.log, with the reason."""
     if event is None:
         return True
     if warn is None:
         def warn(message):
             print(f"ticket: {message}", file=sys.stderr)
+    tid = ticket.get("id", "ticket")
     try:
-        send(ticket, event, detail)
+        sent = send(ticket, event, detail)
     except NotConfigured:
-        pass
+        log_ping("PING_FAILED", tid, event, "notifications are off (no notify.json)")
+        return True   # nothing to retry
     except NotifyError as exc:
-        warn(f"warning: {ticket.get('id', 'ticket')} saved, but the phone notification "
-             f"was not sent ({exc})")
+        log_ping("PING_FAILED", tid, event, str(exc))
+        warn(f"warning: {tid} saved, but the phone notification was not sent ({exc})")
         return False
     except Exception as exc:  # best effort: nothing here may fail a command
-        warn(f"warning: {ticket.get('id', 'ticket')} saved, but the phone notification "
-             f"was not sent ({type(exc).__name__})")
+        log_ping("PING_FAILED", tid, event, type(exc).__name__)
+        warn(f"warning: {tid} saved, but the phone notification was not sent ({type(exc).__name__})")
         return False
+    if sent:
+        log_ping("PING_SENT", tid, event)
+    else:
+        log_ping("PING_FAILED", tid, event, "filtered out by notify.json settings")
     return True

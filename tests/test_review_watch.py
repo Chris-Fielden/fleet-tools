@@ -3,6 +3,7 @@
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -53,6 +54,15 @@ class Rig:
         self.settings = dp.load_settings()
         self.now = datetime.now(timezone.utc)
         self.lines, self.warnings = [], []
+
+    def pin_midday(self):
+        """Put this rig's clock, and the ticket stamps, at noon local time today. The on-call
+        cap counts per local day, so a test of it must not depend on how close the real
+        time of day is to local midnight. Opt-in: other tests mix this clock with real
+        file times."""
+        self.now = datetime.now(ZoneInfo(dp.DEFAULTS["timezone"])).replace(
+            hour=12, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+        self.monkeypatch.setattr(tk, "_now", lambda: self.now.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
     # git
     def commit(self, name):

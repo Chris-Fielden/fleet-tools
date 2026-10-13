@@ -438,8 +438,11 @@ earlier tickets. It writes `report-prep.json`: `order`, per-ticket `summary` and
 `reconciled`, and `duplicates` (`keep`, `cancel`, `note`).
 
 **What the dispatcher does when the agent stops** (so nothing depends on trusting the
-report): cancels each named duplicate with a note naming the keeper (its branch is left in
-place) and a note on the keeper; reads every branch's tip from git and, for each that moved,
+report): only proposes cancelling each named duplicate: a `[prep proposal]` note on both tickets and a
+`PROPOSED CANCEL` line on the ship list, nothing cancelled until a human confirms (the
+context comparison counts only files under `tests/` or named `test_*`); every ping, sent or not,
+leaves a `PING_SENT` or `PING_FAILED` line in dispatch.log, and the one ship-list ping speaks
+for every ticket it names; reads every branch's tip from git and, for each that moved,
 re-runs `scripts/check.sh` and `scripts/review.sh` (which applies the reviews the risk level
 needs) in its task folder, then saves a `Prep pass:` note after the new verdict (the review
 watch counts it as that tip's summary). A branch that fails any of that goes back to
@@ -550,3 +553,28 @@ the branch tip moves it no longer stands and every rule applies again.
   a risk level. It lives in supervisor.json, which agents cannot write, and is never read
   back from note text (a forged note marks nothing). Shipping with leftovers is step G and
   stays human-only.
+
+#### Step G: `ship ID --accept-leftovers --reason TEXT`
+
+The human merges one commit despite a Codex FAIL. It lowers the bar for that one merge, so:
+
+- **Who.** Human only: refused when the environment says an agent runs it, and it needs a
+  terminal where the human types the first 7 characters of the commit. The guard hooks
+  (Claude and Codex share `guard_bash.py`) deny every spelling of `ship`. Not available with
+  `--list`, `--quiesce`, `--status`, `--non-interactive` or the detached job.
+- **What it needs, all read-only, before anything runs.** A ticket in claimed or review; the
+  supervisor's mark in supervisor.json on exactly the branch tip; a risk level below high (the
+  gate's own: higher of ticket and diff, rules from base); the ticket's recorded verdict Claude
+  PASS and Codex FAIL on that tip; the saved review files agreeing; `--reason` (one line, 1 to
+  300 characters, secret-checked). No review is ever run on this path.
+- **One tolerance, one place.** `risk.check_reviews(reviews, level, accept_codex_fail_commit)`
+  tolerates a Codex FAIL only, below high, with a Claude PASS, both of that commit. `ship` sets
+  `FLEET_ACCEPT_LEFTOVERS_COMMIT=<sha>` for the one merge-script run only (an inherited value is
+  dropped); `ticket gate` re-checks the human, the commit, the mark and the verdict itself.
+- **After the merge.** The checked commit must be in main; then the ticket note `LEFTOVERS
+  ACCEPTED by <user> (human) on <time>: merged <sha> despite Codex FAIL (<review file>); human
+  reason: ...; supervisor reason: ...; remaining items: <ticket>` and an `ACCEPT_LEFTOVERS` line
+  in dispatch.log are written, and the mark is removed (one use). If the commit is not in main,
+  that is said and recorded and the mark is kept. A failed or cancelled merge records nothing.
+- **High risk** (CLAUDE.md, AGENTS.md, hooks, ship_cli, risk.py): both reviewers must PASS; a
+  change to this very flag can never use it.
