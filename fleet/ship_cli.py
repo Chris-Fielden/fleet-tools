@@ -480,7 +480,15 @@ def _ship_list() -> int:
     print("Ship list:")
     for _, line in entries:
         print(f"  {line}")
-    listed = {i for i, _ in entries}
+    try:
+        proposals = prep.read_proposals()
+    except OSError:
+        proposals = []
+    if proposals:
+        print("Proposed cancellations (duplicates; NOT done, and not shipped by this list):")
+        for _, line in proposals:
+            print(f"  {line}")
+    listed = {i for i, _ in entries} | {i for i, _ in proposals}
     reported = _report_unlisted(listed, set())   # before anything ships, so a stop below cannot hide it
     shipped = 0
     for n, (ticket_id, _) in enumerate(entries, 1):

@@ -686,7 +686,8 @@ def _apply_duplicates(report: dict, live: dict, settings: dict, emit, warn) -> d
         if keep in {c for cs in proposed.values() for c in cs}:
             continue
         for c in _id_list(group.get("cancel"), live):
-            if c == keep or any(c in cs for cs in proposed.values()) or live[c]["status"] != "review":
+            if (c == keep or c in proposed or any(c in cs for cs in proposed.values())
+                    or live[c]["status"] != "review"):
                 continue
             if context_score(live[keep], settings) < context_score(live[c], settings):
                 warn(f"{c} has more context than {keep}: not proposed as its duplicate")
@@ -723,7 +724,8 @@ def read_proposals() -> list[tuple[str, str]]:
 
 def _proposal_line(dup: dict, keep: str) -> str:
     title = _clip(dup["title"], 160).replace("|", "/")
-    return f"{PROPOSAL_LINE} {dup['id']} | duplicate of {keep} | {title} | not cancelled: confirm, or ship it"
+    return (f"{PROPOSAL_LINE} {dup['id']} | duplicate of {keep} | {title} | not cancelled; to confirm: "
+            f"ticket close {dup['id']} --cancelled --note \"duplicate of {keep}\"")
 
 
 def _write_list(lines: list[str], when: datetime, proposals: list[str] | None = None) -> None:

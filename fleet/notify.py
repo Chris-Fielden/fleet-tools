@@ -294,10 +294,19 @@ def send_alert(event: str, title: str, text: str) -> bool:
     NotConfigured or NotifyError."""
     if event not in EVENTS:
         raise NotifyError(f"unknown event: {event}")
-    cfg = load_config()
-    message = {"topic": cfg["topic"], "title": _short(title, 120), "message": text[:BODY_MAX],
-               "priority": PRIORITY_NUMBERS[cfg["priorities"][event]], "tags": _TAGS[event]}
-    return _post(cfg, message, cfg["priorities"][event])
+    try:
+        cfg = load_config()
+        message = {"topic": cfg["topic"], "title": _short(title, 120), "message": text[:BODY_MAX],
+                   "priority": PRIORITY_NUMBERS[cfg["priorities"][event]], "tags": _TAGS[event]}
+        sent = _post(cfg, message, cfg["priorities"][event])
+    except NotConfigured:
+        log_ping("PING_FAILED", "fleet", event, "notifications are off (no notify.json)")
+        raise
+    except NotifyError as exc:
+        log_ping("PING_FAILED", "fleet", event, str(exc))
+        raise
+    log_ping("PING_SENT", "fleet", event)
+    return sent
 
 
 def _post(cfg: dict, message: dict, priority: str) -> bool:

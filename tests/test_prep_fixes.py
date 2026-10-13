@@ -391,3 +391,34 @@ def test_a_ticket_with_an_owed_ping_has_no_ready_ping_of_its_own(q, herdr_log, e
     with prep._state() as st:
         st["pings"].append({"kind": "list", "ids": [a["id"]]})
     assert prep.holds_ping(a, tk.list_tickets(), settings, NOW) is True
+
+
+def test_ship_list_shows_proposed_cancellations_and_does_not_call_them_late(q, herdr_log, env, capsys):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    b, _ = in_review(q, "task/two", {"two.txt": "1"})
+    prep._write_list([f"{a['id']} | One | low | does one | -"], NOW, [prep._proposal_line(b, a["id"])])
+    assert [i for i, _ in prep.read_proposals()] == [b["id"]]
+    assert ship_main(["--list"]) == 0
+    cap = capsys.readouterr()
+    assert "Proposed cancellations" in cap.out and f"ticket close {b['id']} --cancelled" in cap.out
+    assert "NOT on the ship list" not in cap.err
+    assert tk.load_ticket(b["id"])["status"] == "review"      # shown, never shipped or cancelled
+
+
+def test_a_keeper_is_never_proposed_as_another_groups_duplicate(q, herdr_log, env):
+    big, _ = in_review(q, "task/big", {"a.txt": "1"}, body="the biggest spec " * 30)
+    mid, _ = in_review(q, "task/mid", {"b.txt": "1"}, body="a middle spec " * 10)
+    low, _ = in_review(q, "task/low", {"c.txt": "1"}, body="short")
+    settings, _, _ = start_prep()
+    report(settings, order=[big["id"]], duplicates=[{"keep": mid["id"], "cancel": [low["id"]]},
+                                                    {"keep": big["id"], "cancel": [mid["id"]]}])
+    set_agent_status(env, "prep", "idle")
+    finish_prep(settings)
+    assert [i for i, _ in prep.read_proposals()] == [low["id"]]   # mid stays a keeper
+    assert mid["id"] in [i for i, _ in prep.read_list()]
+
+
+def test_a_fleet_alert_is_logged_too(env, ntfy):
+    from fleet import notify
+    notify.send_alert("dispatcher_down", "Fleet dispatcher is down", "text")
+    assert "PING_SENT dispatcher_down fleet" in _log_text()
