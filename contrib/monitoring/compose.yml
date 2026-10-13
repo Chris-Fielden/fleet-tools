@@ -1,0 +1,77 @@
+# Fleet monitoring: Prometheus, Loki, Alloy, Grafana. Files only: nothing here
+# is started by the fleet. See README.md.
+#
+# Every service uses the host network and binds 127.0.0.1 itself, so the
+# fleet's loopback-only status endpoint (127.0.0.1:8788, /metrics) is
+# reachable and nothing is exposed on a LAN address. Grafana is the only one
+# meant to be reached from elsewhere, through `tailscale serve` (README.md).
+#
+# Ports: Prometheus 9090, Loki 3100, Alloy 12345, Grafana 3030.
+name: fleet-monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    network_mode: host
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.listen-address=127.0.0.1:9090
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  loki:
+    image: grafana/loki:3.5.5
+    network_mode: host
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+
+  alloy:
+    image: grafana/alloy:v1.10.2
+    network_mode: host
+    restart: unless-stopped
+    command:
+      - run
+      - --server.http.listen-addr=127.0.0.1:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
+      # The fleet home, read-only: Alloy tails dispatch.log in it.
+      - ${FLEET_HOME:-${HOME}/.fleet}:/fleet-home:ro
+
+  grafana:
+    image: grafana/grafana:12.2.0
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "3030"
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://127.0.0.1:3030}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Values come from the shell or the --env-file you pass; never from git.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}
+      # Read by the contact point in provisioning/alerting/alerting.yaml.
+      NTFY_URL: ${NTFY_URL:?set NTFY_URL to the ntfy root, e.g. http://100.x.y.z:2586}
+      NTFY_TOPIC: ${NTFY_TOPIC:-fleet-grafana}
+      NTFY_TOKEN: ${NTFY_TOKEN:?set NTFY_TOKEN}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/fleet-dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+volumes:
+  prometheus-data:
+  loki-data:
+  alloy-data:
+  grafana-data:

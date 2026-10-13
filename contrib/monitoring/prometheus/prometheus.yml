@@ -1,0 +1,11 @@
+# Retention (15 days) is a command-line flag, set in ../compose.yml.
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+scrape_configs:
+  # The fleet status endpoint, loopback only. /metrics is BD-90.
+  - job_name: fleet
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:8788"]
