@@ -17,6 +17,10 @@ rulebook for every agent here, you included. The short version:
    checks again.
 4. Only the human merges, with `ship` (or `scripts/finish-task.sh`). Never run
    either, and never push to main.
+   `ship ID --accept-leftovers --reason TEXT` is human-only, from a terminal.
+   It merges one exact commit despite a Codex FAIL, only when the supervisor
+   marked that commit ready with leftovers and a saved Claude PASS exists on
+   it. Never at high risk. Nothing else waives a reviewer. You can never use it.
 5. GitOps: change the cluster by committing YAML under `k8s/`. Never run
    `kubectl apply`, `helm upgrade` or similar. Read-only `kubectl` is fine.
 6. Secrets never go in files or git. Don't create `.env` files.

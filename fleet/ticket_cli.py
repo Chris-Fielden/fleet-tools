@@ -334,6 +334,37 @@ def _cmd_risk(args) -> int:
     return 0
 
 
+def _accepted_commit(args, tickets: list, tip: str, reviews: dict) -> tuple[str | None, str | None]:
+    """(commit to tolerate a Codex FAIL on, or None; why the request was refused, or None).
+    The human's merge with leftovers (EM-8 step G) names the commit in the environment; this
+    checks it again on its own, so the merge script's gate is a second, independent check:
+    a human is running, it is exactly the tip, the ticket being merged carries the
+    supervisor's mark for exactly that tip, and its recorded verdict is Claude PASS with
+    Codex FAIL on it. The risk level and the review files are judged by rk.check_reviews."""
+    named = os.environ.get(rk.ACCEPT_ENV)
+    if not named:
+        return None, None
+    from . import supervisor_run as sr   # late: only this path needs the supervisor's state
+    if tk.current_creator() != "human":
+        return None, "only a human can accept leftovers"
+    if not tk.COMMIT_RE.fullmatch(named) or len(named) != 40 or named != tip:
+        return None, f"the commit named ({named[:40]}) is not the branch tip {tip[:8]}"
+    mine = next((t for t in tickets if t["id"] == (args.ticket or "")), None)
+    if mine is None:
+        return None, "it needs --ticket: the ticket whose mark covers this commit"
+    try:
+        marked = sr.leftovers_for(sr.load_state(), mine["id"], tip)
+    except Exception as exc:   # an unreadable state is never a mark
+        return None, f"the supervisor's marks cannot be read ({type(exc).__name__})"
+    if marked is None:
+        return None, f"{mine['id']} has no ready-with-leftovers mark on {tip[:8]}"
+    v = mine.get("verdict") or {}
+    got = {k: r.get("result") for k, r in (v.get("reviews") or {}).items()}
+    if v.get("commit") != tip or got.get("claude") != "PASS" or got.get("codex") != "FAIL":
+        return None, f"{mine['id']}'s recorded verdict is not Claude PASS with Codex FAIL on {tip[:8]}"
+    return tip, None
+
+
 def _gate(args) -> dict:
     """Everything the merge script needs: level, reasons, review problems, and
     the word the human must type to confirm."""
@@ -345,7 +376,9 @@ def _gate(args) -> dict:
     level = rk.higher(stored, diff_level)
     full = rk._git(args.dir, "rev-parse", "--verify", f"{args.branch}^{{commit}}").strip()
     reviews = rk.latest_reviews(Path(args.worktree) / ".reviews", full)
-    problems = rk.check_reviews(reviews, level)
+    accept, refused = _accepted_commit(args, tickets, full, reviews)
+    problems = ([f"merging with leftovers is not allowed: {refused}"] if refused else []) \
+        + rk.check_reviews(reviews, level, accept)
     # The ticket whose id is typed to confirm: the one being shipped, else the highest-risk one
     # on the branch.
     best = max((t for t in tickets if t["id"] in ids),

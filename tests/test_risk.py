@@ -35,6 +35,7 @@ def rules():
     ".env", "app/.env.example", "requirements.txt", "requirements-dev.txt", "svc/requirements.txt",
     "pyproject.toml", "web/package.json", "go.mod", "compose.yml",
     "fleet/dispatch.py", "fleet/dispatch_cli.py", "risk-rules.json", "fleet/ticket.py", "fleet/ticket_cli.py", "bin/ticket",
+    "fleet/ship_cli.py", "bin/ship", "fleet/supervisor.py", "fleet/supervisor_run.py",
 ])
 def test_high_paths(rules, path):
     assert rk.classify(path, rules)[0] == "high"

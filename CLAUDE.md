@@ -59,6 +59,10 @@ weaken its own rules.
 
 - Merging is done by the human with `ship` (or `scripts/finish-task.sh
   <task-name>`). Do not run either, and do not push to `main` or `master`.
+- `ship ID --accept-leftovers --reason TEXT` is human-only, from a terminal.
+  It merges one exact commit despite a Codex FAIL, only when the supervisor
+  marked that commit ready with leftovers and a saved Claude PASS exists on
+  it. Never at high risk. Nothing else waives a reviewer. You can never use it.
 - When you are done, say so, and list: what changed, how you verified it,
   and what the reviewer said.
 - Record that as a final SUMMARY with `ticket note <ID> "SUMMARY"` (what
