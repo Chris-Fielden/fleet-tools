@@ -5,10 +5,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent / "contrib" / "monitoring"
 
-# fleet/metrics.py (BD-90) exposes exactly these, plus Prometheus's own `up`.
-EXPORTED = {"fleet_tickets", "fleet_launches_today", "fleet_launches_max_per_day",
-            "fleet_agents_running", "fleet_ready_to_ship", "fleet_dispatch_up",
-            "fleet_review_rounds", "up"}
+# The names fleet/metrics.py (BD-90) renders, read from the exporter itself so the
+# dashboards and alerts cannot drift from it; plus Prometheus's own `up`.
+from fleet import metrics as _metrics
+
+EXPORTED = set(re.findall(r"^# TYPE (\w+) ", _metrics.render(), re.M)) | {"up"}
 FUNCS = {"on", "delta", "sum", "by", "count_over_time", "job", "kind", "status", "ticket", "instant"}
 
 
