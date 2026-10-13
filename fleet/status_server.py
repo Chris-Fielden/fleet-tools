@@ -6,8 +6,10 @@ checks every request itself and answers 403 unless it came from a tailnet
 address, or from the local `tailscale serve` proxy on behalf of one. Requests
 that arrived through Tailscale Funnel (the public internet) are refused.
 
-Only GET /status.json (and /) exist: the snapshot from status.snapshot().
-It is cached for a few seconds, because building it reads the session logs.
+GET /status.json (and /) is the snapshot from status.snapshot(). It is cached
+for a few seconds, because building it reads the session logs.
+GET /metrics is the Prometheus text from metrics.render(), built fresh on each
+scrape (it only reads tickets and counters).
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import status
+from . import metrics, status
 
 DEFAULT_PORT = 8788
 CACHE_SECONDS = 10.0
@@ -74,7 +76,7 @@ class _Cache:
 
 
 def make_server(host: str = "127.0.0.1", port: int = DEFAULT_PORT, build=status.snapshot,
-                cache_seconds: float = CACHE_SECONDS) -> ThreadingHTTPServer:
+                cache_seconds: float = CACHE_SECONDS, render_metrics=metrics.render) -> ThreadingHTTPServer:
     ip = _ip(host)
     if ip is None or not (ip.is_loopback or is_tailnet(host)):
         raise ValueError(f"{host} is not a loopback or tailnet address; refusing to listen there")
@@ -95,7 +97,14 @@ def make_server(host: str = "127.0.0.1", port: int = DEFAULT_PORT, build=status.
         def do_GET(self):
             if not allowed(self.client_address[0], self.headers):
                 return self._send(403, b'{"error": "tailnet only"}')
-            if self.path.split("?")[0] not in ("/", "/status.json"):
+            path = self.path.split("?")[0]
+            if path == "/metrics":
+                try:
+                    body = render_metrics().encode()
+                except Exception:   # noqa: BLE001 - say nothing about the cause to the client
+                    return self._send(500, b"metrics unavailable\n", "text/plain; charset=utf-8")
+                return self._send(200, body, metrics.CONTENT_TYPE)
+            if path not in ("/", "/status.json"):
                 return self._send(404, b'{"error": "not found"}')
             try:
                 body = cache.get()
