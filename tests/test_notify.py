@@ -160,3 +160,63 @@ def test_urgent_beats_ready_and_proposed():
     base = {"id": "BD-1", "status": "open", "type": "review", "priority": "urgent"}
     assert notify.event_for_new(base) == "urgent"
     assert notify.event_for_new({**base, "priority": "normal"}) == "ready"
+
+
+def _ping_lines():
+    log = Path(os.environ["FLEET_HOME"]) / "dispatch.log"
+    return [ln for ln in log.read_text().splitlines() if " PING_" in ln] if log.exists() else []
+
+
+def _ticket():
+    return {"id": "BD-7", "type": "build", "status": "failed", "title": "Secret title words", "body": "SECRET BODY"}
+
+
+def test_ping_sent_is_logged_with_event_and_id_only(ntfy):
+    assert notify.notify_quietly(_ticket(), "failed", detail="secret detail") is True
+    lines = _ping_lines()
+    assert len(lines) == 1 and lines[0].endswith(" PING_SENT failed BD-7")
+    text = (Path(os.environ["FLEET_HOME"]) / "dispatch.log").read_text()
+    assert "Secret title" not in text and "tk_secret123" not in text and "secret detail" not in text
+
+
+def test_ping_failed_is_logged(ntfy):
+    ntfy.status = 500
+    assert notify.notify_quietly(_ticket(), "failed", warn=lambda m: None) is False
+    lines = _ping_lines()
+    assert len(lines) == 1 and " PING_FAILED failed BD-7" in lines[0]
+    assert "tk_secret123" not in lines[0]
+
+
+def test_ping_not_configured_logs_nothing():
+    assert notify.notify_quietly(_ticket(), "failed") is True
+    assert _ping_lines() == []
+
+
+def test_a_ping_filtered_by_config_logs_nothing(ntfy):
+    t = {"id": "BD-7", "type": "build", "status": "open", "title": "t"}
+    assert notify.notify_quietly(t, "proposed") is True    # follow_ups is off
+    assert ntfy.requests == [] and _ping_lines() == []
+
+
+def test_an_unexpected_error_from_send_logs_one_failed_line(ntfy, monkeypatch):
+    def boom(*a, **k):
+        raise KeyError("priorities")
+    monkeypatch.setattr(notify, "send", boom)
+    assert notify.notify_quietly(_ticket(), "failed", warn=lambda m: None) is False
+    lines = _ping_lines()
+    assert len(lines) == 1 and " PING_FAILED failed BD-7" in lines[0]
+
+
+def test_an_unexpected_error_in_send_alert_is_logged_and_raised(ntfy, monkeypatch):
+    monkeypatch.setattr(notify, "_post", lambda *a, **k: (_ for _ in ()).throw(KeyError("x")))
+    with pytest.raises(KeyError):
+        notify.send_alert("dispatcher_down", "t", "text")
+    assert len(_ping_lines()) == 1 and " PING_FAILED dispatcher_down fleet" in _ping_lines()[0]
+
+
+def test_ping_log_unwritable_does_not_fail_the_ping(ntfy):
+    home = Path(os.environ["FLEET_HOME"])
+    (home / "dispatch.log").mkdir()   # a directory: opening it for append fails
+    assert notify.notify_quietly(_ticket(), "failed") is True
+    ntfy.status = 500
+    assert notify.notify_quietly(_ticket(), "failed", warn=lambda m: None) is False
