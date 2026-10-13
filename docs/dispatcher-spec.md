@@ -553,3 +553,28 @@ the branch tip moves it no longer stands and every rule applies again.
   a risk level. It lives in supervisor.json, which agents cannot write, and is never read
   back from note text (a forged note marks nothing). Shipping with leftovers is step G and
   stays human-only.
+
+#### Step G: `ship ID --accept-leftovers --reason TEXT`
+
+The human merges one commit despite a Codex FAIL. It lowers the bar for that one merge, so:
+
+- **Who.** Human only: refused when the environment says an agent runs it, and it needs a
+  terminal where the human types the first 7 characters of the commit. The guard hooks
+  (Claude and Codex share `guard_bash.py`) deny every spelling of `ship`. Not available with
+  `--list`, `--quiesce`, `--status`, `--non-interactive` or the detached job.
+- **What it needs, all read-only, before anything runs.** A ticket in claimed or review; the
+  supervisor's mark in supervisor.json on exactly the branch tip; a risk level below high (the
+  gate's own: higher of ticket and diff, rules from base); the ticket's recorded verdict Claude
+  PASS and Codex FAIL on that tip; the saved review files agreeing; `--reason` (one line, 1 to
+  300 characters, secret-checked). No review is ever run on this path.
+- **One tolerance, one place.** `risk.check_reviews(reviews, level, accept_codex_fail_commit)`
+  tolerates a Codex FAIL only, below high, with a Claude PASS, both of that commit. `ship` sets
+  `FLEET_ACCEPT_LEFTOVERS_COMMIT=<sha>` for the one merge-script run only (an inherited value is
+  dropped); `ticket gate` re-checks the human, the commit, the mark and the verdict itself.
+- **After the merge.** The checked commit must be in main; then the ticket note `LEFTOVERS
+  ACCEPTED by <user> (human) on <time>: merged <sha> despite Codex FAIL (<review file>); human
+  reason: ...; supervisor reason: ...; remaining items: <ticket>` and an `ACCEPT_LEFTOVERS` line
+  in dispatch.log are written, and the mark is removed (one use). If the commit is not in main,
+  that is said and recorded and the mark is kept. A failed or cancelled merge records nothing.
+- **High risk** (CLAUDE.md, AGENTS.md, hooks, ship_cli, risk.py): both reviewers must PASS; a
+  change to this very flag can never use it.

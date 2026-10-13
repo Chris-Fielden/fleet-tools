@@ -10,8 +10,10 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import getpass
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -21,6 +23,8 @@ from pathlib import Path
 from . import dispatch as dp
 from . import launch as lc
 from . import prep
+from . import risk as rk
+from . import supervisor_run as sr
 from . import ticket as tk
 
 
@@ -57,14 +61,15 @@ def _reconcile() -> int:
 _ship_ticket = ""   # the ticket this run ships: the gate checks it is on the branch and asks for its id
 
 
-def _gate(repo: Path, wt: Path, branch: str, *fields: str) -> subprocess.CompletedProcess:
+def _gate(repo: Path, wt: Path, branch: str, *fields: str, env: dict | None = None) -> subprocess.CompletedProcess:
     """`ticket gate` the way the merge script calls it: the exact same gate."""
     ticket = Path(__file__).resolve().parent.parent / "bin" / "ticket"
     base = dp.main_branch(repo) or "main"
     return subprocess.run(
         [sys.executable, str(ticket), "gate", "--base", base, "--branch", branch, "--dir", str(repo),
          "--worktree", str(wt), "--repo", repo.name,
-         *(["--ticket", _ship_ticket] if _ship_ticket else []), *fields], capture_output=True, text=True)
+         *(["--ticket", _ship_ticket] if _ship_ticket else []), *fields], capture_output=True, text=True,
+        env=env)
 
 
 def _confirm(question: str) -> bool:
@@ -82,10 +87,10 @@ class _GateBroken(Exception):
     pass
 
 
-def _field(repo: Path, wt: Path, branch: str, name: str) -> str:
+def _field(repo: Path, wt: Path, branch: str, name: str, env: dict | None = None) -> str:
     """One gate field. The gate exits 1 when it has review problems, which is
     normal here; a crash (other exit code, or anything on stderr) is not."""
-    done = _gate(repo, wt, branch, "--field", name)
+    done = _gate(repo, wt, branch, "--field", name, **({"env": env} if env is not None else {}))
     if done.returncode not in (0, 1) or done.stderr.strip():
         detail = done.stderr.strip().splitlines()[-1:] or [f"exit {done.returncode}"]
         raise _GateBroken(f"ticket gate --field {name} failed ({detail[0]}); nothing was merged")
@@ -165,9 +170,9 @@ def _review_if_needed(repo: Path, name: str, branch: str, script: Path, t: dict 
     return None
 
 
-def _blocked_lines(repo: Path, wt: Path, branch: str) -> str:
+def _blocked_lines(repo: Path, wt: Path, branch: str, env: dict | None = None) -> str:
     """The gate's own BLOCKED lines, joined, for a one-line reason."""
-    done = _gate(repo, wt, branch)
+    done = _gate(repo, wt, branch, **({"env": env} if env is not None else {}))
     lines = [line.strip().removeprefix("BLOCKED: ") for line in done.stdout.splitlines()
              if line.strip().startswith("BLOCKED:")]
     return "; ".join(lines) or "the risk level or the reviews do not allow it"
@@ -209,6 +214,122 @@ def _ping_result(ticket_id: str, code: int) -> None:
         notify.notify_quietly(t, "ship_failed", detail=_last_message or f"exit {code}")
 
 
+# --- merging with leftovers (EM-8 step G) ---------------------------------------------------------
+
+REASON_MAX = 300
+
+
+def _reason_problem(reason: str | None) -> str | None:
+    if not reason or not reason.strip():
+        return "--accept-leftovers needs --reason TEXT: why this merge may go ahead despite the Codex FAIL"
+    if len(reason) > REASON_MAX or re.search(r"[\x00-\x1f\x7f]", reason):
+        return f"--reason must be one line of 1 to {REASON_MAX} characters"
+    leaks = tk.check_secrets("leftovers reason", reason)
+    return leaks[0] if leaks else None
+
+
+def _accept_facts(repo: Path, name: str, branch: str, t: dict):
+    """Every fact the merge with leftovers rests on, read-only and before anything runs: a dict
+    {tip, mark, level, codex_file, claude_file}, or a one-line reason it cannot go ahead."""
+    wt = repo / ".worktrees" / name
+    if not wt.is_dir():
+        return f"no worktree at {wt}"
+    tip = dp._git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}").stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", tip):
+        return f"cannot read the current commit of {branch}"
+    state = sr.load_state()
+    mark = sr.leftovers_for(state, t["id"], tip)
+    if mark is None:
+        old = state.get("leftovers", {}).get(t["id"])
+        return (f"{t['id']} is not marked ready with leftovers at {tip[:8]}"
+                + (f" (the mark is on {old['commit'][:8]}: the branch moved)" if old else " (no mark)"))
+    try:
+        level = _field(repo, wt, branch, "risk")
+    except _GateBroken as exc:
+        return str(exc)
+    if level == "high":
+        return f"{branch} is high risk: leftovers can never be accepted there"
+    if level not in rk.LEVELS:
+        return "could not work out the risk level"
+    v = t.get("verdict") or {}
+    got = {k: r.get("result") for k, r in (v.get("reviews") or {}).items()}
+    if v.get("commit") != tip or got.get("claude") != "PASS" or got.get("codex") != "FAIL":
+        return (f"the recorded verdict of {t['id']} is not Claude PASS with Codex FAIL on {tip[:8]} "
+                f"(it says {v.get('result')} on {str(v.get('commit'))[:8]}: {got})")
+    saved = rk.latest_reviews(wt / ".reviews", tip)
+    claude, codex = saved.get("claude"), saved.get("codex")
+    if not claude or claude["verdict"] != "PASS":
+        return f"no saved Claude PASS review of {tip[:8]} in {wt}/.reviews"
+    if not codex or codex["verdict"] != "FAIL":
+        return f"no saved Codex FAIL review of {tip[:8]} in {wt}/.reviews (nothing to accept)"
+    env = dict(os.environ)
+    env[rk.ACCEPT_ENV] = tip
+    try:
+        ok = _field(repo, wt, branch, "ok", env=env)
+    except _GateBroken as exc:
+        return str(exc)
+    if ok != "yes":
+        return f"the merge gate does not accept {tip[:8]} even with leftovers: {_blocked_lines(repo, wt, branch, env)}"
+    return {"tip": tip, "mark": mark, "level": level, "codex_file": Path(codex["file"]).name,
+            "claude_file": Path(claude["file"]).name}
+
+
+def _confirm_accept(t: dict, branch: str, facts: dict, reason: str) -> str | None:
+    """Show what is being accepted and have the human type the first 7 characters of the commit.
+    Needs the terminal: the typed commit is the barrier that does not depend on the environment."""
+    m = facts["mark"]
+    print(f"ACCEPT LEFTOVERS: {t['id']} {branch} at {facts['tip']}")
+    print(f"  Codex FAIL ({facts['codex_file']}) is accepted; Claude PASS ({facts['claude_file']}); "
+          f"risk {facts['level']}")
+    print(f"  supervisor's reason: {m['reason']}")
+    print(f"  remaining items:     {m['ticket'] or 'none filed'}")
+    print(f"  your reason:         {reason}")
+    try:
+        typed = input(f"Type the first 7 characters of the commit ({facts['tip'][:7]}) to merge it anyway: ")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        typed = ""
+    if typed.strip().lower() != facts["tip"][:7]:
+        return "cancelled; nothing changed"
+    return None
+
+
+def _in_main(repo: Path, commit: str, base: str) -> bool:
+    return dp._git(repo, "merge-base", "--is-ancestor", commit, base).returncode == 0
+
+
+def _record_acceptance(repo: Path, t: dict, facts: dict, reason: str) -> str | None:
+    """After the merge: check what merged is the commit that was checked, then leave the permanent
+    record (ticket note and dispatcher log) and consume the mark. Returns a loud problem, or None."""
+    tip, mark = facts["tip"], facts["mark"]
+    base = dp.main_branch(repo) or "main"
+    on_main = _in_main(repo, tip, base)
+    who = getpass.getuser()
+    at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if not on_main:
+        text = (f"LEFTOVERS ACCEPTED by {who} (human) on {at}: {t['id']} was merged, but the checked commit "
+                f"{tip} is NOT in {base}; check what actually merged. Human reason: {reason}")
+    else:
+        text = (f"LEFTOVERS ACCEPTED by {who} (human) on {at}: merged {tip} despite Codex FAIL "
+                f"({facts['codex_file']}); human reason: {reason}; supervisor reason: {mark['reason']}; "
+                f"remaining items: {mark['ticket'] or 'none filed'}.")
+    text = text[:tk.NOTE_MAX]
+    dp.log("ACCEPT_LEFTOVERS", f"{t['id']} {tip} by {who}: {text}")
+    try:
+        tk.add_note(t["id"], text)
+    except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+        print(f"ship: could not save the note ({exc}); save it by hand:\n{text}", file=sys.stderr)
+    if not on_main:
+        return f"{tip[:8]} is not in {base} after the merge; the mark is kept and a warning was recorded"
+    try:
+        state = sr.load_state()
+        state["leftovers"].pop(t["id"], None)   # one use
+        sr.save_state(state)
+    except OSError as exc:
+        return f"merged and recorded, but the mark could not be consumed ({exc}); remove it from supervisor.json"
+    return None
+
+
 def _conflict_agent(repo: Path, t: dict, settings: dict) -> str | None:
     """The merge script stops with the merge half done when the branch conflicts with main.
     If that is what happened, put main back as it was and start a short reconcile agent.
@@ -229,7 +350,8 @@ def _conflict_agent(repo: Path, t: dict, settings: dict) -> str | None:
             "You will get a ping when it is ready: ship it again then")
 
 
-def _ship_one(ticket_id: str, in_list: bool = False, expect: str | None = None, preset=None) -> int:
+def _ship_one(ticket_id: str, in_list: bool = False, expect: str | None = None, preset=None,
+              accept: dict | None = None) -> int:
     """Ship one ticket; prints what happened and returns the exit code. The ticket is reserved
     for the whole run, so no prep or reconcile agent can start on its branch meanwhile."""
     try:
@@ -248,7 +370,7 @@ def _ship_one(ticket_id: str, in_list: bool = False, expect: str | None = None, 
         with _repo_lock(t.get("repo")) as busy:
             if busy:
                 return _fail(f"another ship is already merging into {t.get('repo')}; wait for it to finish")
-            return _ship_reserved(t["id"], in_list, expect, preset)
+            return _ship_reserved(t["id"], in_list, expect, preset, accept)
     finally:
         prep.release_shipping(t["id"])
 
@@ -299,7 +421,8 @@ def _resolve(t: dict):
     return repo, branch, name, script, settings
 
 
-def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, preset=None) -> int:
+def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, preset=None,
+                   accept: dict | None = None) -> int:
     try:
         t = tk.load_ticket(ticket_id)
     except tk.TicketInvalid as exc:
@@ -334,6 +457,19 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, pre
         answer = _unattended_answer(repo, wt, branch, name, expect)
         if isinstance(answer, int):
             return answer
+    elif accept:
+        # Merging with leftovers: reviews must already exist (none is ever run on this path, it would
+        # change what is judged), and the human types the commit.
+        facts = _accept_facts(repo, name, branch, t)
+        if isinstance(facts, str):
+            return _fail(f"{facts}; nothing was merged, nothing was recorded")
+        problem = _confirm_accept(t, branch, facts, accept["reason"])
+        if problem:
+            return _fail(problem)
+        now = dp._git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}").stdout.strip()
+        if now != facts["tip"]:   # while the human was typing: what was checked is not what would merge
+            return _fail(f"{branch} moved to {now[:8]} while you confirmed {facts['tip'][:8]}; "
+                         "nothing was merged, nothing was recorded")
     else:
         problem = _review_if_needed(repo, name, branch, script, t)  # no preset: the unattended and list paths
         if problem:
@@ -348,12 +484,29 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, pre
     # human's behalf. FLEET_HOME and the rest of the environment carry over.
     # (A web ship has no terminal: finish-task's one prompt is answered with
     # what the confirmation page already made the person do.)
+    env = dict(os.environ)
+    env.pop(rk.ACCEPT_ENV, None)
+    if accept:
+        env[rk.ACCEPT_ENV] = facts["tip"]   # for this one run only; the gate re-checks all of it
+        main_name = dp.main_branch(repo) or "main"
+        in_main_before = _in_main(repo, facts["tip"], main_name)
     try:
-        done = subprocess.run(["bash", str(script), name, "--ticket", t["id"]], cwd=repo, env=dict(os.environ),
+        done = subprocess.run(["bash", str(script), name, "--ticket", t["id"]], cwd=repo, env=env,
                               input=answer + "\n" if answer else None, text=True)
     except OSError as exc:
         return _fail(f"could not run {script}: {exc}")
     if done.returncode != 0:
+        if accept:
+            # No merge was under way when this run started (checked above), so a MERGE_HEAD is ours.
+            if dp._git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
+                dp._git(repo, "merge", "--abort")
+            if not in_main_before and _in_main(repo, facts["tip"], main_name):
+                # merged, then the push or the clean-up failed: the acceptance is still owed its record
+                problem = _record_acceptance(repo, t, facts, accept["reason"])
+                return _fail(f"finish-task failed after merging {facts['tip'][:8]} (exit {done.returncode}); "
+                             "the acceptance was recorded" + (f", but: {problem}" if problem else ""))
+            return _fail(f"finish-task refused {branch} (exit {done.returncode}); nothing was recorded, "
+                         "the mark is kept")
         if t["status"] == "review":
             prep.release_shipping(t["id"])   # the reconcile agent must be able to reserve it
             conflict = _conflict_agent(repo, t, settings)
@@ -365,19 +518,25 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, pre
     # git, not the exit code, whether the merge happened.
     if not dp.is_merged(repo, branch, t.get("base_commit")):
         return _fail(f"{t['id']} was not merged (cancelled?); it is still {t['status']}")
+    code = 0
+    if accept:
+        problem = _record_acceptance(repo, t, facts, accept["reason"])
+        if problem:
+            _fail(problem)   # printed loudly; the run still ends non-zero below
+            code = 1
     later = "; run `dispatch --reconcile` to move the card to Done"
     try:
         _reconcile()
         status = tk.load_ticket(t["id"])["status"]
     except (OSError, tk.TicketError) as exc:
         _say(f"{t['id']} merged, but the card was not updated ({exc}){later}")
-        return 0
+        return code
     if status == "done":
         _say(f"{t['id']} merged and marked done")
     else:
         # e.g. a running `dispatch --watch` holds the lock; it reconciles on its next pass
         _say(f"{t['id']} merged, but is still {status}{later}")
-    return 0
+    return code
 
 
 def _keep_unmerged(wt: Path, ticket_id: str) -> str | None:
@@ -722,6 +881,11 @@ def main(argv=None) -> int:
     p.add_argument("--tip", help=argparse.SUPPRESS)
     p.add_argument("--answer", help=argparse.SUPPRESS)
     p.add_argument("--list", action="store_true", help="ship every ticket on the ship list, in order")
+    p.add_argument("--accept-leftovers", action="store_true",
+                   help="human only, from a terminal: merge ID despite the Codex FAIL, only when the "
+                        "supervisor marked that exact commit ready with leftovers and Claude passed it; "
+                        "never at high risk; needs --reason")
+    p.add_argument("--reason", help="with --accept-leftovers: why, in one line (recorded on the ticket)")
     p.add_argument("--non-interactive", metavar="COMMIT", dest="expect",
                    help="used by the web endpoint: ship without a terminal, only if the branch is "
                         "still at COMMIT and the gate passes with the reviews already on file; "
@@ -730,6 +894,22 @@ def main(argv=None) -> int:
     # Nothing ship runs (the merge script included) may stop at a pager: a detached ship sat at
     # `less (END)` overnight holding its reservation (EM-27).
     os.environ["GIT_PAGER"] = "cat"
+    os.environ.pop(rk.ACCEPT_ENV, None)   # only this command's own flag may turn the tolerance on
+    if args.accept_leftovers or args.reason is not None:
+        if not args.accept_leftovers:
+            p.error("--reason goes with --accept-leftovers")
+        if (not args.id or args.list or args.expect or args.job or args.status or args.quiesce
+                or args.tip or args.answer):
+            p.error("--accept-leftovers takes one ticket id and --reason, nothing else")
+        who = tk.current_creator()
+        if who != "human":
+            return _fail(f"refusing to run inside an agent (running as {who}); only a human accepts leftovers")
+        if not sys.stdin.isatty():
+            return _fail("--accept-leftovers needs a terminal: you type the commit to confirm it")
+        problem = _reason_problem(args.reason)
+        if problem:
+            return _fail(problem)
+        return _ship_one(args.id, accept={"reason": args.reason.strip()})
     if args.status:
         if args.id or args.list or args.job:
             p.error("--status takes its ticket id and nothing else")

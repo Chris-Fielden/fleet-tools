@@ -15,6 +15,9 @@ from pathlib import Path
 
 LEVELS = ("low", "medium", "high")
 RULES_NAME = "risk-rules.json"
+# Set (to a full commit id) only by the human's merge with leftovers, for the one merge-script run
+# it starts; `ticket gate` re-checks everything behind it. Never read from anywhere else.
+ACCEPT_ENV = "FLEET_ACCEPT_LEFTOVERS_COMMIT"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -288,12 +291,25 @@ def latest_reviews(reviews_dir: Path, full_sha: str) -> dict:
     return out
 
 
-def check_reviews(reviews: dict, level: str) -> list[str]:
-    """Problems that stop a merge (empty list = fine)."""
+def check_reviews(reviews: dict, level: str, accept_codex_fail_commit: str | None = None) -> list[str]:
+    """Problems that stop a merge (empty list = fine).
+
+    `accept_codex_fail_commit` is the ONE place a failed review is tolerated (EM-8 step G, the
+    human's merge with leftovers): a Codex FAIL, and nothing else, when the level is below high,
+    a Claude review is present and PASSES, and both reviews are of exactly that commit.
+    Anything else is judged as without it."""
     problems = []
     if not reviews:
         problems.append("no review of this exact commit; run scripts/review.sh")
+    tolerated = None
+    if accept_codex_fail_commit and level != "high":
+        claude, codex = reviews.get("claude"), reviews.get("codex")
+        if (claude and claude["verdict"] == "PASS" and claude.get("commit") == accept_codex_fail_commit
+                and codex and codex["verdict"] == "FAIL" and codex.get("commit") == accept_codex_fail_commit):
+            tolerated = "codex"
     for kind, info in reviews.items():
+        if kind == tolerated:
+            continue
         if info["verdict"] != "PASS":
             problems.append(f"the latest {kind} review of this commit is "
                             f"{info['verdict'] or 'unreadable'}, not PASS ({info['file']})")
