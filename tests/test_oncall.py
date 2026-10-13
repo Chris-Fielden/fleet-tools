@@ -287,6 +287,7 @@ def test_a_failed_on_call_ticket_launches_nothing_more_and_sends_one_needs_a_hum
 
 
 def test_a_fourth_on_call_need_in_one_day_launches_nothing(rig, ntfy, herdr_log):
+    rig.pin_midday()   # the cap is per local day: the whole run must stay inside one
     parent = mk(branch="task/old-parent")
     tk.set_status(parent["id"], "cancelled", allowed_from=("open",))
     for n in range(3):
@@ -300,6 +301,18 @@ def test_a_fourth_on_call_need_in_one_day_launches_nothing(rig, ntfy, herdr_log)
     assert len(oncall_tickets()) == 3 and agent_starts(herdr_log) == []
     assert "limit" in rig.get()["notes"][-1]["text"]
     assert [(t[0], t[2]) for t in no_dialog(ntfy)] == [(f"{rig.id} needs a human, see notes", "low")]
+
+
+def test_the_on_call_cap_resets_at_local_midnight(rig):
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(dp.DEFAULTS["timezone"])
+    late = datetime(2026, 10, 13, 23, 50, tzinfo=tz)
+    stamp = lambda d: d.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    tickets = [{"oncall": True, "created_at": stamp(late)} for _ in range(3)]
+    tickets += [{"oncall": True, "created_at": "garbled"}, {"id": "BD-1", "created_at": stamp(late)}]
+    assert dp.oncall_today(tickets, late + timedelta(minutes=5)) == 3
+    assert dp.oncall_today(tickets, late + timedelta(minutes=20)) == 0   # past midnight: a new day
 
 
 def test_the_on_call_cap_is_a_setting(rig, ntfy, herdr_log):

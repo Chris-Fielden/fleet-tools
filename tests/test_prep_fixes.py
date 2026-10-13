@@ -332,3 +332,93 @@ def test_the_recheck_runs_as_the_agent_that_built_it_so_the_other_model_reviews(
     finish_prep(settings)
     assert len(seen) == 2
     assert all("CLAUDECODE" not in e and e.get("CODEX_SANDBOX") == "1" and "REVIEWER" not in e for e in seen)
+
+
+# --- BD-85: every ping is logged, one ship-list ping, duplicates are only proposed ---------
+
+def _log_text():
+    return dp.log_path().read_text(encoding="utf-8") if dp.log_path().exists() else ""
+
+
+def test_the_ship_list_ping_is_logged_as_sent(q, herdr_log, env, ntfy):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    b, _ = in_review(q, "task/two", {"two.txt": "1"})
+    settings, _, _ = start_prep()
+    report(settings, order=[a["id"], b["id"]])
+    set_agent_status(env, "prep", "idle")
+    finish_prep(settings)
+    assert len(ntfy.requests) == 1
+    assert "PING_SENT ship_list list" in _log_text()
+
+
+def test_a_ping_that_cannot_be_sent_is_logged_with_its_reason(q, herdr_log, env):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    b, _ = in_review(q, "task/two", {"two.txt": "1"})
+    settings, _, _ = start_prep()
+    report(settings, order=[a["id"], b["id"]])
+    set_agent_status(env, "prep", "idle")
+    finish_prep(settings)            # no notify.json in this home
+    assert "PING_FAILED ship_list list: notifications are off" in _log_text()
+
+
+def test_an_owed_ping_that_is_dropped_is_logged(q, herdr_log, env, ntfy):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    with prep._state() as st:
+        st["pings"].append({"kind": "list", "ids": ["ZZ-1"]})   # not a ticket in review
+    prep.flush_pings(dp.load_settings(), NOW, lambda m: None)
+    assert ntfy.requests == []
+    assert "PING_FAILED ship_list ZZ-1: dropped" in _log_text()
+    assert prep._load()["pings"] == [] and a["status"] == "review"
+
+
+def test_a_ship_ping_owed_after_a_list_ping_is_not_sent_separately(q, herdr_log, env, ntfy):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    b, _ = in_review(q, "task/two", {"two.txt": "1"})
+    with prep._state() as st:
+        st["covered"] = [f"{t['id']}:{prep.tip_of(q, t['branch'])}" for t in (a, b)]   # no pass follows
+        prep._defer_ping(st, "list", [a["id"], b["id"]])
+        prep._defer_ping(st, "ship", [a["id"]])              # already spoken for: not even recorded
+        assert [p["kind"] for p in st["pings"]] == ["list"]
+        st["pings"].append({"kind": "ship", "ids": [a["id"]]})   # an older record
+    prep.flush_pings(dp.load_settings(), NOW, lambda m: None)
+    assert [r["body"]["title"] for r in ntfy.requests] == ["2 ready to ship, list ready"]
+    assert "not sent: the ship list ping speaks for it" in _log_text()
+
+
+def test_a_ticket_with_an_owed_ping_has_no_ready_ping_of_its_own(q, herdr_log, env):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    settings = dp.load_settings()
+    with prep._state() as st:
+        st["pings"].append({"kind": "list", "ids": [a["id"]]})
+    assert prep.holds_ping(a, tk.list_tickets(), settings, NOW) is True
+
+
+def test_ship_list_shows_proposed_cancellations_and_does_not_call_them_late(q, herdr_log, env, capsys):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    b, _ = in_review(q, "task/two", {"two.txt": "1"})
+    prep._write_list([f"{a['id']} | One | low | does one | -"], NOW, [prep._proposal_line(b, a["id"])])
+    assert [i for i, _ in prep.read_proposals()] == [b["id"]]
+    assert ship_main(["--list"]) == 0
+    cap = capsys.readouterr()
+    assert "Proposed cancellations" in cap.out and f"ticket close {b['id']} --cancelled" in cap.out
+    assert "NOT on the ship list" not in cap.err
+    assert tk.load_ticket(b["id"])["status"] == "review"      # shown, never shipped or cancelled
+
+
+def test_a_keeper_is_never_proposed_as_another_groups_duplicate(q, herdr_log, env):
+    big, _ = in_review(q, "task/big", {"a.txt": "1"}, body="the biggest spec " * 30)
+    mid, _ = in_review(q, "task/mid", {"b.txt": "1"}, body="a middle spec " * 10)
+    low, _ = in_review(q, "task/low", {"c.txt": "1"}, body="short")
+    settings, _, _ = start_prep()
+    report(settings, order=[big["id"]], duplicates=[{"keep": mid["id"], "cancel": [low["id"]]},
+                                                    {"keep": big["id"], "cancel": [mid["id"]]}])
+    set_agent_status(env, "prep", "idle")
+    finish_prep(settings)
+    assert [i for i, _ in prep.read_proposals()] == [low["id"]]   # mid stays a keeper
+    assert mid["id"] in [i for i, _ in prep.read_list()]
+
+
+def test_a_fleet_alert_is_logged_too(env, ntfy):
+    from fleet import notify
+    notify.send_alert("dispatcher_down", "Fleet dispatcher is down", "text")
+    assert "PING_SENT dispatcher_down fleet" in _log_text()

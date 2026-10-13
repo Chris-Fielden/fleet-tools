@@ -10,7 +10,8 @@ does the judgment work in git: it finds duplicates, reconciles conflicting
 branches and brings each branch up to date, then writes a small report. It
 never touches the ticket store. The dispatcher (a human's process) then:
 
-  * cancels the duplicates the agent named, with a note naming the keeper;
+  * proposes cancelling the duplicates the agent named (notes marked "[prep proposal]" and a
+    PROPOSED CANCEL line on the ship list; nothing is cancelled until a human confirms);
   * re-runs scripts/check.sh and the reviews on every branch whose tip moved
     (the tip is read from git, not from the report); a branch that fails goes
     back to `claimed` and stays off the list;
@@ -50,6 +51,9 @@ NOTE_PREFIX = "Prep pass:"      # a note by the dispatcher
 # Only this one counts for review_watch as the summary of a changed tip; bounce and duplicate notes
 # share NOTE_PREFIX but must never stand in for an agent's summary.
 PASS_NOTE_PREFIX = f"{NOTE_PREFIX} re-checked at"
+# Notes that only propose something (a duplicate cancellation). Deliberately NOT NOTE_PREFIX: a note
+# by the dispatcher is stored as a human's, and nothing may read a proposal as the pass's own word.
+PROPOSAL_PREFIX = "[prep proposal]"
 FOLDER_ID = "PREP"              # the agent folder under research_dir, and the tab label of the prep agent
 JOB_MAX = timedelta(hours=4)    # after this long a still-working agent is reported (its tickets stay locked)
 MAX_ATTEMPTS_PER_DAY = 3        # launch attempts of the prep agent per UTC day
@@ -72,7 +76,8 @@ and commit everything: leave every task folder clean.
 (a) Duplicates. Among tickets doing the same work, keep the one with the most context
 (fullest spec, most notes, most tests). Fold into its branch anything useful that only
 the others have (an extra test, a handled edge case), as a commit on the keeper's
-branch. The others get cancelled by the dispatcher: name them in the report.
+branch. The others are only proposed for cancellation (a human confirms from the ship list):
+name them in the report.
 (b) Conflicts. When two tickets change the same code, read both changes and what each
 ticket was meant to achieve, and produce the best combined version that keeps everything
 each ticket needed, not a mechanical merge. Choose a shipping order and bring each branch
@@ -376,6 +381,8 @@ def holds_ping(t: dict, tickets: list[dict], settings: dict, now: datetime) -> b
     tip = tip_of(_repo(t, settings), t["branch"])
     if t["id"] in _busy(state) or f"{t['id']}:{tip}" in state["covered"]:
         return True
+    if any(t["id"] in p["ids"] for p in state["pings"]):   # a ready ping that is owed already names it
+        return True
     return _pass_follows(tickets, settings, state, now)
 
 
@@ -647,20 +654,28 @@ def _id_list(value, allowed) -> list[str]:
     return [i for i in value if isinstance(i, str) and i in allowed] if isinstance(value, list) else []
 
 
+def _is_test_file(path: str) -> bool:
+    """A file under a tests/ folder, or named test_*: not any path that merely says "test"."""
+    parts = path.strip().split("/")
+    return "tests" in parts[:-1] or parts[-1].startswith("test_")
+
+
 def context_score(t: dict, settings: dict) -> tuple[int, int, int]:
     """How much context a ticket carries, in the order that counts: the fullest spec, the most
     notes, the most test files on its branch."""
     repo = _repo(t, settings)
     out = dp._git(repo, "diff", "--name-only", f"{dp.main_branch(repo) or 'main'}...{t['branch']}")
-    tests = sum(1 for f in out.stdout.split() if "test" in f.lower()) if out.returncode == 0 else 0
+    tests = sum(1 for f in out.stdout.splitlines() if _is_test_file(f)) if out.returncode == 0 else 0
     return (len(t["body"]), len(t.get("notes", [])), tests)
 
 
 def _apply_duplicates(report: dict, live: dict, settings: dict, emit, warn) -> dict[str, list[str]]:
-    """Cancel the duplicates the agent named. Returns {keeper: [cancelled ids]}. A group is
-    ignored unless the keeper and every cancelled ticket are still in review, and the keeper has
-    at least as much context as each ticket cancelled (the rule is to keep the fullest one)."""
-    folded: dict[str, list[str]] = {}
+    """Propose the cancellations of the duplicates the agent named; nothing is cancelled here, a
+    human confirms from the ship list. Returns {keeper: [proposed ids]}. A group is ignored unless
+    the keeper and every proposed ticket are still in review, and the keeper has at least as much
+    context as each proposed ticket (the rule is to keep the fullest one). The notes carry
+    PROPOSAL_PREFIX, never the human-looking NOTE_PREFIX."""
+    proposed: dict[str, list[str]] = {}
     groups = report.get("duplicates")
     for group in groups if isinstance(groups, list) else []:
         if (not isinstance(group, dict) or not isinstance(group.get("keep"), str)
@@ -668,36 +683,57 @@ def _apply_duplicates(report: dict, live: dict, settings: dict, emit, warn) -> d
             continue
         keep = group["keep"]
         note = _clip(group.get("note", ""), 200) if isinstance(group.get("note"), str) else ""
-        if keep in {c for cs in folded.values() for c in cs}:
+        if keep in {c for cs in proposed.values() for c in cs}:
             continue
         for c in _id_list(group.get("cancel"), live):
-            if c == keep or c in folded or live[c]["status"] != "review":
+            if (c == keep or c in proposed or any(c in cs for cs in proposed.values())
+                    or live[c]["status"] != "review"):
                 continue
             if context_score(live[keep], settings) < context_score(live[c], settings):
-                warn(f"{c} has more context than {keep}: not cancelled as its duplicate")
+                warn(f"{c} has more context than {keep}: not proposed as its duplicate")
                 continue
-            text = (f"Duplicate of {keep}: cancelled in the prep pass. {keep} has the most context and "
-                    f"carries anything useful from this one. Its branch {live[c]['branch']} is left in place. {note}")
-            try:
-                try:
-                    new = tk.close_ticket(c, "cancelled", _clip(text, tk.CLOSE_NOTE_MAX))
-                except tk.TicketInvalid:
-                    new = tk.close_ticket(c, "cancelled", f"Duplicate of {keep}: cancelled in the prep pass.")
-            except tk.TicketError as exc:
-                warn(f"{c}: could not cancel the duplicate: {exc}")
-                continue
-            live[c] = new
-            folded.setdefault(keep, []).append(c)
-            kaneo.mirror_quietly(new, warn)
+            proposed.setdefault(keep, []).append(c)
             with contextlib.suppress(tk.TicketError, tk.TicketInvalid):
-                tk.add_note(keep, _clip(f"{NOTE_PREFIX} {c} was a duplicate and is cancelled; "
-                                        f"anything useful from it was folded in. {note}", tk.NOTE_MAX))
-            emit(f"{c}  cancelled: duplicate of {keep}")
-            dp.log("PREP_CANCELLED", f"{c} duplicate of {keep}")
-    return folded
+                tk.add_note(c, _clip(f"{PROPOSAL_PREFIX} proposed as a duplicate of {keep} (it has the most context). "
+                                     f"Not cancelled: a human confirms from the ship list. {note}", tk.NOTE_MAX))
+            with contextlib.suppress(tk.TicketError, tk.TicketInvalid):
+                tk.add_note(keep, _clip(f"{PROPOSAL_PREFIX} {c} looks like a duplicate of this ticket; cancelling "
+                                        f"it is proposed on the ship list, not done. {note}", tk.NOTE_MAX))
+            emit(f"{c}  proposed for cancellation: duplicate of {keep}")
+            dp.log("PREP_CANCEL_PROPOSED", f"{c} duplicate of {keep}")
+    return proposed
 
 
-def _write_list(lines: list[str], when: datetime) -> None:
+PROPOSAL_LINE = "PROPOSED CANCEL"
+
+
+def read_proposals() -> list[tuple[str, str]]:
+    """The proposed cancellations on the ship list as (ticket id, whole line)."""
+    try:
+        text = list_path().read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    out = []
+    for line in text.splitlines():
+        if line.startswith(PROPOSAL_LINE + " "):
+            first = line[len(PROPOSAL_LINE) + 1:].split("|", 1)[0].strip()
+            if tk.ID_RE.fullmatch(first):
+                out.append((first, line))
+    return out
+
+
+def _proposal_line(dup: dict, keep: str) -> str:
+    title = _clip(dup["title"], 160).replace("|", "/")
+    return (f"{PROPOSAL_LINE} {dup['id']} | duplicate of {keep} | {title} | not cancelled; to confirm: "
+            f"ticket close {dup['id']} --cancelled --note \"duplicate of {keep}\"")
+
+
+def _write_list(lines: list[str], when: datetime, proposals: list[str] | None = None) -> None:
+    """Write the ship list. Proposed cancellations follow the shipping lines; None keeps the ones
+    already on the list."""
+    if proposals is None:
+        proposals = [line for _, line in read_proposals()]
+    lines = lines + proposals
     path = list_path()
     tk.refuse_real_store_in_tests(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -740,7 +776,7 @@ def _line(t: dict, settings: dict, info: dict, folded: list[str], tickets: dict)
     reconciled = _id_list(info.get("reconciled"), tickets)
     extra = []
     if folded:
-        extra.append("folded in: " + ", ".join(folded))
+        extra.append("proposed duplicates (cancel on confirmation): " + ", ".join(folded))
     if reconciled:
         extra.append("reconciled with: " + ", ".join(i for i in reconciled if i != t["id"]))
     return " | ".join([t["id"], clean(t["title"]), _branch_risk(t, settings), summary, "; ".join(extra) or "-"])
@@ -785,7 +821,7 @@ def _finish_prep(job: dict, settings: dict, now: datetime, emit, warn) -> None:
                 _bounce(live[keep], results[keep], settings, emit, warn)
                 live[keep] = dict(live[keep], status="claimed")
     folded = _apply_duplicates(report, live, settings, emit, warn)
-    gone = {c for cs in folded.values() for c in cs}
+    gone = {c for cs in folded.values() for c in cs}   # proposed, still in review: off the shipping order
     ok, failed = [], set()
     for i in job["ids"]:
         t = live.get(i)
@@ -807,13 +843,17 @@ def _finish_prep(job: dict, settings: dict, now: datetime, emit, warn) -> None:
                    folded.get(i, []), tickets) for i in order]
     # Tickets in review that were not part of this job (they arrived meanwhile) keep their old lines.
     older = [line for i, line in read_list() if i not in job["ids"] and i in tickets and tickets[i]["status"] == "review"]
-    _write_list(lines + older, now)
+    props = [_proposal_line(live[c], k) for k, cs in folded.items() for c in cs]
+    props += [line for i, line in read_proposals()   # earlier proposals still standing
+              if i not in job["ids"] and i in tickets and tickets[i]["status"] == "review"]
+    _write_list(lines + older, now, props)
     with _state() as st:
         st["jobs"] = [j for j in st["jobs"] if j["name"] != job["name"]]
-        st["covered"] = _covered(st, settings) + [f"{t['id']}:{tip_of(_repo(t, settings), t['branch'])}" for t in ok]
+        st["covered"] = _covered(st, settings) + [
+            f"{t['id']}:{tip_of(_repo(t, settings), t['branch'])}" for t in ok + [live[c] for c in gone]]
         if lines:   # said by flush_pings, after the review pass and maybe_start: no follow-up pass may lock these
             _defer_ping(st, "list", [t["id"] for t in ok])
-    dp.log("PREP_DONE", f"{len(lines)} ready, {len(failed)} failed, {len(gone)} cancelled")
+    dp.log("PREP_DONE", f"{len(lines)} ready, {len(failed)} failed, {len(gone)} cancellations proposed")
     emit(f"prep pass done: {len(lines)} ready to ship, list written")
 
 
@@ -856,6 +896,8 @@ def _defer_ping(st: dict, kind: str, ids: list[str]) -> None:
     """Record a ready ping that is owed (in the state being saved), so it survives a held back or
     failed send. One list ping speaks for the whole current list: it supersedes older list pings
     and the individual pings of the tickets it names."""
+    if kind != "list" and any(p["kind"] == "list" and set(ids) <= set(p["ids"]) for p in st["pings"]):
+        return   # an owed list ping already names these tickets: one ping speaks for them
     if kind == "list":
         older = [i for p in st["pings"] if p["kind"] == "list" for i in p["ids"]]
         # needs-human pings (no ticket ids) are never superseded by a ready ping
@@ -897,9 +939,12 @@ def _flush_human(warn) -> None:
         for p in owed:
             stub = {"id": str(p.get("label") or "PREP"), "type": "build", "status": "review",
                     "title": "prep agent changed the main checkout"}
-            if not notify.notify_quietly(stub, "needs_human", warn, p["detail"]):
+            if not notify.notify_quietly(stub, "needs_human", warn, p["detail"], log_unconfigured=True):
                 keep.append(p)
         st["pings"] = [p for p in st["pings"] if p["kind"] != "human"] + keep
+
+
+_PING_EVENT = {"list": "ship_list", "ship": "ship"}
 
 
 def flush_pings(settings: dict, now: datetime, warn) -> None:
@@ -919,18 +964,25 @@ def flush_pings(settings: dict, now: datetime, warn) -> None:
         busy = _busy(state)
         done = [p for p in state["pings"] if p["kind"] != "human"]
         keep = []
+        listed = {i for p in done if p["kind"] == "list" for i in p["ids"] if i in in_review and i not in busy}
         for p in done:
             ids = [i for i in p["ids"] if i in in_review]
             if not ids:
+                notify.log_ping("PING_FAILED", ",".join(p["ids"]) or "?", _PING_EVENT.get(p["kind"], p["kind"]),
+                                "dropped: no ticket it names is in review any more")
+                continue
+            if p["kind"] != "list" and set(ids) <= listed:   # the ship list ping sent now speaks for it
+                notify.log_ping("PING_FAILED", ids[0], "ship", "not sent: the ship list ping speaks for it")
                 continue
             if any(i in busy for i in ids):   # an agent or a ship holds one: say it once it is free
                 keep.append(dict(p, ids=ids))
                 continue
             if p["kind"] == "list":
                 stub = {"id": "list", "type": "build", "status": "review", "title": "ship list"}
-                sent = notify.notify_quietly(stub, "ship_list", warn, f"{len(ids)} ready to ship, list ready")
+                sent = notify.notify_quietly(stub, "ship_list", warn, f"{len(ids)} ready to ship, list ready",
+                                              log_unconfigured=True)
             else:
-                sent = notify.notify_quietly(in_review[ids[0]], "ship", warn)
+                sent = notify.notify_quietly(in_review[ids[0]], "ship", warn, log_unconfigured=True)
             if not sent:
                 keep.append(dict(p, ids=ids))
         with _state() as st:
