@@ -264,7 +264,7 @@ def test_review_watch_leaves_locked_tickets_alone(q, herdr_log, env):
 
 # --- 2a. duplicates -----------------------------------------------------------------------
 
-def test_of_two_duplicates_the_one_with_more_context_is_kept_and_gains_the_extra_test(q, herdr_log, env, ntfy):
+def test_of_two_duplicates_the_one_with_more_context_is_kept_and_the_other_is_proposed_for_cancel(q, herdr_log, env, ntfy):
     full, full_wt = in_review(q, "task/full", {"feature.py": "def f(): return 1\n", "tests/test_feature.py": "def test_a(): pass\n"},
                               title="Add feature", body="The full spec. " * 20)
     tk.add_note(full["id"], "design note")
@@ -279,19 +279,23 @@ def test_of_two_duplicates_the_one_with_more_context_is_kept_and_gains_the_extra
     set_agent_status(env, "prep", "idle")
     out, warns = finish_prep(settings)
 
-    assert tk.load_ticket(thin["id"])["status"] == "cancelled"
-    note = tk.load_ticket(thin["id"])["close_note"]
-    assert full["id"] in note and "Duplicate" in note
+    # nothing is cancelled: the cancellation is proposed, on the ship list and in notes with their own marker
+    dup = tk.load_ticket(thin["id"])
+    assert dup["status"] == "review"
+    assert any(n["text"].startswith(prep.PROPOSAL_PREFIX) and full["id"] in n["text"] for n in dup["notes"])
+    assert not any(n["text"].startswith(prep.NOTE_PREFIX) for n in dup["notes"])
     kept = tk.load_ticket(full["id"])
     assert kept["status"] == "review" and prep.tip_of(q, "task/full") != before
     assert (full_wt / "tests" / "test_edge.py").is_file()
-    assert any(n["text"].startswith(prep.NOTE_PREFIX) and thin["id"] in n["text"] for n in kept["notes"])
+    assert any(n["text"].startswith(prep.PROPOSAL_PREFIX) and thin["id"] in n["text"] for n in kept["notes"])
+    assert not any(n["text"].startswith(prep.NOTE_PREFIX) and thin["id"] in n["text"] for n in kept["notes"])
+    assert [i for i, _ in prep.read_proposals()] == [thin["id"]]
     # the changed branch (only) was checked and reviewed again, in its own folder
     assert log_lines(env, "check") == [str(full_wt)] == log_lines(env, "review")
     assert kept["verdict"]["result"] == "PASS" and kept["verdict"]["commit"] == prep.tip_of(q, "task/full")
     # the list: one line, the keeper, with the folded duplicate
     ((tid, line),) = prep.read_list()
-    assert tid == full["id"] and f"folded in: {thin['id']}" in line and "adds the feature" in line
+    assert tid == full["id"] and f"proposed duplicates (cancel on confirmation): {thin['id']}" in line and "adds the feature" in line
     assert [x.strip() for x in line.split("|")][:3] == [full["id"], "Add feature", "medium"]
     assert sent(ntfy) == [("1 ready to ship, list ready", "run `ship --list`", "default")]
     assert prep.locked_ids() == set() and not warns
@@ -307,6 +311,16 @@ def test_a_duplicate_is_not_cancelled_when_the_keeper_has_less_context(q, herdr_
     assert tk.load_ticket(full["id"])["status"] == "review" and tk.load_ticket(thin["id"])["status"] == "review"
     assert any("more context" in w for w in warns)
     assert [i for i, _ in prep.read_list()] == [thin["id"], full["id"]]
+    assert prep.read_proposals() == []
+
+
+def test_only_tests_folders_and_test_files_count_as_tests_for_context(q, herdr_log, env):
+    # "latest.py" and "contest/" contain "test" but are not tests; tests/ and test_*.py are
+    plain, _ = in_review(q, "task/plain", {"latest.py": "1", "contest/a.py": "1", "attest.txt": "1"}, body="same")
+    real, _ = in_review(q, "task/real", {"tests/test_a.py": "1", "pkg/test_b.py": "1"}, body="same")
+    settings = dp.load_settings()
+    assert prep.context_score(plain, settings)[2] == 0
+    assert prep.context_score(real, settings)[2] == 2
 
 
 # --- 2b. conflicts --------------------------------------------------------------------------
