@@ -322,3 +322,35 @@ def test_the_gate_agrees_only_with_the_mark_the_commit_and_a_human(acc, monkeypa
     state["leftovers"].clear()
     sr.save_state(state)
     assert gate(acc, **{rk.ACCEPT_ENV: acc.tip()}).stdout.strip() == "no"  # no mark: the variable alone is nothing
+
+
+def test_a_merge_then_a_failed_push_still_records_and_consumes(acc, monkeypatch, capsys):
+    acc.ready()
+    tip = acc.tip()
+    monkeypatch.setenv("FAKE_EXIT", "1")   # the fake merges, then exits 1, as a failed push would
+    assert acc.run() == 1
+    err = capsys.readouterr().err
+    assert "the acceptance was recorded" in err
+    notes = [n["text"] for n in tk.load_ticket(acc.id)["notes"] if n["text"].startswith("LEFTOVERS ACCEPTED")]
+    assert len(notes) == 1 and f"merged {tip} despite" in notes[0]
+    assert acc.id not in sr.load_state()["leftovers"]
+
+
+def test_a_refusal_without_a_merge_records_nothing(acc, monkeypatch):
+    acc.ready()
+    monkeypatch.setenv("FAKE_EXIT", "1")
+    monkeypatch.delenv("FAKE_MERGE")
+    assert acc.run() == 1
+    assert not [n for n in tk.load_ticket(acc.id).get("notes", []) if "LEFTOVERS ACCEPTED" in n["text"]]
+    assert acc.id in sr.load_state()["leftovers"]
+
+
+def test_a_record_that_needs_the_human_ends_non_zero(acc, monkeypatch, capsys):
+    acc.ready()
+
+    def broken(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(sr, "save_state", broken)
+    assert acc.run() == 1
+    assert "could not be consumed" in capsys.readouterr().err
+    assert any(n["text"].startswith("LEFTOVERS ACCEPTED") for n in tk.load_ticket(acc.id)["notes"])

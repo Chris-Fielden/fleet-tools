@@ -25,6 +25,10 @@
     {"level": "high", "glob": "fleet/ticket.py"},
     {"level": "high", "glob": "bin/ticket"},
     {"level": "high", "glob": "fleet/ticket_cli.py"},
+    {"level": "high", "glob": "fleet/ship_cli.py"},
+    {"level": "high", "glob": "bin/ship"},
+    {"level": "high", "glob": "fleet/supervisor.py"},
+    {"level": "high", "glob": "fleet/supervisor_run.py"},
     {"level": "low", "glob": "docs/**"},
     {"level": "low", "glob": "tests/**"}
   ],

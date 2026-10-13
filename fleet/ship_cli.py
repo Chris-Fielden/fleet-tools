@@ -294,12 +294,16 @@ def _confirm_accept(t: dict, branch: str, facts: dict, reason: str) -> str | Non
     return None
 
 
+def _in_main(repo: Path, commit: str, base: str) -> bool:
+    return dp._git(repo, "merge-base", "--is-ancestor", commit, base).returncode == 0
+
+
 def _record_acceptance(repo: Path, t: dict, facts: dict, reason: str) -> str | None:
     """After the merge: check what merged is the commit that was checked, then leave the permanent
     record (ticket note and dispatcher log) and consume the mark. Returns a loud problem, or None."""
     tip, mark = facts["tip"], facts["mark"]
     base = dp.main_branch(repo) or "main"
-    on_main = dp._git(repo, "merge-base", "--is-ancestor", tip, base).returncode == 0
+    on_main = _in_main(repo, tip, base)
     who = getpass.getuser()
     at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if not on_main:
@@ -484,6 +488,8 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, pre
     env.pop(rk.ACCEPT_ENV, None)
     if accept:
         env[rk.ACCEPT_ENV] = facts["tip"]   # for this one run only; the gate re-checks all of it
+        main_name = dp.main_branch(repo) or "main"
+        in_main_before = _in_main(repo, facts["tip"], main_name)
     try:
         done = subprocess.run(["bash", str(script), name, "--ticket", t["id"]], cwd=repo, env=env,
                               input=answer + "\n" if answer else None, text=True)
@@ -491,8 +497,14 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, pre
         return _fail(f"could not run {script}: {exc}")
     if done.returncode != 0:
         if accept:
+            # No merge was under way when this run started (checked above), so a MERGE_HEAD is ours.
             if dp._git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
                 dp._git(repo, "merge", "--abort")
+            if not in_main_before and _in_main(repo, facts["tip"], main_name):
+                # merged, then the push or the clean-up failed: the acceptance is still owed its record
+                problem = _record_acceptance(repo, t, facts, accept["reason"])
+                return _fail(f"finish-task failed after merging {facts['tip'][:8]} (exit {done.returncode}); "
+                             "the acceptance was recorded" + (f", but: {problem}" if problem else ""))
             return _fail(f"finish-task refused {branch} (exit {done.returncode}); nothing was recorded, "
                          "the mark is kept")
         if t["status"] == "review":
@@ -506,23 +518,25 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, pre
     # git, not the exit code, whether the merge happened.
     if not dp.is_merged(repo, branch, t.get("base_commit")):
         return _fail(f"{t['id']} was not merged (cancelled?); it is still {t['status']}")
+    code = 0
     if accept:
         problem = _record_acceptance(repo, t, facts, accept["reason"])
         if problem:
-            _fail(problem)
+            _fail(problem)   # printed loudly; the run still ends non-zero below
+            code = 1
     later = "; run `dispatch --reconcile` to move the card to Done"
     try:
         _reconcile()
         status = tk.load_ticket(t["id"])["status"]
     except (OSError, tk.TicketError) as exc:
         _say(f"{t['id']} merged, but the card was not updated ({exc}){later}")
-        return 0
+        return code
     if status == "done":
         _say(f"{t['id']} merged and marked done")
     else:
         # e.g. a running `dispatch --watch` holds the lock; it reconciles on its next pass
         _say(f"{t['id']} merged, but is still {status}{later}")
-    return 0
+    return code
 
 
 def _keep_unmerged(wt: Path, ticket_id: str) -> str | None:
