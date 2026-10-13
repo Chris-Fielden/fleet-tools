@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent / "contrib" / "monitoring"
 EXPORTED = {"fleet_tickets", "fleet_launches_today", "fleet_launches_max_per_day",
             "fleet_agents_running", "fleet_ready_to_ship", "fleet_dispatch_up",
             "fleet_review_rounds", "up"}
-FUNCS = {"delta", "sum", "by", "count_over_time", "job", "kind", "status", "ticket", "instant"}
+FUNCS = {"on", "delta", "sum", "by", "count_over_time", "job", "kind", "status", "ticket", "instant"}
 
 
 def text(rel):

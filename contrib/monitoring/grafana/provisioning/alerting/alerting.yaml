@@ -17,6 +17,8 @@ contactPoints:
           authorization_scheme: Bearer
           authorization_credentials: $NTFY_TOKEN
           # Custom payload: ntfy JSON, not Grafana's default webhook body.
+          # Values are inserted unescaped: keep rule titles and summaries free
+          # of double quotes and backslashes, or the JSON breaks.
           payload:
             template: >-
               {"topic": "$NTFY_TOPIC",
@@ -91,7 +93,7 @@ groups:
             datasourceUid: fleet-prometheus
             model:
               refId: A
-              expr: 'fleet_launches_today - fleet_launches_max_per_day'
+              expr: 'fleet_launches_today - on() fleet_launches_max_per_day'
               instant: true
               intervalMs: 1000
               maxDataPoints: 43200
@@ -120,7 +122,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "More tickets failed in the last hour."
+          summary: "More tickets failed in the last hour (stays active for up to an hour after a failure)."
         data:
           - refId: A
             relativeTimeRange: {from: 600, to: 0}

@@ -61,7 +61,7 @@
             "type": "loki",
             "uid": "fleet-loki"
           },
-          "expr": "{job=\"fleet\"} |~ \"FAILED|GAVE_UP|NEEDS_HUMAN|STARTUP_BLOCKED\""
+          "expr": "{job=\"fleet\"} |~ \"FAILED|GAVE_UP|NEEDS_HUMAN|SUPERVISOR_REJECTED\""
         }
       ],
       "options": {

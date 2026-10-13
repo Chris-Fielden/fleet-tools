@@ -65,8 +65,10 @@ cd contrib/monitoring
 docker compose --env-file ~/.config/fleet-monitoring/env up -d
 ```
 
-The fleet status endpoint must be running for Prometheus to have anything to scrape
-(`docs/mac-widgets.md`). Do not run these from an agent session.
+**Prerequisite: BD-90 must be merged first.** The `/metrics` route on the status
+endpoint comes from BD-90 (`fleet/metrics.py`); without it every panel is empty and
+"Fleet exporter not scraped" fires as soon as the stack starts. The status endpoint
+must also be running (`docs/mac-widgets.md`). Do not run these from an agent session.
 
 ## Reach Grafana from your tailnet
 
