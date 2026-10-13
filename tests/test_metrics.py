@@ -89,6 +89,9 @@ def test_metrics_endpoint_is_fresh_and_tailnet_only(fake_tickets):
         code, kind, body = _get(srv, "/metrics")
         assert code == 200 and kind.startswith("text/plain; version=0.0.4")
         assert b'fleet_tickets{status="open"} 1' in body
+        tk.list_tickets()[2]["status"] = "done"       # the store changed between two scrapes
+        _, _, again = _get(srv, "/metrics")
+        assert b'fleet_tickets{status="open"} 0' in again and b'fleet_tickets{status="done"} 2' in again
         assert _get(srv, "/metrics", {"X-Forwarded-For": "198.51.100.7"})[0] == 403
         assert _get(srv, "/metrics", {"Tailscale-Funnel-Request": "?1"})[0] == 403
     finally:
