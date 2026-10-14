@@ -56,7 +56,7 @@ launching, no hooks in this phase.
 | created_at | string | UTC time, ISO 8601, set by the tool. |
 | updated_at | string | UTC time, ISO 8601, set by the tool. |
 
-Unknown fields are rejected when reading a ticket file. The counters file is not a ticket and is ignored by `list`.
+Unknown fields in a stored ticket are kept, ignored, and warned about once per process when reading; they are still rejected when a ticket is created. The counters file is not a ticket and is ignored by `list`.
 
 ### Ticket ids
 
@@ -120,11 +120,13 @@ claimed and in-review tickets of the same repo:
   `auto_investigate` is off, the dispatcher may start a read-only research
   agent on a `proposed` investigate ticket without approval (see the
   dispatcher spec).
-- A build or fix ticket filed from inside an agent (`CLAUDECODE` or
-  `CODEX_SANDBOX` set) starts as `proposed`, so no agent can put work straight
-  into the dispatcher queue. A human approves it.
-- Every other ticket (build, review, fix, question) filed by a human starts as
-  `open`. Agents start work freely; the human approves at merge.
+- A build or fix ticket filed from inside an agent (`CLAUDECODE`,
+  `CODEX_SANDBOX` or `CODEX_SANDBOX_NETWORK_DISABLED` set) starts as
+  `proposed`, so no agent can put work straight into the dispatcher queue. A
+  human approves it.
+- Every other ticket starts as `open`: review and question tickets whoever
+  files them, and build and fix tickets filed by a human. Agents start work
+  freely; the human approves at merge.
 - Exception: a build ticket with a `parent` (a follow-up filed from an
   investigation) starts as `proposed`. Its parent must be an `investigate`
   ticket; no other build ticket may have a parent.

@@ -549,8 +549,8 @@ def create_ticket(fields: dict, *, needs_approval: bool = False, oncall: bool = 
         raise TicketInvalid(errors)
 
     t = fields["type"]
-    # Investigate tickets always wait for approval; everything else starts
-    # open (the human approves at merge). A build ticket that follows up an
+    # Investigate tickets always wait for approval; other tickets start
+    # open (the human approves at merge), except as noted below. A build ticket that follows up an
     # investigation (it has a parent) also waits for approval.
     # needs_approval: the caller wants a human to approve it first.
     # A build or fix filed from inside an agent also waits, so no agent can put
@@ -605,7 +605,7 @@ def create_ticket(fields: dict, *, needs_approval: bool = False, oncall: bool = 
 
 
 def approve_ticket(ticket_id: str) -> dict:
-    """Turn a proposed ticket (build or investigate) into an open one. Humans only."""
+    """Turn a proposed ticket (build, fix or investigate) into an open one. Humans only."""
     ticket_id = normalize_id(ticket_id)
     creator = current_creator()
     if creator != "human":
