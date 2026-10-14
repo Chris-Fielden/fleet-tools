@@ -455,3 +455,32 @@ def test_the_prep_agent_locks_only_the_new_tickets(q, herdr_log, env):
 
 
 JUST_BEFORE_SIX = datetime(2026, 10, 3, 12, 59, tzinfo=timezone.utc)
+
+
+def test_failed_launches_count_up_to_the_cap_and_reset_at_pacific_midnight(q, herdr_log, env, monkeypatch):
+    in_review(q, "task/one", {"one.txt": "1"})
+    in_review(q, "task/two", {"two.txt": "2"})
+
+    def boom(*a, **k):
+        raise lc.LaunchError("no herdr")
+    monkeypatch.setattr(prep, "_start_job", boom)
+    for _ in range(prep.MAX_ATTEMPTS_PER_DAY):
+        start_prep()
+    assert prep._load()["attempts"] == {"day": "2026-10-03", "n": prep.MAX_ATTEMPTS_PER_DAY}
+    _, out, _ = start_prep()
+    assert "launch attempts failed today" in out[0]
+    late = datetime(2026, 10, 4, 7, 30, tzinfo=timezone.utc)   # 00:30 Pacific on the 4th
+    start_prep(now=late)
+    assert prep._load()["attempts"] == {"day": "2026-10-04", "n": 1}
+
+
+def test_the_manifest_lists_waiting_tickets_as_context_but_locks_only_new_ones(q, herdr_log, env):
+    a, _ = in_review(q, "task/one", {"one.txt": "1"})
+    b, _ = in_review(q, "task/two", {"two.txt": "2"})
+    with prep._state() as st:
+        st["covered"] = [f"{a['id']}:{prep.tip_of(q, 'task/one')}"]
+    settings, _, _ = start_prep()
+    manifest = json.loads((lc.research_folder(prep.FOLDER_ID, settings) / "manifest-prep.json").read_text())
+    assert [t["id"] for t in manifest["tickets"]] == [b["id"]]
+    assert [t["id"] for t in manifest["context"]] == [a["id"]]
+    assert prep.locked_ids() == {b["id"]}
