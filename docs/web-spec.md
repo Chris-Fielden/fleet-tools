@@ -21,6 +21,13 @@ in the fleet home.
   its own checks again. Its one prompt is answered with what the page made you do
   (`y`, or the typed ticket ID at high risk). `--emergency` is not reachable.
 
+## Audit log
+
+Every refused request, approve and ship start appends one JSON line to
+`$FLEET_HOME/web/audit.log` (mode 0600): `time`, `peer` address, `who` (tailnet node
+name and login, if whois gave them), `action`, `ticket`, `commit` and `result`. It
+never holds a token or form body. If the write fails the request is answered anyway.
+
 ## The device check (the real gate)
 
 Every request, before anything else is read, runs `tailscale whois --json <peer
