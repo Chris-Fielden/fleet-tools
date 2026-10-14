@@ -158,6 +158,11 @@ version later, change `V=` to the version shown on the gitleaks releases page.
 In a task worktree, check.sh scans only that task's commits plus any files
 not committed yet. On main, it scans the whole history.
 
+The same checks also run on GitHub: `.github/workflows/check.yml` runs
+`scripts/check.sh` on every push to `main` and every pull request, installing
+gitleaks with the same checksum step. To make it a gate, add it as a required
+status check in the GitHub branch rule (a human setting, not done by the kit).
+
 ### Step 3. Install Claude Code
 
 ```bash
