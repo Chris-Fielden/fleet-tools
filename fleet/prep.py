@@ -56,7 +56,7 @@ PASS_NOTE_PREFIX = f"{NOTE_PREFIX} re-checked at"
 PROPOSAL_PREFIX = "[prep proposal]"
 FOLDER_ID = "PREP"              # the agent folder under research_dir, and the tab label of the prep agent
 JOB_MAX = timedelta(hours=4)    # after this long a still-working agent is reported (its tickets stay locked)
-MAX_ATTEMPTS_PER_DAY = 3        # launch attempts of the prep agent per UTC day
+MAX_ATTEMPTS_PER_DAY = 3        # failed launches of the prep agent per Pacific day
 MAX_TRIES = 3                   # finishing a job may fail this often before it is given up
 CHECK_TIMEOUT = 30 * 60
 REVIEW_TIMEOUT = 90 * 60
@@ -122,7 +122,7 @@ def list_path() -> Path:
 
 def _empty() -> dict:
     return {"covered": [], "jobs": [], "attempts": {"day": "", "n": 0}, "shipping": [],
-            "prep_day": "", "limit_day": "", "pings": []}
+            "prep_day": "", "limit_day": "", "last_pass": "", "pings": []}
 
 
 def _load() -> dict:
@@ -148,7 +148,7 @@ def _load() -> dict:
     data["pings"] = [p for p in pings if isinstance(p, dict) and p.get("kind") in ("list", "ship", "human")
                      and isinstance(p.get("ids"), list)
                      and (p["kind"] != "human" or isinstance(p.get("detail"), str))] if isinstance(pings, list) else []
-    for key in ("prep_day", "limit_day"):   # date strings; absent in older files
+    for key in ("prep_day", "limit_day", "last_pass"):   # date strings / a timestamp; absent in older files
         if not isinstance(data.get(key), str):
             data[key] = ""
     return data
@@ -343,6 +343,19 @@ def _pacific_day(now: datetime) -> str:
     return now.astimezone(PREP_TZ).strftime("%Y-%m-%d")
 
 
+def _pass_cap_holds(settings: dict, state: dict, now: datetime) -> bool:
+    """True when `prep_pass_gap_hours` has not passed since the last pass started. The cap only
+    applies from prep_time on: before it, a pass runs when nothing is left to build."""
+    gap = settings.get("prep_pass_gap_hours", 0)
+    if not gap or not state.get("last_pass") or not _past_prep_time(settings, now):
+        return False
+    try:
+        last = datetime.strptime(state["last_pass"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return now - last < timedelta(hours=gap)
+
+
 def _plan(tickets: list[dict], settings: dict, state: dict, now: datetime) -> tuple[str | None, bool]:
     """(why the prep pass should run now or None, whether it is today's prep_time pass).
     One ticket alone has nothing to reconcile, so a pass needs at least two tickets waiting,
@@ -364,9 +377,10 @@ def _plan(tickets: list[dict], settings: dict, state: dict, now: datetime) -> tu
 def _can_launch(settings: dict, state: dict, now: datetime) -> bool:
     """Whether a prep pass can start today (the gates maybe_start applies, without side effects).
     A pass that is running now does not count: the next one still follows it."""
-    day = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    day = _pacific_day(now)
     attempts = state["attempts"]
     return (not dp.research_problem(settings)
+            and not _pass_cap_holds(settings, state, now)
             and state.get("limit_day") != dp.local_day(now, settings["timezone"])
             and dp.launches_today(dp.local_day(now, settings["timezone"])) < settings["max_launches_per_day"]
             and not (attempts.get("day") == day and attempts.get("n", 0) >= MAX_ATTEMPTS_PER_DAY))
@@ -463,27 +477,34 @@ def maybe_start(settings: dict, now: datetime, emit, warn, reserve=None) -> None
     if problem:
         emit(f"prep pass not started: {problem}")
         return
-    day = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    day = today
     attempts = state["attempts"]
     if attempts.get("day") == day and attempts.get("n", 0) >= MAX_ATTEMPTS_PER_DAY:
         emit(f"prep pass not started: {MAX_ATTEMPTS_PER_DAY} launch attempts failed today")
+        return
+    if _pass_cap_holds(settings, state, now):
+        emit(f"prep pass not started: the last one started less than {settings['prep_pass_gap_hours']} hours ago")
         return
     if reserve is not None and not reserve():
         with _state() as st:   # holds_ping must not wait for a pass that cannot start today
             st["limit_day"] = dp.local_day(now, settings["timezone"])   # the budget resets at local midnight
         emit("prep pass not started: daily launch limit reached")
         return
-    with _state() as st:   # count the attempt before it starts, like every launch
-        st["attempts"] = {"day": day, "n": (st["attempts"].get("n", 0) if st["attempts"].get("day") == day else 0) + 1}
-    review = [t for t in review_tickets(tickets) if tip_of(_repo(t, settings), t["branch"])]
+    # Every waiting ticket is taken, not only the new ones: _finish_prep orders the whole list and
+    # finds duplicates among the job's own ids, so locking only new tickets needs a finalizer change.
+    review = _waiting(tickets, settings, state)
     try:
         job = _start_job("prep", review, settings, warn)
     except (lc.LaunchError, OSError, subprocess.TimeoutExpired) as exc:
+        with _state() as st:   # only a launch that failed counts
+            st["attempts"] = {"day": day,
+                              "n": (st["attempts"].get("n", 0) if st["attempts"].get("day") == day else 0) + 1}
         dp.log("PREP_FAILED", f"launch failed: {exc}")
         emit(f"prep pass not started: {exc}")
         return
-    if at_prep_time:
-        with _state() as st:
+    with _state() as st:
+        st["last_pass"] = _stamp(now)
+        if at_prep_time:
             st["prep_day"] = today
     dp.log("PREP_STARTED", f"{len(job['ids'])} tickets in review ({why}): {', '.join(job['ids'])}")
     emit(f"prep agent started over {len(job['ids'])} tickets in review ({why})")

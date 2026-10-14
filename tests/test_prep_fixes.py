@@ -422,3 +422,45 @@ def test_a_fleet_alert_is_logged_too(env, ntfy):
     from fleet import notify
     notify.send_alert("dispatcher_down", "Fleet dispatcher is down", "text")
     assert "PING_SENT dispatcher_down fleet" in _log_text()
+
+
+def test_only_a_failed_launch_counts_as_an_attempt_on_the_pacific_day(q, herdr_log, env):
+    in_review(q, "task/one", {"one.txt": "1"})
+    in_review(q, "task/two", {"two.txt": "2"})
+    start_prep()                                               # a launch that works
+    assert prep._load()["attempts"]["n"] == 0
+    assert prep._load()["last_pass"] == "2026-10-03T10:00:00Z"
+
+
+def test_the_pass_cap_holds_a_second_pass_after_prep_time(q, herdr_log, env):
+    in_review(q, "task/one", {"one.txt": "1"})
+    in_review(q, "task/two", {"two.txt": "2"})
+    settings = dp.load_settings()
+    state = dict(prep._empty(), last_pass="2026-10-03T13:30:00Z")
+    after = datetime(2026, 10, 3, 15, 0, tzinfo=timezone.utc)   # 08:00 Pacific, 1.5 h later
+    assert prep._pass_cap_holds(settings, state, after)
+    assert not prep._pass_cap_holds(settings, state, datetime(2026, 10, 3, 17, 31, tzinfo=timezone.utc))
+    assert not prep._pass_cap_holds(dict(settings, prep_pass_gap_hours=0), state, after)
+    assert not prep._pass_cap_holds(settings, state, JUST_BEFORE_SIX)
+
+
+JUST_BEFORE_SIX = datetime(2026, 10, 3, 12, 59, tzinfo=timezone.utc)
+
+
+def test_failed_launches_count_up_to_the_cap_and_reset_at_pacific_midnight(q, herdr_log, env, monkeypatch):
+    in_review(q, "task/one", {"one.txt": "1"})
+    in_review(q, "task/two", {"two.txt": "2"})
+
+    def boom(*a, **k):
+        raise lc.LaunchError("no herdr")
+    monkeypatch.setattr(prep, "_start_job", boom)
+    for _ in range(prep.MAX_ATTEMPTS_PER_DAY):
+        start_prep()
+    assert prep._load()["attempts"] == {"day": "2026-10-03", "n": prep.MAX_ATTEMPTS_PER_DAY}
+    _, out, _ = start_prep()
+    assert "launch attempts failed today" in out[0]
+    late = datetime(2026, 10, 4, 7, 30, tzinfo=timezone.utc)   # 00:30 Pacific on the 4th
+    start_prep(now=late)
+    assert prep._load()["attempts"] == {"day": "2026-10-04", "n": 1}
+
+
