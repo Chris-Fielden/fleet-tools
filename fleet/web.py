@@ -319,8 +319,10 @@ def make_handler(endpoint: Endpoint, log=lambda m: None):
                 t = tk.load_ticket(ticket_id)
                 return t, facts(action, t)
             except (tk.TicketError, tk.TicketInvalid) as exc:
+                self._audit("refused: no such ticket", action, ticket_id)
                 self._send(404, _page("No such ticket", f"<p>{html.escape(str(exc))}</p>"))
             except Refused as exc:
+                self._audit(f"refused: {exc}", action, ticket_id)
                 self._send(409, _page("Refused", f"<p class=bad>{html.escape(str(exc))}</p>"))
             return None
 
@@ -355,14 +357,13 @@ def make_handler(endpoint: Endpoint, log=lambda m: None):
             form = _form(self.rfile.read(length))
             found = self._ticket(action, ticket_id)
             if found is None:
-                self._audit("refused: no such ticket or not shippable", action, ticket_id)
                 return
             t, f = found
             token = endpoint.tokens.make(action, f["id"], f["commit"])
             # The page was made for one commit; a branch that moved since is refused.
             if form.get("commit") != f["commit"] or not endpoint.tokens.ok(form.get("token", ""), action,
                                                                           f["id"], form.get("commit", "")):
-                self._audit("refused: page out of date", action, f["id"], form.get("commit", ""))
+                self._audit("refused: page out of date", action, f["id"], f["commit"])
                 self._send(409, _page("Refused", "<p class=bad>This page is out of date (the ticket or its "
                                       "commit changed). Open the link again.</p>"))
                 return

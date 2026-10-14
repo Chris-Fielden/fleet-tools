@@ -485,3 +485,13 @@ def test_audit_write_failure_does_not_block_the_response(endpoint, rig, monkeypa
     (Path(os.environ["FLEET_HOME"]) / "web" / "audit.log").mkdir()  # a directory: open fails
     status, _ = confirm(endpoint, f"/ship/{rig.t['id']}")
     assert status == 202
+
+
+def test_audit_log_records_refused_get_and_never_the_submitted_commit(endpoint, rig):
+    assert call(endpoint, "/ship/BD-99999")[0] == 404
+    full = reviewed(rig.wt, rig.repo)
+    call(endpoint, f"/ship/{rig.t['id']}", {"token": "x", "commit": "SECRET-IN-COMMIT"})
+    lines = audit_lines()
+    assert lines[0]["result"] == "refused: no such ticket" and lines[0]["action"] == "ship"
+    assert lines[1]["commit"] == full
+    assert "SECRET-IN-COMMIT" not in (Path(os.environ["FLEET_HOME"]) / "web" / "audit.log").read_text()
