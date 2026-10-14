@@ -81,9 +81,9 @@ def test_all_problems_listed():
 
 @pytest.mark.parametrize("envvars, who, build_status", [
     ({}, "human", "open"),
-    ({"CLAUDECODE": "1"}, "claude", "open"),
-    ({"CODEX_SANDBOX": "seatbelt"}, "codex", "open"),
-    ({"CODEX_SANDBOX_NETWORK_DISABLED": "1"}, "codex", "open"),
+    ({"CLAUDECODE": "1"}, "claude", "proposed"),
+    ({"CODEX_SANDBOX": "seatbelt"}, "codex", "proposed"),
+    ({"CODEX_SANDBOX_NETWORK_DISABLED": "1"}, "codex", "proposed"),
 ])
 def test_creator_and_status(monkeypatch, envvars, who, build_status):
     for k, v in envvars.items():
@@ -92,7 +92,8 @@ def test_creator_and_status(monkeypatch, envvars, who, build_status):
     assert (build["created_by"], build["status"]) == (who, build_status)
     for t, extra in (("review", {"commit": "abc1234"}), ("fix", {}), ("question", {})):
         tick = make(type=t, parent=build["id"], **extra)
-        assert tick["created_by"] == who and tick["status"] == "open"
+        want = "proposed" if who != "human" and t == "fix" else "open"
+        assert tick["created_by"] == who and tick["status"] == want
         assert tick["assignee"] is None and tick["verdict"] is None
 
 
@@ -586,10 +587,13 @@ def test_investigate_always_starts_proposed(monkeypatch, agent_env):
 
 
 @pytest.mark.parametrize("agent_env", [{}, {"CLAUDECODE": "1"}, {"CODEX_SANDBOX": "x"}])
-def test_build_starts_open_whoever_files_it(monkeypatch, agent_env):
+def test_build_and_fix_start_proposed_when_filed_by_an_agent(monkeypatch, agent_env):
     for k, v in agent_env.items():
         monkeypatch.setenv(k, v)
-    assert make()["status"] == "open"
+    want = "proposed" if agent_env else "open"
+    build = make()
+    assert build["status"] == want
+    assert make(type="fix", parent=build["id"])["status"] == want
 
 
 def test_ids_are_never_created_without_the_hyphen():

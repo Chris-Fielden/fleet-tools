@@ -120,8 +120,11 @@ claimed and in-review tickets of the same repo:
   `auto_investigate` is off, the dispatcher may start a read-only research
   agent on a `proposed` investigate ticket without approval (see the
   dispatcher spec).
-- Every other ticket (build, review, fix, question) starts as `open`, whoever
-  files it. Agents start work freely; the human approves at merge.
+- A build or fix ticket filed from inside an agent (`CLAUDECODE` or
+  `CODEX_SANDBOX` set) starts as `proposed`, so no agent can put work straight
+  into the dispatcher queue. A human approves it.
+- Every other ticket (build, review, fix, question) filed by a human starts as
+  `open`. Agents start work freely; the human approves at merge.
 - Exception: a build ticket with a `parent` (a follow-up filed from an
   investigation) starts as `proposed`. Its parent must be an `investigate`
   ticket; no other build ticket may have a parent.
@@ -241,7 +244,7 @@ alert REPO TEXT
   starts as `proposed`.
 - `alert REPO TEXT` files a `build` ticket in REPO with priority `urgent`,
   branch `task/alert-TIMESTAMP`, title and body as for `idea`. Its id is
-  `EM-n`, and it starts `open`.
+  `EM-n`, and it starts `open` (`proposed` when filed from inside an agent).
 - TEXT is all the remaining arguments joined with spaces.
 
 - `ticket priority ID normal|urgent` (humans only) sets the priority of a

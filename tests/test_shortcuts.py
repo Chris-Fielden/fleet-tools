@@ -112,9 +112,9 @@ def test_alert_body_too_long_is_a_plain_error():
     assert r.returncode == 2 and "body must be" in r.stderr
 
 
-def test_alert_from_agent_is_open_and_urgent():
+def test_alert_from_agent_is_proposed_and_urgent():
     t = tk.load_ticket(sh(ALERT, "myrepo", "boom", extra_env={"CODEX_SANDBOX": "x"}).stdout.strip())
-    assert (t["created_by"], t["status"], t["priority"]) == ("codex", "open", "urgent")
+    assert (t["created_by"], t["status"], t["priority"]) == ("codex", "proposed", "urgent")
 
 
 def test_tickets_filed_back_to_back_get_different_branches():

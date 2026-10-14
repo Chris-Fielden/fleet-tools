@@ -530,8 +530,11 @@ def create_ticket(fields: dict, *, needs_approval: bool = False, oncall: bool = 
     # open (the human approves at merge). A build ticket that follows up an
     # investigation (it has a parent) also waits for approval.
     # needs_approval: the caller wants a human to approve it first.
+    # A build or fix filed from inside an agent also waits, so no agent can put
+    # work straight into the dispatcher queue.
     status = ("open" if open_now else
               "proposed" if needs_approval or t == "investigate" or (t == "build" and fields.get("parent"))
+              or (t in ("build", "fix") and creator != "human")
               else "open")
     try:
         start_risk = rk.starting_level(t, fields["repo"])
