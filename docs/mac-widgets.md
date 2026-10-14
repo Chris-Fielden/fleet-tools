@@ -26,6 +26,15 @@ null), `plan_usage`, `governor` (`state` ok/paused/stopped, `weekly_pct`, `resum
 `launches` (`left_today`), `dispatch_alive`, `kaneo_url`. It contains no
 ticket text, paths or secrets.
 
+### Prometheus metrics
+
+The same server answers `GET /metrics` in Prometheus text format, with the
+same tailnet-only checks. It is built fresh on every scrape and holds only
+numbers and ticket ids (gauges): `fleet_tickets{status}` for every ticket
+status, `fleet_launches_today`, `fleet_launches_max_per_day`,
+`fleet_agents_running`, `fleet_ready_to_ship`, `fleet_dispatch_up`, and
+`fleet_review_rounds{ticket}` for active tickets only.
+
 ### Real plan usage
 
 Claude Code passes its rate limits (5-hour and weekly percentages and reset
