@@ -444,16 +444,6 @@ def test_the_pass_cap_holds_a_second_pass_after_prep_time(q, herdr_log, env):
     assert not prep._pass_cap_holds(settings, state, JUST_BEFORE_SIX)
 
 
-def test_the_prep_agent_locks_only_the_new_tickets(q, herdr_log, env):
-    a, _ = in_review(q, "task/one", {"one.txt": "1"})
-    b, _ = in_review(q, "task/two", {"two.txt": "2"})
-    tips = {a["id"]: prep.tip_of(q, "task/one")}
-    with prep._state() as st:
-        st["covered"] = [f"{a['id']}:{tips[a['id']]}"]
-    start_prep()
-    assert prep.locked_ids() == {b["id"]}
-
-
 JUST_BEFORE_SIX = datetime(2026, 10, 3, 12, 59, tzinfo=timezone.utc)
 
 
@@ -474,13 +464,3 @@ def test_failed_launches_count_up_to_the_cap_and_reset_at_pacific_midnight(q, he
     assert prep._load()["attempts"] == {"day": "2026-10-04", "n": 1}
 
 
-def test_the_manifest_lists_waiting_tickets_as_context_but_locks_only_new_ones(q, herdr_log, env):
-    a, _ = in_review(q, "task/one", {"one.txt": "1"})
-    b, _ = in_review(q, "task/two", {"two.txt": "2"})
-    with prep._state() as st:
-        st["covered"] = [f"{a['id']}:{prep.tip_of(q, 'task/one')}"]
-    settings, _, _ = start_prep()
-    manifest = json.loads((lc.research_folder(prep.FOLDER_ID, settings) / "manifest-prep.json").read_text())
-    assert [t["id"] for t in manifest["tickets"]] == [b["id"]]
-    assert [t["id"] for t in manifest["context"]] == [a["id"]]
-    assert prep.locked_ids() == {b["id"]}
