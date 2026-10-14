@@ -643,3 +643,40 @@ def test_watch_does_not_restart_when_head_is_unchanged_or_unreadable(projects, h
     for heads in (["a"] * 5, [None] * 5, ["a", None, "a", None, "a"]):
         it = iter(heads)
         assert dispatch_cli._cmd_watch(dp.load_settings(), FakeClock(3), head=lambda: next(it)) == 0
+
+
+# --- catch-all and heartbeat ---------------------------------------------------
+
+def test_cycle_bug_is_counted_and_the_loop_survives(projects, env, monkeypatch, capsys):
+    real = dispatch_cli._cycle
+    runs = []
+
+    def flaky(*a, **kw):
+        runs.append(1)
+        if len(runs) <= 2:
+            raise KeyError("SECRET ticket text")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(dispatch_cli, "_cycle", flaky)
+    beats = []
+    clock = FakeClock(3, at={1: lambda c: beats.append(json.loads((env / "fleet" / "heartbeat.json").read_text())),
+                             2: lambda c: beats.append(json.loads((env / "fleet" / "heartbeat.json").read_text()))})
+    assert watch({}, clock) == 0
+    assert len(runs) == 3
+    assert beats[0]["consecutive_errors"] == 1 and beats[1]["consecutive_errors"] == 2
+    assert beats[0]["last_error"] == "KeyError" and beats[0]["cycles_ok"] == 0
+    final = json.loads((env / "fleet" / "heartbeat.json").read_text())
+    assert final["consecutive_errors"] == 0 and final["cycles_ok"] == 1
+    assert "SECRET" not in json.dumps(beats + [final]) and "SECRET" not in capsys.readouterr().out
+
+
+def test_heartbeat_written_at_start_and_every_cycle(projects, env):
+    path = env / "fleet" / "heartbeat.json"
+    seen = []
+    clock = FakeClock(2, at={1: lambda c: seen.append(json.loads(path.read_text()))})
+    watch({}, clock)
+    beat = json.loads(path.read_text())
+    assert set(beat) == {"pid", "code_head", "started_at", "cycle_started", "cycle_finished", "cycles_ok",
+                         "consecutive_errors", "last_error", "progress_at"}
+    assert seen[0]["cycles_ok"] == 1 and beat["cycles_ok"] == 2
+    assert beat["cycle_finished"] and beat["last_error"] is None
