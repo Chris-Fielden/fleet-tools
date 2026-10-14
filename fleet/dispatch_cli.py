@@ -322,6 +322,19 @@ def _reload_settings(settings: dict, reload, last_error: str | None) -> str | No
     return None
 
 
+def _write_heartbeat(beat: dict) -> None:
+    """Write $FLEET_HOME/heartbeat.json atomically. Values are ids, counts,
+    times and an exception class name only: never ticket text. A failed write
+    is logged and never stops the watcher."""
+    try:
+        path = tk.fleet_home() / "heartbeat.json"
+        tk.refuse_real_store_in_tests(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tk._write_atomic(path, beat)
+    except (tk.TicketError, OSError) as exc:
+        lc._safe_log("HEARTBEAT_FAILED", type(exc).__name__)
+
+
 def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None, reload=None) -> int:
     """Run the --once steps every watch_interval_seconds until Ctrl+C, printing
     a line only when it was not printed by the cycle before. At most
@@ -341,6 +354,10 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None, reload=
     head = head or dp.code_head
     started_at = head()
     kept_tabs = lc.KeptTabs(clock.now)
+    beat = {"pid": os.getpid(), "code_head": started_at, "started_at": tk._now(),
+            "cycle_started": None, "cycle_finished": None, "cycles_ok": 0,
+            "consecutive_errors": 0, "last_error": None, "progress_at": tk._now()}
+    _write_heartbeat(beat)
 
     def today() -> str:
         return dp.local_day(clock.now(), settings["timezone"])
@@ -362,6 +379,8 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None, reload=
             if reload is not None:
                 invalid = _reload_settings(settings, reload, invalid)
             interval, cap = settings["watch_interval_seconds"], settings["max_launches_per_day"]
+            beat["cycle_started"] = tk._now()
+            failure = None
             try:
                 def checks(emit, warn, skip=frozenset()):
                     review_watch.check(settings, clock.now(), emit, warn, skip)
@@ -369,11 +388,26 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None, reload=
                        retry_tabs=kept_tabs, checks=checks, clock=clock)
             except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
                 lines.append(f"error: {exc}")
+                failure = exc
+            except Exception as exc:   # one bug must be a counted error, not a dead watcher
+                lines.append(f"error: cycle failed: {type(exc).__name__}")
+                lc._safe_log("CYCLE_ERROR", type(exc).__name__)
+                failure = exc
+            if failure is None:
+                beat["cycles_ok"] += 1
+                beat["consecutive_errors"] = 0
+            else:
+                beat["consecutive_errors"] += 1
+                beat["last_error"] = type(failure).__name__
             check_dupes_daily(today(), lines.append, lambda m: lines.append(f"warning: {m}"))
             for line in lines:
                 if line not in previous:
                     print(line, flush=True)
+            if set(lines) != previous:
+                beat["progress_at"] = tk._now()
             previous = set(lines)
+            beat["cycle_finished"] = tk._now()
+            _write_heartbeat(beat)
             day = today()
             try:
                 reached = dp.launches_today(day) >= cap

@@ -189,7 +189,15 @@ already running" message and exit 0.
 - It prints a line only when that line was not printed by the cycle before, so
   a ticket that stays "at capacity" is reported once. It never asks a
   question. Warnings go to the same output. An error in one cycle (disk, git,
-  ticket store) is printed and the next cycle runs.
+  ticket store) is printed and the next cycle runs. Any other exception in a
+  cycle is caught too: it is logged as `CYCLE_ERROR` (class name only), counted,
+  and the loop goes on.
+- **Heartbeat.** At `WATCH_START` and at the end of every cycle it writes
+  `$FLEET_HOME/heartbeat.json` atomically: `pid`, `code_head`, `started_at`,
+  `cycle_started`, `cycle_finished`, `cycles_ok`, `consecutive_errors`,
+  `last_error` (exception class name only) and `progress_at` (last cycle whose
+  output changed). No ticket text goes in it. A checker outside the dispatcher
+  reads this file.
 - **Safety cap.** At most `max_launches_per_day` launches are attempted per local
   day (build, fix and investigation launches together). Each launch is counted
   and saved before it starts, so an interruption or a later error cannot leave
