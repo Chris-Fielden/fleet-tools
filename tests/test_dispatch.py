@@ -928,9 +928,11 @@ def test_urgent_wins_whoever_filed_it(projects, capsys, monkeypatch, agent_env):
     for k, v in agent_env.items():
         monkeypatch.setenv(k, v)
     urgent = mk(branch="task/urg", priority="urgent")
-    assert urgent["status"] == "open"
+    assert urgent["status"] == ("proposed" if agent_env else "open")
     for k in agent_env:
         monkeypatch.delenv(k)
+    if agent_env:
+        tk.set_status(urgent["id"], "open", allowed_from=("proposed",))
     out = dry(capsys)
     assert f"{urgent['id']}  would launch" in out
     assert f"{old['id']}  skip: only one ticket" in out
