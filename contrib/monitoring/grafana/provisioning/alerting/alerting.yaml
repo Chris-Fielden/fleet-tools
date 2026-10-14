@@ -1,0 +1,187 @@
+# Alert rules, contact point and routing for the fleet. Provisioned, so they
+# are read-only in the UI. Grafana expands $NTFY_URL, $NTFY_TOPIC and
+# $NTFY_TOKEN from its own environment (compose.yml); the token is never in git.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: fleet-ntfy
+    receivers:
+      - uid: fleet-ntfy-webhook
+        type: webhook
+        disableResolveMessage: false
+        settings:
+          # The ntfy root. ntfy's JSON publish takes the topic in the body.
+          url: $NTFY_URL
+          httpMethod: POST
+          authorization_scheme: Bearer
+          authorization_credentials: $NTFY_TOKEN
+          # Custom payload: ntfy JSON, not Grafana's default webhook body.
+          # Values are inserted unescaped: keep rule titles and summaries free
+          # of double quotes and backslashes, or the JSON breaks.
+          payload:
+            template: >-
+              {"topic": "$NTFY_TOPIC",
+              "title": "Fleet {{ .Status }}: {{ .CommonLabels.alertname }}",
+              "message": "{{ .CommonAnnotations.summary }}",
+              "priority": {{ if eq .Status "firing" }}4{{ else }}3{{ end }},
+              "tags": ["{{ if eq .Status "firing" }}rotating_light{{ else }}white_check_mark{{ end }}"]}
+
+policies:
+  - orgId: 1
+    receiver: fleet-ntfy
+    group_by: ["alertname"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+
+groups:
+  - orgId: 1
+    name: fleet
+    folder: Fleet
+    interval: 1m
+    rules:
+      - uid: fleet-dispatcher-down
+        title: Dispatcher down
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: "dispatch --watch is not running (fleet_dispatch_up is 0 for 5 minutes)."
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: fleet-prometheus
+            model:
+              refId: A
+              expr: 'fleet_dispatch_up'
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              settings: {mode: dropNN}
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: {type: lt, params: [1]}
+      - uid: fleet-launches-at-cap
+        title: Launches at daily cap
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: "Today's agent launches reached max_launches_per_day; no more will start until tomorrow."
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: fleet-prometheus
+            model:
+              refId: A
+              expr: 'fleet_launches_today - on() fleet_launches_max_per_day'
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              settings: {mode: dropNN}
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: {type: gte, params: [0]}
+      - uid: fleet-failed-tickets-rising
+        title: Failed tickets rising
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: "More tickets failed in the last hour (stays active for up to an hour after a failure)."
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: fleet-prometheus
+            model:
+              refId: A
+              expr: 'delta(fleet_tickets{status="failed"}[1h])'
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              settings: {mode: dropNN}
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+      - uid: fleet-exporter-not-scraped
+        title: Fleet exporter not scraped
+        condition: C
+        for: 5m
+        noDataState: Alerting
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus cannot scrape the fleet status endpoint (127.0.0.1:8788/metrics). Is the status server running?"
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: fleet-prometheus
+            model:
+              refId: A
+              expr: 'up{job="fleet"}'
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              settings: {mode: dropNN}
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: {type: lt, params: [1]}
