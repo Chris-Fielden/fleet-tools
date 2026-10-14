@@ -267,7 +267,12 @@ within each group, whoever filed them.
 6. Two `ticket new` processes at once get different ids.
 7. `approve`: works for a human on a proposed build ticket; refused for
    agents and for every other case.
-8. A ticket file with an unknown field is rejected on read.
+8. A ticket file with an unknown field is still read (so a ticket written by
+   newer code does not stall old code after a rollback). The field is kept,
+   ignored, and rewritten unchanged when the ticket is next saved; one warning
+   per file and field is printed to stderr per process. `validate_stored`
+   without `allow_unknown` still rejects it, and `ticket new` still rejects
+   unknown caller fields.
 
 ## Done means
 

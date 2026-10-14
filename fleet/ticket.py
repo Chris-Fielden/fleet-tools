@@ -13,6 +13,7 @@ import os
 import pwd
 import re
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -280,13 +281,21 @@ def _check_verdict(v) -> list[str]:
     return []
 
 
-def validate_stored(data) -> list[str]:
-    """Return every problem with a ticket as read from disk."""
+def unknown_fields(data: dict) -> list[str]:
+    """Keys in a stored ticket that this code does not know (sorted)."""
+    return sorted(set(data) - set(FIELDS) - set(OPTIONAL_FIELDS))
+
+
+def validate_stored(data, allow_unknown: bool = False) -> list[str]:
+    """Return every problem with a ticket as read from disk. Unknown fields
+    are a problem unless `allow_unknown` (the read path, so a ticket written
+    by newer code stays readable after a rollback)."""
     if not isinstance(data, dict):
         return ["ticket file is not a JSON object"]
     errors: list[str] = []
-    for name in sorted(set(data) - set(FIELDS) - set(OPTIONAL_FIELDS)):
-        errors.append(f"unknown field: {name}")
+    if not allow_unknown:
+        for name in unknown_fields(data):
+            errors.append(f"unknown field: {name}")
     for name in FIELDS:
         if name not in data:
             errors.append(f"missing field: {name}")
@@ -389,6 +398,19 @@ def load_ticket(ticket_id: str) -> dict:
     return _load_path(_ticket_path(ticket_id), ticket_id)
 
 
+_WARNED_UNKNOWN: set[tuple[str, str]] = set()
+
+
+def _warn_unknown(filename: str, names: list[str]) -> None:
+    """Warn once per process per file and field. The fields stay in the loaded
+    ticket (so a rewrite puts them back) but nothing reads them."""
+    for name in names:
+        if (filename, name) not in _WARNED_UNKNOWN:
+            _WARNED_UNKNOWN.add((filename, name))
+            print(f"warning: ticket file {filename} has unknown field '{name}' "
+                  "(written by newer code?); keeping and ignoring it", file=sys.stderr)
+
+
 def _load_path(path: Path, label: str) -> dict:
     try:
         raw = path.read_text(encoding="utf-8")
@@ -400,11 +422,12 @@ def _load_path(path: Path, label: str) -> dict:
         data = json.loads(raw)
     except ValueError as exc:
         raise TicketError(f"ticket file {path.name} is not valid JSON: {exc}") from None
-    problems = validate_stored(data)
+    problems = validate_stored(data, allow_unknown=True)
     if problems:
         raise TicketError(f"ticket file {path.name} is invalid: " + "; ".join(problems))
     if data["id"] != path.stem:
         raise TicketError(f"ticket file {path.name} contains a different id ({data['id']})")
+    _warn_unknown(path.name, unknown_fields(data))
     return data
 
 
