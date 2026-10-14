@@ -216,18 +216,39 @@ def test_approve_refused_for_other_cases(monkeypatch):
     assert run("approve", tid).returncode == 1  # no longer proposed
 
 
-# 8. Unknown field on read ---------------------------------------------------
+# 8. Unknown field on read (kept and ignored) -------------------------------
 
-def test_unknown_field_rejected_on_read():
-    tid = make()["id"]
+def _add_unknown(tid, **extra):
     path = tk.tickets_dir() / f"{tid}.json"
     data = json.loads(path.read_text())
-    data["surprise"] = 1
+    data.update(extra)
     path.write_text(json.dumps(data))
-    with pytest.raises(tk.TicketError, match="unknown field: surprise"):
-        tk.load_ticket(tid)
+    return path
+
+
+def test_unknown_field_kept_and_ignored_on_read(capsys):
+    other = make()["id"]
+    tid = make()["id"]
+    path = _add_unknown(tid, surprise=1)
+    tk._WARNED_UNKNOWN.clear()
+    got = tk.load_ticket(tid)
+    assert got["surprise"] == 1
+    assert {t["id"] for t in tk.list_tickets()} >= {tid, other}
+    err = capsys.readouterr().err
+    assert err.count("unknown field 'surprise'") == 1  # warned once, not per read
+    tk.add_note(tid, "still works")  # a rewrite keeps the field
+    assert json.loads(path.read_text())["surprise"] == 1
     r = run("show", tid)
-    assert r.returncode == 1 and "surprise" in r.stderr
+    assert r.returncode == 0
+
+
+def test_unknown_field_still_rejected_on_write_validation():
+    tid = make()["id"]
+    _add_unknown(tid, surprise=1)
+    data = json.loads((tk.tickets_dir() / f"{tid}.json").read_text())
+    assert "unknown field: surprise" in tk.validate_stored(data)
+    assert tk.validate_stored(data, allow_unknown=True) == []
+    assert "unknown field: surprise" in tk.validate_new({"surprise": 1})
 
 
 def test_missing_field_rejected_on_read():
