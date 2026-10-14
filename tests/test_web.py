@@ -443,3 +443,55 @@ def test_web_paths_accept_any_case_of_the_ticket_id(endpoint, rig):
 def test_web_action_word_stays_case_sensitive(endpoint, rig):
     status, _ = call(endpoint, f"/SHIP/{rig.t['id']}")
     assert status == 404
+
+
+# --- audit log ---------------------------------------------------------------------
+
+def audit_lines():
+    path = Path(os.environ["FLEET_HOME"]) / "web" / "audit.log"
+    return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_audit_log_records_each_outcome_without_secrets(endpoint, rig, monkeypatch):
+    as_node({**PHONE, "UserProfile": {"LoginName": "chris@example.com"}}, monkeypatch)
+    full = reviewed(rig.wt, rig.repo)
+    page = call(endpoint, f"/ship/{rig.t['id']}")[1]
+    token = re.search(r"name=token value=([0-9a-f-]+)", page).group(1)
+    assert audit_lines() == []  # opening the page is not an event
+    call(endpoint, f"/ship/{rig.t['id']}", {"token": "forged-secret", "commit": full})
+    status, _ = confirm(endpoint, f"/ship/{rig.t['id']}")
+    assert status == 202
+    lines = audit_lines()
+    assert [x["result"] for x in lines] == ["refused: page out of date", "ship started"]
+    assert all(x["peer"] == "127.0.0.1" and "phone" in x["who"] and "chris@example.com" in x["who"]
+               and x["ticket"] == rig.t["id"] for x in lines)
+    assert lines[1]["commit"] == full
+    path = Path(os.environ["FLEET_HOME"]) / "web" / "audit.log"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    text = path.read_text()
+    assert token not in text and "forged-secret" not in text
+
+
+def test_audit_log_records_gate_refusals(endpoint, rig, monkeypatch):
+    as_node(LOIC, monkeypatch)
+    assert call(endpoint, f"/ship/{rig.t['id']}")[0] == 403
+    (line,) = audit_lines()
+    assert line["result"].startswith("refused:") and line["peer"] == "127.0.0.1"
+
+
+def test_audit_write_failure_does_not_block_the_response(endpoint, rig, monkeypatch):
+    full = reviewed(rig.wt, rig.repo)
+    (Path(os.environ["FLEET_HOME"]) / "web").mkdir(parents=True, exist_ok=True)
+    (Path(os.environ["FLEET_HOME"]) / "web" / "audit.log").mkdir()  # a directory: open fails
+    status, _ = confirm(endpoint, f"/ship/{rig.t['id']}")
+    assert status == 202
+
+
+def test_audit_log_records_refused_get_and_never_the_submitted_commit(endpoint, rig):
+    assert call(endpoint, "/ship/BD-99999")[0] == 404
+    full = reviewed(rig.wt, rig.repo)
+    call(endpoint, f"/ship/{rig.t['id']}", {"token": "x", "commit": "SECRET-IN-COMMIT"})
+    lines = audit_lines()
+    assert lines[0]["result"] == "refused: no such ticket" and lines[0]["action"] == "ship"
+    assert lines[1]["commit"] == full
+    assert "SECRET-IN-COMMIT" not in (Path(os.environ["FLEET_HOME"]) / "web" / "audit.log").read_text()

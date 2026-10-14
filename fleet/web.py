@@ -77,20 +77,37 @@ def _identities(node) -> set[str]:
     return found
 
 
-def check_device(address: str) -> tuple[bool, str]:
-    """(allowed, why) for a connection from `address`. Fails closed."""
+def _who_label(who: dict | None) -> str:
+    """'node-name user' from a whois answer, or '' when it names neither."""
+    if not who:
+        return ""
+    node = who.get("Node") if isinstance(who.get("Node"), dict) else {}
+    profile = who.get("UserProfile") if isinstance(who.get("UserProfile"), dict) else {}
+    parts = [node.get("ComputedName") or node.get("Name") or node.get("HostName"), profile.get("LoginName")]
+    return " ".join(str(p).strip().rstrip(".") for p in parts if isinstance(p, str) and p.strip())
+
+
+def check_device_who(address: str) -> tuple[bool, str, str]:
+    """(allowed, why, who) for a connection from `address`. Fails closed."""
     who = _tailscale("whois", "--json", address)
+    label = _who_label(who)
     node = who.get("Node") if who else None
     peer = _identities(node)
     if not peer:
-        return False, "the address is not a tailnet device"
+        return False, "the address is not a tailnet device", label
     status = _tailscale("status", "--json")
     mine = _identities(status.get("Self") if status else None)
     if not mine:
-        return False, "cannot tell which node this machine is"
+        return False, "cannot tell which node this machine is", label
     if peer & mine:
-        return False, "requests from the machine the agents run on are refused"
-    return True, "ok"
+        return False, "requests from the machine the agents run on are refused", label
+    return True, "ok", label
+
+
+def check_device(address: str) -> tuple[bool, str]:
+    """(allowed, why) for a connection from `address`. Fails closed."""
+    allowed, why, _ = check_device_who(address)
+    return allowed, why
 
 
 # --- what a ticket looks like to the page ----------------------------------------
@@ -226,6 +243,31 @@ class Endpoint:
             return log
 
 
+def _clean(value) -> str:
+    """One printable line: control characters (newlines too) become spaces."""
+    return "".join(c if c.isprintable() else " " for c in str(value))[:200]
+
+
+def audit(peer: str, who: str, result: str, ticket: str = "", commit: str = "", action: str = "") -> None:
+    """Append one JSON line to $FLEET_HOME/web/audit.log (0600). Never raises, never
+    holds a token or form body: only the fields named here."""
+    try:
+        logs = web_dir()
+        tk.refuse_real_store_in_tests(logs)
+        logs.mkdir(parents=True, exist_ok=True)
+        line = json.dumps({"time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                           "peer": _clean(peer), "who": _clean(who), "action": _clean(action),
+                           "ticket": _clean(ticket), "commit": _clean(commit), "result": _clean(result)})
+        fd = os.open(logs / "audit.log", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, (line + "\n").encode())
+        finally:
+            os.close(fd)
+    except Exception:  # noqa: BLE001 - an audit failure must not block the response
+        pass
+
+
 def _form(raw: bytes) -> dict:
     parsed = urllib.parse.parse_qs(raw.decode("utf-8", "replace"), keep_blank_values=True)
     return {k: v[0] for k, v in parsed.items()}
@@ -254,11 +296,16 @@ def make_handler(endpoint: Endpoint, log=lambda m: None):
 
         def _gate(self) -> bool:
             """THE device check, before anything else is looked at."""
-            allowed, why = check_device(self.client_address[0])
+            allowed, why, self._who = check_device_who(self.client_address[0])
             if not allowed:
+                audit(self.client_address[0], self._who, f"refused: {why}", action=self.command)
                 log(f"refused {self.command} from {self.client_address[0]}: {why}")
                 self._send(403, b"Refused.\n", "text/plain; charset=utf-8")
             return allowed
+
+        def _audit(self, result: str, action: str = "", ticket: str = "", commit: str = "") -> None:
+            audit(self.client_address[0], getattr(self, "_who", ""), result,
+                  ticket=ticket, commit=commit, action=action or self.command)
 
         def _route(self):
             m = PATH_RE.fullmatch(self.path.split("?", 1)[0])
@@ -272,8 +319,10 @@ def make_handler(endpoint: Endpoint, log=lambda m: None):
                 t = tk.load_ticket(ticket_id)
                 return t, facts(action, t)
             except (tk.TicketError, tk.TicketInvalid) as exc:
+                self._audit("refused: no such ticket", action, ticket_id)
                 self._send(404, _page("No such ticket", f"<p>{html.escape(str(exc))}</p>"))
             except Refused as exc:
+                self._audit(f"refused: {exc}", action, ticket_id)
                 self._send(409, _page("Refused", f"<p class=bad>{html.escape(str(exc))}</p>"))
             return None
 
@@ -302,6 +351,7 @@ def make_handler(endpoint: Endpoint, log=lambda m: None):
             except ValueError:
                 length = -1
             if not 0 <= length <= MAX_FORM:
+                self._audit("refused: bad request length", action)
                 self._send(400, b"Bad request.\n", "text/plain; charset=utf-8")
                 return
             form = _form(self.rfile.read(length))
@@ -313,29 +363,35 @@ def make_handler(endpoint: Endpoint, log=lambda m: None):
             # The page was made for one commit; a branch that moved since is refused.
             if form.get("commit") != f["commit"] or not endpoint.tokens.ok(form.get("token", ""), action,
                                                                           f["id"], form.get("commit", "")):
+                self._audit("refused: page out of date", action, f["id"], f["commit"])
                 self._send(409, _page("Refused", "<p class=bad>This page is out of date (the ticket or its "
                                       "commit changed). Open the link again.</p>"))
                 return
             if f["problems"]:
+                self._audit(f"refused: {f['problems'][0]}", action, f["id"], f["commit"])
                 self._notify_refusal(t, f["problems"][0], action)
                 self._send(409, confirm_page(action, f, token))
                 return
             if f["risk"] == "high" and form.get("typed", "").strip().lower() != f["id"].lower():
+                self._audit("refused: typed ticket ID mismatch", action, f["id"], f["commit"])
                 self._send(400, confirm_page(action, f, token, "Type the ticket ID exactly to confirm."))
                 return
             try:
                 if action == "approve":
                     tk.approve_ticket(f["id"])
                     kaneo.mirror_quietly(tk.load_ticket(f["id"]), lambda m: log(m))
+                    self._audit("approved", action, f["id"], f["commit"])
                     log(f"approved {f['id']} from {self.client_address[0]}")
                     self._send(200, _page("Approved", f"<p>{html.escape(f['id'])} is approved and open.</p>"))
                 else:
                     path = endpoint.start_ship(t, f["commit"])
+                    self._audit("ship started", action, f["id"], f["commit"])
                     log(f"ship of {f['id']} at {f['commit'][:8]} started from {self.client_address[0]}, log {path}")
                     self._send(202, _page("Shipping", f"<p>{html.escape(f['id'])} is shipping in the background. "
                                           "You can close this page: a phone ping reports the result.</p>"
                                           f"<p>Log: {html.escape(path.name)}</p>"))
             except (Refused, tk.TicketError, tk.TicketInvalid) as exc:
+                self._audit(f"refused: {exc}", action, f["id"], f["commit"])
                 self._notify_refusal(t, str(exc), action)
                 self._send(409, _page("Refused", f"<p class=bad>{html.escape(str(exc))}</p>"))
 
