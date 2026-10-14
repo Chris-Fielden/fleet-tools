@@ -32,6 +32,7 @@ def ready(q, monkeypatch, branch, files):
 def watch_cycle(now, reserve=None):
     """The parts of a dispatch cycle that matter here, in its order: finish, review watch, maybe start."""
     settings = dp.load_settings()
+    settings["prep_pass_gap_hours"] = 0   # these tests are about follow-up passes, not the pass cap
     out, warns = [], []
     prep.finish(settings, now, out.append, warns.append)
     rw.check(settings, now, out.append, warns.append)

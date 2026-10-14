@@ -34,6 +34,8 @@ DEFAULTS = {
     # Overnight queue: at this time (HH:MM, America/Los_Angeles) the prep pass
     # runs over the tickets in review, if it has not already run.
     "prep_time": "06:00",
+    # From prep_time on, at most one prep pass starts per this many hours (0 turns it off).
+    "prep_pass_gap_hours": 4,
     # Where things live
     "projects_dir": "~/projects",
     "research_dir": "~/fleet-research",
@@ -170,6 +172,8 @@ def _merge(settings: dict, given, path: Path) -> None:
         if not isinstance(value, str) or not PREP_TIME_RE.fullmatch(value):
             raise SettingsError(f"{path}: prep_time must be a time like \"06:00\" (24 hours, HH:MM)")
         settings["prep_time"] = value
+    if "prep_pass_gap_hours" in given:
+        settings["prep_pass_gap_hours"] = _whole(path, given, "prep_pass_gap_hours", 0, "0 or more (0 turns it off)")
     for key in ("projects_dir", "research_dir", "herdr_workspace"):
         if key in given:
             if not isinstance(given[key], str) or not given[key].strip():
