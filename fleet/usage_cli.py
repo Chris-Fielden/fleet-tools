@@ -68,6 +68,7 @@ def main(argv=None) -> int:
     u.add_argument("--by-ticket", action="store_true",
                    help="top tickets by tokens over the last 7 days (build vs review, Claude vs Codex)")
     u.add_argument("--json", action="store_true", help="machine-readable output")
+    sub.add_parser("digest", help="informational events of the last 24 hours, plain text (read-only, sends nothing)")
     sub.add_parser("doctor", help="check the settings, the tools on PATH and the tracker (read-only)")
     s = sub.add_parser("start", help="start herdr (headless), the workspaces and dispatch --watch; safe to repeat")
     s.add_argument("--pause", action="store_true", help="wait for Enter at the end (for the desktop launcher)")
@@ -87,6 +88,9 @@ def main(argv=None) -> int:
     la.add_argument("state", choices=("on", "off"))
     args = p.parse_args(argv)
 
+    if args.cmd == "digest":
+        from . import digest
+        return digest.main()
     if args.cmd == "doctor":
         return doctor.main()
     if args.cmd == "status" and args.json:
