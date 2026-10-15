@@ -60,7 +60,7 @@ BROAD_RM = re.compile(
     r"\s+(/|~|\$HOME|\.\.?(/)?|\*)(\s|$)"
 )
 
-HUMAN_ONLY_SCRIPTS = re.compile(r"finish-task\.sh")
+HUMAN_ONLY_SCRIPTS = re.compile(r"(finish-task|release-tag)\.sh")
 # Flags that switch off an agent's own safety sandbox or permission prompts.
 UNSAFE_AGENT_FLAGS = re.compile(
     r"--dangerously-skip-permissions|--dangerously-bypass-approvals-and-sandbox"
