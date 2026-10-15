@@ -155,3 +155,11 @@ def test_log_write_failure_does_not_fail_the_status_change(monkeypatch, capsys):
     closed = tk.close_ticket(t["id"], "done")
     assert closed["status"] == "done"
     assert "could not record" in capsys.readouterr().err
+
+
+def test_future_ping_line_does_not_hide_a_real_transition():
+    t = _make("build")
+    tk.close_ticket(t["id"], "done")
+    future = datetime.now(timezone.utc) + timedelta(hours=2)
+    write_log(f"{future.strftime('%Y-%m-%dT%H:%M:%SZ')} PING_SENT shipped {t['id']}")
+    assert _kinds() == [("shipped", t["id"])]

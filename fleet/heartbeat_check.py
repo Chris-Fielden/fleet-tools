@@ -6,7 +6,7 @@ boot service). It reads $FLEET_HOME/heartbeat.json (written by `dispatch
 
 - the file is missing or unreadable;
 - its pid is dead, or is not a `dispatch --watch`;
-- the last finished cycle is older than 3x the watch interval (360s);
+- the last finished cycle is older than 3x the configured watch interval (360s by default);
 - 3 or more cycles in a row ended in an error;
 - tickets are waiting to launch (status `open`) but nothing has changed for 30 min.
 
@@ -23,10 +23,12 @@ import sys
 from datetime import datetime, timezone
 
 from . import notify
+from . import settings as st
 from . import service as sv
 from . import ticket as tk
 
-STALE_CYCLE_SECONDS = 360          # 3 x the 120 s watch interval
+DEFAULT_WATCH_INTERVAL = 120       # used when the settings can't be read
+STALE_CYCLES = 3                   # a cycle is stale after this many watch intervals
 ERROR_STREAK = 3
 STALL_SECONDS = 30 * 60
 FIRST_REPEAT_SECONDS = 30 * 60
@@ -38,6 +40,15 @@ def _parse(value) -> float | None:
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
     except (TypeError, ValueError):
         return None
+
+
+def stale_limit() -> int:
+    """3 x the configured watch interval, so a slow interval is not reported as down."""
+    try:
+        interval = st.load_settings()["watch_interval_seconds"]
+    except (st.SettingsError, KeyError):
+        interval = DEFAULT_WATCH_INTERVAL
+    return STALE_CYCLES * interval
 
 
 def _work_owed() -> bool:
@@ -65,9 +76,10 @@ def find_problems(now: float) -> list[tuple[str, str]]:
     finished = _parse(beat.get("cycle_finished"))
     if finished is None:
         finished = _parse(beat.get("started_at"))   # no cycle has finished yet
-    if finished is None or now - finished > STALE_CYCLE_SECONDS:
+    limit = stale_limit()
+    if finished is None or now - finished > limit:
         age = "unknown" if finished is None else f"{int(now - finished)}s"
-        problems.append(("stale", f"no cycle has finished for {age} (limit {STALE_CYCLE_SECONDS}s)"))
+        problems.append(("stale", f"no cycle has finished for {age} (limit {limit}s)"))
     errors = beat.get("consecutive_errors")
     if isinstance(errors, int) and errors >= ERROR_STREAK:
         problems.append(("errors", f"{errors} cycles in a row failed (last error: {str(beat.get('last_error'))[:60]})"))
