@@ -163,9 +163,17 @@ fi
 
 echo
 echo "== 5/5 Push and clean up"
+# Only a repo with a k8s/ folder has anything for ArgoCD to deploy; say so only then.
+pushed_note() {
+  if [[ -d k8s ]]; then
+    echo "Pushed. ArgoCD will pick up the change from $1."
+  else
+    echo "Pushed."
+  fi
+}
 if git remote get-url origin >/dev/null 2>&1; then
   git push origin "$base"
-  echo "Pushed. ArgoCD will pick up the change from $base."
+  pushed_note "$base"
 else
   echo "No 'origin' remote, so nothing was pushed."
 fi
