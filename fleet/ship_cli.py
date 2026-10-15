@@ -795,16 +795,17 @@ def _ship_list() -> int:
     # A proposed duplicate is covered too, but it is only proposed for cancellation: never shipped here.
     ready = [t for t in ready if t["id"] not in proposed]
     reported = _report_not_ready(waiting, proposed, set())   # before anything ships
-    if not ready:
-        return _fail("nothing is ready to ship: no ticket in review has been through the prep pass "
-                     f"at its current commit ({prep.list_path()} is only written by that pass)")
-    print("Ship list:")
-    for t in ready:
-        print("  " + (annotations.get(t["id"]) or " | ".join([t["id"], t["title"], t.get("risk") or "-", "-", "-"])))
+    if ready:
+        print("Ship list:")
+        for t in ready:
+            print("  " + (annotations.get(t["id"]) or " | ".join([t["id"], t["title"], t.get("risk") or "-", "-", "-"])))
     if proposals:
         print("Proposed cancellations (duplicates; NOT done, and not shipped by this list):")
         for _, line in proposals:
             print(f"  {line}")
+    if not ready:
+        return _fail("nothing is ready to ship: no ticket in review has been through the prep pass "
+                     f"at its current commit ({prep.list_path()} is only written by that pass)")
     shipped = 0
     for n, t in enumerate(ready, 1):
         ticket_id = t["id"]
@@ -1029,6 +1030,8 @@ def _ship_recorded(ticket_id: str, **kw) -> int:
     """_ship_one with what `ship --status` needs: the ticket's lock, its log (a copy of what is
     printed) and its result file. For the list and the direct (no terminal) ship."""
     global _last_message, _needs_human_sent
+    if not tk.ID_RE.fullmatch(ticket_id):   # before any path is built from it
+        return _fail(f"unknown ticket ID: {ticket_id}")
     files = _job_files(ticket_id)
     files["dir"].mkdir(parents=True, exist_ok=True)
     with open(files["lock"], "a") as lock:

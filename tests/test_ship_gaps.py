@@ -64,6 +64,13 @@ def test_the_timeout_can_be_turned_off(projects, env):
 
 # --- gap 4: the log path -----------------------------------------------------------------------
 
+def test_a_bad_id_never_builds_a_path(projects, env, capsys):
+    from fleet.ship_cli import _ship_recorded
+    assert _ship_recorded("../BD-1") == 1
+    assert "unknown ticket ID" in capsys.readouterr().err
+    assert not (env / "fleet" / "ship").exists() and not (env / "fleet" / "BD-1.log").exists()
+
+
 def test_the_log_path_is_printed_at_the_start(shipping, monkeypatch, capsys):
     repo, t, log = shipping
     monkeypatch.setenv("FAKE_MERGE", "1")
