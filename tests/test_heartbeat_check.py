@@ -70,6 +70,14 @@ def test_cycle_just_inside_the_limit_is_fine(rig):
     assert hc.run(NOW) == 0
 
 
+def test_stale_limit_follows_the_configured_interval(rig, monkeypatch):
+    monkeypatch.setattr(hc.st, "load_settings", lambda: {"watch_interval_seconds": 600})
+    rig(cycle_finished=iso(NOW - 1500))
+    assert hc.run(NOW) == 0
+    rig(cycle_finished=iso(NOW - 1900))
+    assert hc.run(NOW) == 1 and "limit 1800s" in rig.sent[0][2]
+
+
 def test_error_streak(rig):
     rig(consecutive_errors=3, last_error="OSError")
     assert hc.run(NOW) == 1 and "3 cycles in a row" in rig.sent[0][2]
