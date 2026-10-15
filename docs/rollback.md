@@ -4,22 +4,25 @@ How a human takes fleet-tools back to a known-good state. Agents never run
 these steps: merging, tagging and pushing are human-only (CLAUDE.md rule 4),
 and the guard hook blocks force-pushes.
 
-## 1. Mark known-good points: `good/<YYYYMMDD>-<ticket>`
+## 1. Known-good points: `ship-YYYY.MM.DD.N`
 
-After a merge to `main` that you have watched work, the human tags it with an
-**annotated** tag:
+Every ship is tagged automatically. After the post-merge checks on `main`
+pass, `scripts/release-tag.sh` (run by the merge script, human-only) creates
+an **annotated** tag `ship-<UTC date>.<N>` (N counts that day's ships from 1)
+and a `CHANGELOG.md` entry naming the ticket:
 
 ```
-git tag -a good/20261015-BD-108 -m "good: BD-108 rollback runbook" <commit>
+git tag -l --sort=version:refname 'ship-*'   # oldest first; name order puts .10 before .2
+git show ship-2026.10.15.1                   # the tag message names the ticket
 ```
 
-- Name: `good/<YYYYMMDD>-<ticket id>`, date in the local timezone.
-- Annotated (`-a`), so the tag has an author, a date and a message.
-- This is the same convention the changelog-tags work uses; keep the two in
-  step. Agents do not create these tags.
+- These tags are the rollback points; `CHANGELOG.md` says what each holds.
+- A tag marks a ship that passed its checks, not one that has run well in
+  use: pick a tag from before the problem started.
+- Agents do not create or move tags, and this runbook does not define a
+  second tag scheme.
 
-In the commands below `good/X` stands for the tag you are returning to.
-`git tag -l 'good/*'` lists them.
+In the commands below `ship-X` stands for the tag you are returning to.
 
 ## 2. Normal rollback: revert, never rewrite
 
@@ -30,23 +33,26 @@ Revert keeps history and needs no force-push. From the main checkout, on
    about to change.
 2. Revert everything after the tag, without committing yet:
    ```
-   git revert --no-commit good/X..HEAD
+   git revert --no-commit ship-X..HEAD
    ```
-   Merge commits need a mainline: `git revert --no-commit -m 1 <merge>` for
-   each merge (parent 1 is `main`). If the range holds merges, revert them
-   one at a time, newest first, rather than using the range form.
+   Merge commits need a mainline, so if the range holds merges do not use
+   the range form. List the first-parent commits newest first
+   (`git log --first-parent --format=%h ship-X..HEAD`) and revert each in
+   that order: `git revert --no-commit -m 1 <merge>` for a merge (parent 1
+   is `main`), plain `git revert --no-commit <sha>` for any other commit.
+   Never revert a merge and also the commits it brought in.
 3. **Check it is exact**: the index must now equal the tag.
    ```
-   git diff --cached good/X      # must print nothing
+   git diff --cached ship-X      # must print nothing
    ```
    A non-empty diff means a commit was missed, or a revert conflicted and was
    resolved differently. Fix that before committing.
-4. `git commit -m "Revert to good/X"`, then push as usual.
+4. `git commit -m "Revert to ship-X"`, then push as usual.
 5. Verify (section 5), then restart the dispatcher if needed (section 6).
 
 ## 3. Emergency hard reset (last resort)
 
-`git reset --hard good/X` followed by a force-push rewrites `main`. Know
+`git reset --hard ship-X` followed by a force-push rewrites `main`. Know
 what that costs:
 
 - Every other clone and every task branch based on the discarded commits now
@@ -76,7 +82,9 @@ decide per ticket (section 7).
 - `fleet status`: dispatcher, herdr and web should be up.
 - `ticket list`: tickets still show the expected statuses; nothing has
   vanished or changed type.
-- `dispatch --dry-run`: shows what would launch and changes nothing. It should
+- `dispatch --dry-run`: launches nothing, but it writes decision logs and
+  takes the dispatcher lock; with a dispatcher running it exits without
+  showing decisions. Run it while the dispatcher is still stopped. It should
   run without errors and match the queue you expect.
 - `scripts/check.sh` on the rolled-back tree passes.
 
@@ -123,15 +131,16 @@ Never rename or repurpose a field in a single step.
 Practise on a copy, not the real store:
 
 ```
-git worktree add ../rollback-rehearsal good/X     # detached, at the tag
-cp -a "$FLEET_HOME" /path/to/fleet-home-copy
+git worktree add ../rollback-rehearsal ship-X     # detached, at the tag
+cp -a "${FLEET_HOME:-$HOME/.fleet}" /path/to/fleet-home-copy
 cd ../rollback-rehearsal
 FLEET_HOME=/path/to/fleet-home-copy bin/dispatch --dry-run
 FLEET_HOME=/path/to/fleet-home-copy bin/ticket list
 ```
 
-If the tag's code reads the copied state and `--dry-run` is sane, the real
-rollback will work. Remove the worktree and the copy afterwards (human step).
+If the tag's code reads the copied state and `--dry-run` is sane, that shows
+partial compatibility only (tickets load, decisions preview); it does not
+prove the whole rollback will work. Remove the worktree and the copy afterwards (human step).
 Tests and rehearsals always use a temporary `FLEET_HOME`, never the live one.
 
 ## 10. Argo CD (design only)
