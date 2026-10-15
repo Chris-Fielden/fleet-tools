@@ -202,3 +202,15 @@ def test_doctor_survives_a_missing_git(env, monkeypatch):
     r = subprocess.run([sys.executable, str(FLEET), "doctor"], capture_output=True, text=True,
                        env=dict(os.environ))
     assert r.returncode == 1 and "Traceback" not in r.stderr and "tool git" in r.stdout
+
+
+def test_doctor_kubeconform_required_once_k8s_exists(tmp_path, monkeypatch):
+    from fleet import doctor
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path))  # nothing on PATH
+    state, _, detail = doctor._tool_row("kubeconform", False, None)
+    assert state == "warn" and "required once k8s/" in detail
+    (tmp_path / "k8s").mkdir()
+    (tmp_path / "k8s" / "a.yaml").write_text("kind: Namespace\n")
+    state, _, detail = doctor._tool_row("kubeconform", False, None)
+    assert state == "fail" and "required" in detail

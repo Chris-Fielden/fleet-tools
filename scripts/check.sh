@@ -45,6 +45,9 @@ if [[ -d k8s ]] && [[ -n "$(find k8s -name '*.yaml' -o -name '*.yml' | head -1)"
     # -strict: reject unknown fields (catches typos like "replicaz").
     # -ignore-missing-schemas: skip custom resources (e.g. ArgoCD Applications)
     #   that kubeconform has no schema for, instead of failing on them.
+    #   NOTE: this means Application/ApplicationSet CRs are NOT validated
+    #   (only built-in Kubernetes kinds are). Add CRD schemas via
+    #   KUBECONFORM_SCHEMA_LOCATION to cover them.
     # -cache: keep downloaded schemas so later runs work offline and faster.
     cache="${XDG_CACHE_HOME:-$HOME/.cache}/kubeconform"
     mkdir -p "$cache"

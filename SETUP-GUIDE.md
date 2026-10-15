@@ -111,16 +111,22 @@ Use whatever email you use for your personal GitHub account.
 ### Step 2. Install kubeconform
 
 ```bash
-curl -sSL -o /tmp/kc.tgz https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz
+KC_VERSION=v0.6.7   # pin a release; check https://github.com/yannh/kubeconform/releases
+curl -sSL -o /tmp/kc.tgz "https://github.com/yannh/kubeconform/releases/download/${KC_VERSION}/kubeconform-linux-amd64.tar.gz"
 tar -xzf /tmp/kc.tgz -C /tmp kubeconform
 sudo mv /tmp/kubeconform /usr/local/bin/
 kubeconform -v
 ```
 
-1. Downloads the latest release from GitHub into `/tmp` (a scratch folder).
+1. Downloads a pinned release from GitHub into `/tmp` (a scratch folder), so
+   every machine gets the same version.
 2. Unpacks just the `kubeconform` program from the archive.
 3. Moves it into `/usr/local/bin`, where Linux looks for programs.
 4. Prints the version, which proves it works.
+
+kubeconform is optional until a `k8s/` folder with YAML files exists. From
+then on it is required: `scripts/check.sh` fails without it, and
+`fleet doctor` reports it as a problem instead of a warning.
 
 If your tower has an ARM processor, replace `amd64` with `arm64`.
 
