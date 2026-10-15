@@ -26,8 +26,14 @@ TOOLS = (
     ("herdr", False, "FLEET_HERDR"),
     ("claude", False, None),
     ("codex", False, None),
-    ("kubeconform", False, None),
+    ("kubeconform", False, None),  # required once k8s/ has manifests; see _tool_row
 )
+
+
+def _k8s_manifests_exist() -> bool:
+    """Same test as scripts/check.sh step 3: any *.yaml / *.yml under ./k8s."""
+    k8s = Path("k8s")
+    return k8s.is_dir() and any(f for pat in ("*.yaml", "*.yml") for f in k8s.rglob(pat))
 
 
 def _tool_row(name: str, required: bool, env_var: str | None) -> tuple[str, str, str]:
@@ -40,6 +46,13 @@ def _tool_row(name: str, required: bool, env_var: str | None) -> tuple[str, str,
     found = shutil.which(command)
     if found:
         return ("ok", f"tool {name}", found)
+    if name == "kubeconform":
+        # scripts/check.sh fails when k8s/ has manifests and kubeconform is missing.
+        if _k8s_manifests_exist():
+            return ("fail", f"tool {name}",
+                    f"'{command}' not found on PATH (required: k8s/ has manifests and check.sh fails without it)")
+        return ("warn", f"tool {name}",
+                f"'{command}' not found on PATH (required once k8s/ has manifests)")
     return ("fail" if required else "warn", f"tool {name}",
             f"'{command}' not found on PATH" + ("" if required else " (optional)"))
 
