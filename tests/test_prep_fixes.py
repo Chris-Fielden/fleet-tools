@@ -11,6 +11,7 @@ from fleet import dispatch as dp
 from fleet import launch as lc
 from fleet import prep
 from fleet import ticket as tk
+from fleet import ship_cli
 from fleet.ship_cli import main as ship_main
 from test_dispatch import calls, git, herdr_log, projects, mk, claim  # noqa: F401
 from test_prep import (NIGHT as NOW, ntfy, agent_names, commit, conflicting, finish_prep, in_review, log_lines, merge, q,  # noqa: F401
@@ -146,14 +147,14 @@ def test_a_ticket_being_shipped_is_left_out_of_the_prep_agent(q, herdr_log, env,
 def test_ship_reserves_its_ticket_while_it_runs_and_releases_it_after(q, herdr_log, env, monkeypatch):
     a, _ = in_review(q, "task/one", {"one.txt": "1"})
     seen = []
-    real = subprocess.run
+    real = ship_cli._run_script
 
     def spy(cmd, *args, **kw):
         if any("finish-task" in str(c) for c in cmd):
             seen.append(prep.locked_ids())
         return real(cmd, *args, **kw)
 
-    monkeypatch.setattr("fleet.ship_cli.subprocess.run", spy)
+    monkeypatch.setattr(ship_cli, "_run_script", spy)
     assert ship_main([a["id"]]) == 0
     assert seen == [{a["id"]}] and prep.locked_ids() == set()
 
@@ -398,6 +399,8 @@ def test_ship_list_shows_proposed_cancellations_and_does_not_call_them_late(q, h
     b, _ = in_review(q, "task/two", {"two.txt": "1"})
     prep._write_list([f"{a['id']} | One | low | does one | -"], NOW, [prep._proposal_line(b, a["id"])])
     assert [i for i, _ in prep.read_proposals()] == [b["id"]]
+    with prep._state() as st:   # the prep pass covers a proposed duplicate too
+        st["covered"] += [f"{a['id']}:{prep.tip_of(q, 'task/one')}", f"{b['id']}:{prep.tip_of(q, 'task/two')}"]
     assert ship_main(["--list"]) == 0
     cap = capsys.readouterr()
     assert "Proposed cancellations" in cap.out and f"ticket close {b['id']} --cancelled" in cap.out

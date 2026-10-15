@@ -449,6 +449,13 @@ def _governor_row() -> tuple[str, str, str]:
 def status_rows() -> list[tuple[str, str, str]]:
     herdr_up = herdr_running()
     rows = [("ok" if herdr_up else "fail", "herdr", "running" if herdr_up else "not running (fleet start)")]
+    if herdr_up:   # the server can run with its workspace gone: agents then cannot be stopped
+        name = st.load_settings()["herdr_workspace"]
+        try:
+            lc.find_workspace(name)
+            rows.append(("ok", "workspace", name))
+        except lc.LaunchError as exc:
+            rows.append(("fail", "workspace", f"{exc} (fleet start recreates it)"))
     if dispatcher_running():
         pid = dispatcher_pid()
         rows.append(("ok", "autopilot", "dispatch --watch running" + (f" (pid {pid})" if pid else "")))
@@ -466,7 +473,7 @@ def cmd_status() -> int:
     rows = status_rows()
     for state, what, detail in rows:
         print(f"  {state.upper():<4}  {what:<16} {detail}")
-    return 1 if any(r[0] == "fail" and r[1] in ("herdr", "autopilot") for r in rows) else 0
+    return 1 if any(r[0] == "fail" and r[1] in ("herdr", "workspace", "autopilot") for r in rows) else 0
 
 
 # --- logs --------------------------------------------------------------------

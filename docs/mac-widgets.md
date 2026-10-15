@@ -23,7 +23,8 @@ that is not `tailscale serve` in front of it.
 Snapshot fields: `tokens` (Claude tokens for the last 5 hours, today and the
 week from local session logs; Codex logs hold only rate limits, so `codex` is
 null), `plan_usage`, `governor` (`state` ok/paused/stopped, `weekly_pct`, `resumes_at`, `held`), `agents_running` (`id`, `minutes`), `ready_to_ship`,
-`launches` (`left_today`), `dispatch_alive`, `kaneo_url`. It contains no
+`launches` (`left_today`), `dispatch_alive`, `herdr` (`server` and `workspace`, both
+booleans: the server can run with the agent workspace gone), `kaneo_url`. It contains no
 ticket text, paths or secrets.
 
 ### Prometheus metrics

@@ -595,28 +595,77 @@ def decide_oncall(tickets: list[dict], settings: dict, running: frozenset | set 
 
 # --- reconcile ---------------------------------------------------------------
 
-def is_merged(repo: Path, branch: str, since: str | None = None) -> bool:
-    """True if main has a merge commit whose message is exactly `Merge <branch>`.
+def merge_commit(repo: Path, branch: str, since: str | None = None) -> str | None:
+    """The newest merge commit in main whose message is exactly `Merge <branch>`, or None.
     With `since` (a commit id), only merges made after that commit count, so an
     old merge of a reused branch name doesn't match."""
     main = main_branch(repo)
     if main is None:
-        return False
-    out = _git(repo, "log", f"{since}..{main}" if since else main, "--merges", "--format=%B%x00")
+        return None
+    out = _git(repo, "log", f"{since}..{main}" if since else main, "--merges", "--format=%H%x01%B%x00")
     if out.returncode != 0:
-        return False
+        return None
     # Whole messages, NUL-separated: a subject match with extra text doesn't count.
     # Strip only the newlines git adds around each message, not spaces.
     # The merge script adds an "EMERGENCY OVERRIDE (risk ...)" paragraph when a
     # human merged without the required review; that is still this branch.
     plain = f"Merge {branch}"
     override = f"Merge {branch}\n\nEMERGENCY OVERRIDE (risk "
-    return any(m.strip("\n") == plain or m.strip("\n").startswith(override)
-               for m in out.stdout.split("\0"))
+    for entry in out.stdout.split("\0"):
+        sha, _, message = entry.strip("\n").partition("\x01")
+        message = message.strip("\n")
+        if sha and (message == plain or message.startswith(override)):
+            return sha
+    return None
+
+
+def is_merged(repo: Path, branch: str, since: str | None = None) -> bool:
+    """True if main has a merge commit whose message is exactly `Merge <branch>`."""
+    return merge_commit(repo, branch, since) is not None
+
+
+def delivered_by_partner(repo: Path, t: dict, tickets: list[dict]) -> dict | None:
+    """A stacked ticket whose commits reached main through another ticket's merge: the partner
+    ticket, or None. Never decided on "no new commits" alone. All of these must hold: the branch
+    has commits of its own past the ticket's base commit; its tip is already in main; and some
+    other ticket of the repo (not itself) has its own `Merge <branch>` in main whose merged side
+    contains this branch's tip and whose main side did not (the merge is what brought it in: it
+    was stacked on this one). The partner's branch itself may be gone: finish-task deletes it
+    after the merge."""
+    main, base = main_branch(repo), t.get("base_commit")
+    if main is None or not base or not t.get("branch"):
+        return None
+
+    def tip(branch: str) -> str:
+        out = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}")
+        return out.stdout.strip() if out.returncode == 0 else ""
+
+    mine = tip(t["branch"])
+    if not mine or mine == base:
+        return None
+    if _git(repo, "merge-base", "--is-ancestor", base, mine).returncode != 0:
+        return None
+    if _git(repo, "merge-base", "--is-ancestor", mine, main).returncode != 0:
+        return None   # its commits are not all in main yet
+    for other in sorted(tickets, key=tk.oldest_first_key):
+        if other["id"] == t["id"] or other.get("repo") != t.get("repo") or not other.get("branch") \
+                or other["branch"] == t["branch"]:
+            continue
+        merge = merge_commit(repo, other["branch"], other.get("base_commit"))
+        if not merge:
+            continue
+        # The partner's merge must be what brought the tip into main: on its merged side and not
+        # already on the main side (a branch that merely caught up with main has commits of no one's).
+        on_merged_side = _git(repo, "merge-base", "--is-ancestor", mine, f"{merge}^2").returncode == 0
+        already_in_main = _git(repo, "merge-base", "--is-ancestor", mine, f"{merge}^1").returncode == 0
+        if on_merged_side and not already_in_main:
+            return other
+    return None
 
 
 def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None):
-    """Set claimed (or in-review) tickets whose branch was merged to done. Yields the changed
+    """Set claimed (or in-review) tickets whose branch was merged to done; a stacked ticket whose
+    commits arrived through its partner's merge is closed as delivered. Yields the changed
     tickets."""
     for t in sorted((t for t in tickets if t["status"] in ("claimed", "review") and t["type"] != "investigate"),
                     key=tk.oldest_first_key):
@@ -624,11 +673,15 @@ def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None):
         if repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir():
             log("RECONCILE_SKIP", f"{t['id']} repo folder {repo} not found")
             continue
+        note = None
         if not is_merged(repo, t["branch"], t.get("base_commit")):
-            log("RECONCILE_SKIP", f"{t['id']} {t['branch']} not merged")
-            continue
+            partner = delivered_by_partner(repo, t, tickets)
+            if partner is None:
+                log("RECONCILE_SKIP", f"{t['id']} {t['branch']} not merged")
+                continue
+            note = f"delivered: its commits are in {main_branch(repo) or 'main'} through {partner['id']} ({partner['branch']})"
         try:
-            new = tk.set_status(t["id"], "done", allowed_from=("claimed", "review"))
+            new = tk.set_status(t["id"], "done", allowed_from=("claimed", "review"), close_note=note)
         except tk.TicketError as exc:
             log("RECONCILE_SKIP", f"{t['id']} {exc}")
             continue

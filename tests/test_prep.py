@@ -428,7 +428,14 @@ def test_the_prep_agent_runs_once_a_day_unless_new_tickets_reach_review(q, herdr
 # --- 3. ship --list ----------------------------------------------------------------------------
 
 def write_list(ids_lines):
+    """What the prep pass leaves: the list file, and the listed tickets covered at their current tip
+    (`ship --list` takes its members from the coverage, the file only orders and annotates)."""
     prep._write_list(ids_lines, NIGHT)
+    settings = dp.load_settings()
+    with prep._state() as st:
+        for i, _ in prep.read_list():
+            t = tk.load_ticket(i)
+            st["covered"].append(f"{i}:{prep.tip_of(prep._repo(t, settings), t['branch'])}")
 
 
 def test_ship_list_stops_at_the_first_failure(q, herdr_log, env, monkeypatch, capsys):
@@ -437,7 +444,9 @@ def test_ship_list_stops_at_the_first_failure(q, herdr_log, env, monkeypatch, ca
     monkeypatch.setenv("FAKE_FINISH_FAIL", "t2")
     assert ship_main(["--list"]) == 1
     err = capsys.readouterr().err
-    assert f"stopped at {ts[1]['id']}" in err and "rest of the list was not shipped" in err
+    assert f"stopped at {ts[1]['id']}" in err and "1 shipped" in err
+    assert f"not shipped: {ts[1]['id']}, {ts[2]['id']}" in err    # the reason and what is left
+    assert f"log: {env / 'fleet' / 'ship' / (ts[1]['id'] + '.log')}" in err
     assert log_lines(env, "finish") == ["t1", "t2"]          # t3 was never tried
     assert [tk.load_ticket(t["id"])["status"] for t in ts] == ["done", "review", "review"]
 
@@ -448,7 +457,8 @@ def test_ship_list_shows_the_list_and_skips_what_is_done(q, herdr_log, env, caps
     assert ship_main([ts[0]["id"]]) == 0                       # one ticket on its own still works
     assert ship_main(["--list"]) == 0
     out = capsys.readouterr().out
-    assert "Title 1" in out and "Title 2" in out and f"{ts[0]['id']} is already done" in out
+    # membership is rebuilt from what is in review now: the shipped ticket is simply not there
+    assert "Title 2" in out and "Title 1" not in out
     assert log_lines(env, "finish") == ["t1", "t2"]
 
 
@@ -457,12 +467,47 @@ def test_ship_list_refuses_a_ticket_that_left_review(q, herdr_log, env, capsys):
     write_list([f"{t['id']} | T | medium | does 1 | -"])
     tk.set_status(t["id"], "claimed", allowed_from=("review",))
     assert ship_main(["--list"]) == 1
-    assert "no longer ready" in capsys.readouterr().err and log_lines(env, "finish") == []
+    assert "nothing is ready to ship" in capsys.readouterr().err and log_lines(env, "finish") == []
 
 
 def test_ship_list_without_a_list(projects, capsys):
     assert ship_main(["--list"]) == 1
-    assert "there is no ship list" in capsys.readouterr().err
+    assert "nothing is ready to ship" in capsys.readouterr().err
+
+
+def test_ship_list_ignores_a_stale_list_file(q, herdr_log, env, capsys):
+    """A day-old list names a ticket that has since moved on; a covered ticket missing from the
+    file still ships, and the stale entry is not shipped."""
+    old, _ = in_review(q, "task/old", {"old.txt": "1"})
+    new, _ = in_review(q, "task/new", {"new.txt": "2"})
+    write_list([f"{old['id']} | Old | low | old | -"])
+    with prep._state() as st:   # covered by a later pass, which did not rewrite the file
+        st["covered"].append(f"{new['id']}:{prep.tip_of(q, 'task/new')}")
+    tk.set_status(old["id"], "claimed", allowed_from=("review",))
+    assert ship_main(["--list"]) == 0
+    assert log_lines(env, "finish") == ["new"]
+    assert tk.load_ticket(new["id"])["status"] == "done"
+    assert tk.load_ticket(old["id"])["status"] == "claimed"
+
+
+def test_ship_list_does_not_ship_a_ticket_whose_branch_moved_since_the_prep_pass(
+        q, herdr_log, env, capsys):
+    t, wt = in_review(q, "task/t1", {"t1.txt": "1"})
+    write_list([f"{t['id']} | T | medium | does 1 | -"])
+    commit(wt, {"later.txt": "x"})
+    assert ship_main(["--list"]) == 1
+    assert log_lines(env, "finish") == []
+    assert "NOT on the ship list" in capsys.readouterr().err
+
+
+def test_ship_list_records_each_ticket_for_ship_status(q, herdr_log, env, capsys):
+    ts = [in_review(q, f"task/t{i}", {f"t{i}.txt": str(i)})[0] for i in (1, 2)]
+    write_list([f"{t['id']} | T | low | does | -" for t in ts])
+    assert ship_main(["--list"]) == 0
+    capsys.readouterr()
+    assert ship_main(["--status", ts[0]["id"]]) == 0
+    assert f"{ts[0]['id']} shipped" in capsys.readouterr().out
+    assert (env / "fleet" / "ship" / f"{ts[1]['id']}.log").is_file()
 
 
 @pytest.mark.parametrize("args", [[], ["BD-1", "--list"]])

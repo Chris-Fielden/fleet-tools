@@ -21,6 +21,7 @@ with a plain message.
 | `timezone` | `America/Los_Angeles` | IANA name; the daily launch and on-call caps reset at midnight here, not at UTC midnight |
 | `prep_time` | `06:00` | HH:MM, America/Los_Angeles: the prep pass over tickets in review (two or more waiting) runs once a day at this time (or when nothing is left to build) |
 | `prep_pass_gap_hours` | `4` | from `prep_time` on, at most one prep pass starts per this many hours; 0 turns it off |
+| `ship_prompt_timeout_s` | `900` | a merge that prints nothing for this many seconds (it is waiting at a prompt) is cancelled cleanly, its reservation freed, and one needs-human ping sent; 0 turns it off |
 | `projects_dir` | `~/projects` | a ticket's repo is `<projects_dir>/<repo>` |
 | `research_dir` | `~/fleet-research` | folder for read-only research agents |
 | `herdr_workspace` | `fleet` | herdr workspace agents are launched in |

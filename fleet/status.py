@@ -18,6 +18,8 @@ text, no paths, no secrets.
     ready_to_ship      ticket ids waiting for the human's review/ship
     launches           {used_today, max_per_day, left_today}
     dispatch_alive     whether dispatch --watch holds its lock
+    herdr              {server, workspace}: whether the herdr server runs and the configured
+                       agent workspace exists (read-only: nothing is created here)
     kaneo_url          the Kaneo board address (no credentials), or null
 """
 
@@ -28,6 +30,7 @@ from datetime import datetime, timezone
 
 from . import dispatch as dp
 from . import kaneo
+from . import launch as lc
 from . import governor
 from . import planusage
 from . import service as sv
@@ -73,6 +76,20 @@ def _claude_plan(real: dict, tokens: dict) -> dict:
             "tokens": {"five_hour": tokens["five_hour"], "week": tokens["week"]}}
 
 
+def _herdr() -> dict:
+    """Is herdr up, and does the workspace agents are launched in exist? Read-only: the status
+    endpoint never creates anything (`fleet start` and the merge preflight recreate a workspace)."""
+    up = sv.herdr_running()
+    workspace = False
+    if up:
+        try:
+            lc.find_workspace(st.load_settings()["herdr_workspace"])
+            workspace = True
+        except (lc.LaunchError, OSError):
+            pass
+    return {"server": up, "workspace": workspace}
+
+
 def snapshot(now: datetime | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
     claude, codex = us.collect(now=now)
@@ -100,5 +117,6 @@ def snapshot(now: datetime | None = None) -> dict:
         "launches": {"used_today": used, "max_per_day": cap,
                      "left_today": None if used is None else max(0, cap - used)},
         "dispatch_alive": sv.dispatcher_running(),
+        "herdr": _herdr(),
         "kaneo_url": _board_url(),
     }

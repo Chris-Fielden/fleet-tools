@@ -86,7 +86,9 @@ def test_finish_task_refusal_is_one_plain_line(shipping, monkeypatch, capsys):
     monkeypatch.setenv("FAKE_EXIT", "1")
     assert ship_main([t["id"]]) == 1
     err = capsys.readouterr().err.strip().splitlines()
-    assert err == ["ship: finish-task refused task/demo (exit 1); nothing was reconciled"]
+    # the refusal, then the path of the ticket's log (printed again on every failure)
+    assert err == ["ship: finish-task refused task/demo (exit 1); nothing was reconciled",
+                   f"ship: log: {tk.fleet_home() / 'ship' / (t['id'] + '.log')}"]
     assert tk.load_ticket(t["id"])["status"] == "claimed"
 
 
@@ -108,16 +110,17 @@ def test_wrong_status(projects, capsys, status):
         claim(t)
         tk.set_status(t["id"], "done", allowed_from=("claimed",))
     assert ship_main([t["id"]]) == 1
-    err = capsys.readouterr().err.strip()
-    assert err == f"ship: {t['id']} is {status}; only a ticket in review (or still claimed) can be shipped"
+    err = capsys.readouterr().err.strip().splitlines()
+    assert err[0] == f"ship: {t['id']} is {status}; only a ticket in review (or still claimed) can be shipped"
+    assert err[1].startswith("ship: log: ")   # every failure names the ticket's log
 
 
 def test_missing_repo_folder(projects, capsys):
     t = mk(repo="ghost")
     claim(t)
     assert ship_main([t["id"]]) == 1
-    err = capsys.readouterr().err.strip()
-    assert "repo folder" in err and "not found" in err and "\n" not in err
+    err = capsys.readouterr().err.strip().splitlines()
+    assert "repo folder" in err[0] and "not found" in err[0] and len(err) == 2   # and the log path
 
 
 def test_repo_without_finish_task(projects, capsys):
