@@ -45,6 +45,8 @@ def test_ticket_store_fills_in_and_is_deduplicated(monkeypatch):
         {"id": "BD-6", "type": "investigate", "status": "done", "updated_at": recent, "created_at": old},
         {"id": "BD-7", "type": "build", "status": "failed", "updated_at": recent, "created_at": old},
         {"id": "BD-8", "type": "fix", "status": "proposed", "updated_at": recent, "created_at": recent},
+        {"id": "BD-11", "type": "question", "status": "done", "updated_at": recent, "created_at": old},
+        {"id": "BD-12", "type": "review", "status": "done", "updated_at": recent, "created_at": old},
         {"id": "BD-9", "type": "build", "status": "done", "updated_at": old, "created_at": old},
         {"id": "BD-10", "type": "build", "status": "done", "updated_at": recent, "created_at": old,
          "notes": [{"at": recent, "by": "claude", "text": "late note on an old ticket"}]},
@@ -55,7 +57,7 @@ def test_ticket_store_fills_in_and_is_deduplicated(monkeypatch):
     assert out.count("BD-5") == 1 and "[ticket]" not in out.split("BD-5")[1].splitlines()[0]
     for ident in ("BD-6", "BD-7", "BD-8"):
         assert ident in out
-    assert "BD-9" not in out and "BD-10" not in out
+    assert "BD-9" not in out and "BD-10" not in out and "BD-11" not in out and "BD-12" not in out
     assert "shipped (1)" in out and out.count("BD-6") == 1   # an investigation is not shipped
     assert "investigated (1)" in out and "failed (1)" in out and "proposed (1)" in out
 

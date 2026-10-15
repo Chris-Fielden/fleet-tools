@@ -73,8 +73,10 @@ def _ticket_events(since: datetime) -> list[tuple[datetime, str, str, str]]:
         moved = _moved_at(t)
         created = _parse(t.get("created_at"))
         if t["status"] == "done" and moved and moved >= since:
-            event = "investigated" if t["type"] == "investigate" else "shipped"
-            out.append((moved, event, t["id"], "ticket"))
+            # Only build and fix tickets merge code; question and review tickets close without one.
+            event = {"investigate": "investigated", "build": "shipped", "fix": "shipped"}.get(t["type"])
+            if event:
+                out.append((moved, event, t["id"], "ticket"))
         elif t["status"] == "failed" and moved and moved >= since:
             out.append((moved, "failed", t["id"], "ticket"))
         elif t["status"] == "proposed" and created and created >= since:
