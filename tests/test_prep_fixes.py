@@ -399,8 +399,8 @@ def test_ship_list_shows_proposed_cancellations_and_does_not_call_them_late(q, h
     b, _ = in_review(q, "task/two", {"two.txt": "1"})
     prep._write_list([f"{a['id']} | One | low | does one | -"], NOW, [prep._proposal_line(b, a["id"])])
     assert [i for i, _ in prep.read_proposals()] == [b["id"]]
-    with prep._state() as st:
-        st["covered"].append(f"{a['id']}:{prep.tip_of(q, 'task/one')}")
+    with prep._state() as st:   # the prep pass covers a proposed duplicate too
+        st["covered"] += [f"{a['id']}:{prep.tip_of(q, 'task/one')}", f"{b['id']}:{prep.tip_of(q, 'task/two')}"]
     assert ship_main(["--list"]) == 0
     cap = capsys.readouterr()
     assert "Proposed cancellations" in cap.out and f"ticket close {b['id']} --cancelled" in cap.out

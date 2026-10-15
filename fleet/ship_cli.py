@@ -457,14 +457,18 @@ def _run_script(argv: list[str], cwd: Path, env: dict, answer: str | None, idle_
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
 
     def stop() -> None:
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            with contextlib.suppress(OSError):
-                os.killpg(proc.pid, sig)
-            try:
-                proc.wait(timeout=5)
-                return
-            except subprocess.TimeoutExpired:
-                pass
+        """Ask the whole group to stop, then make sure: a shell that exits on SIGTERM can leave
+        descendants that ignore it."""
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
 
     try:
         if answer:
@@ -490,7 +494,7 @@ def _run_script(argv: list[str], cwd: Path, env: dict, answer: str | None, idle_
                 idle = idle_s
                 stop()
                 break
-        proc.wait()
+        proc.wait()   # only reached once the script has closed its output or been stopped
         return proc.returncode, idle
     except BaseException:
         stop()
@@ -587,7 +591,8 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, pre
         if dp._git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
             dp._git(repo, "merge", "--abort")
         message = (f"timed out at a prompt: {script.name} printed nothing for {idle}s, so it was stopped; "
-                   f"{t['id']} was not reconciled (check `git log` in {repo}); the reservation is released")
+                   f"{t['id']} was not reconciled. Check `git log` in {repo}: a merge or push that finished "
+                   "before the prompt stays; the reservation is released")
         _needs_human(t, message)
         return _fail(message)
     done = subprocess.CompletedProcess([], returncode)
@@ -787,6 +792,8 @@ def _ship_list() -> int:
     except OSError:
         proposals = []
     proposed = {i for i, _ in proposals}
+    # A proposed duplicate is covered too, but it is only proposed for cancellation: never shipped here.
+    ready = [t for t in ready if t["id"] not in proposed]
     reported = _report_not_ready(waiting, proposed, set())   # before anything ships
     if not ready:
         return _fail("nothing is ready to ship: no ticket in review has been through the prep pass "

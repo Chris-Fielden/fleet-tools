@@ -110,6 +110,17 @@ def test_a_stacked_ticket_whose_partner_merged_is_closed_as_delivered(shipping, 
     assert "already delivered" in capsys.readouterr().out
 
 
+def test_delivery_is_found_after_finish_task_deleted_the_partners_branch(shipping, env):
+    repo, t, log = shipping
+    base = _stack(repo)
+    git(repo, "branch", "-D", "task/partner")                  # what finish-task does after merging
+    tk.set_status(t["id"], "claimed", allowed_from=("claimed",), base_commit=base)
+    partner = claim(mk(branch="task/partner"))
+    tk.set_status(partner["id"], "done", allowed_from=("claimed",))
+    found = dp.delivered_by_partner(repo, tk.load_ticket(t["id"]), tk.list_tickets())
+    assert found and found["id"] == partner["id"]
+
+
 def test_no_new_commits_alone_is_not_delivered(shipping, env):
     """A branch with nothing of its own, and no merged partner, is left to finish-task."""
     repo, t, log = shipping
