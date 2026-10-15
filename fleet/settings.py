@@ -39,6 +39,11 @@ DEFAULTS = {
     # A ship that sees no output from the merge script for this many seconds (it is waiting at a
     # prompt) is cancelled and pinged (0 turns it off).
     "ship_prompt_timeout_s": 900,
+    # Wall-clock limit for each other step of a ship (review.sh, the gate) and for the merge
+    # script as a whole (0 turns it off). A step past it is stopped and pinged.
+    "ship_step_timeout_s": 3600,
+    # A ship's reservation older than this many seconds no longer blocks the ticket (0 = no limit).
+    "ship_reservation_max_age_s": 14400,
     # Where things live
     "projects_dir": "~/projects",
     "research_dir": "~/fleet-research",
@@ -180,6 +185,9 @@ def _merge(settings: dict, given, path: Path) -> None:
     if "ship_prompt_timeout_s" in given:
         settings["ship_prompt_timeout_s"] = _whole(path, given, "ship_prompt_timeout_s", 0,
                                                    "0 or more (0 turns it off)")
+    for key in ("ship_step_timeout_s", "ship_reservation_max_age_s"):
+        if key in given:
+            settings[key] = _whole(path, given, key, 0, "0 or more (0 turns it off)")
     for key in ("projects_dir", "research_dir", "herdr_workspace"):
         if key in given:
             if not isinstance(given[key], str) or not given[key].strip():
