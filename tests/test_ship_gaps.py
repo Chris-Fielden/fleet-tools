@@ -117,6 +117,19 @@ def test_a_stacked_ticket_whose_partner_merged_is_closed_as_delivered(shipping, 
     assert "already delivered" in capsys.readouterr().out
 
 
+def test_the_terminal_path_closes_a_delivered_ticket_before_any_review_gate(shipping, env, capsys):
+    from fleet.ship_cli import _prepare_detached
+    repo, t, log = shipping
+    base = _stack(repo)
+    tk.set_status(t["id"], "review", allowed_from=("claimed",), base_commit=base)
+    partner = claim(mk(branch="task/partner"))
+    tk.set_status(partner["id"], "done", allowed_from=("claimed",))
+    assert _prepare_detached(tk.load_ticket(t["id"])) == 0     # no reviews exist: it must not ask for them
+    assert tk.load_ticket(t["id"])["status"] == "done"
+    assert prep.shipping_ids() == set()
+    assert "already delivered" in capsys.readouterr().out
+
+
 def test_delivery_is_found_after_finish_task_deleted_the_partners_branch(shipping, env):
     repo, t, log = shipping
     base = _stack(repo)

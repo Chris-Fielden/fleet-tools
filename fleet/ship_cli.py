@@ -520,14 +520,9 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, pre
         return resolved
     repo, branch, name, script, settings = resolved
 
-    # A stacked ticket whose commits reached main through its partner has nothing left to merge:
-    # finish-task would refuse it for having no new commits. Close it as delivered instead.
-    try:
-        partner = dp.delivered_by_partner(repo, t, tk.list_tickets())
-    except (OSError, tk.TicketError, tk.TicketInvalid):
-        partner = None
-    if partner is not None:
-        return _close_delivered(t, partner, repo, settings)
+    delivered = _delivered(t, repo, settings)
+    if delivered is not None:
+        return delivered
 
     answer = None
     if preset:
@@ -713,6 +708,18 @@ def _stop_agent(t: dict, settings: dict) -> tuple[bool, str]:
         except OSError:
             pass
     return ok, why
+
+
+def _delivered(t: dict, repo: Path, settings: dict) -> int | None:
+    """A stacked ticket whose commits reached main through its partner has nothing left to merge
+    (finish-task would refuse it for having no new commits, and no review of it is needed: the
+    partner's reviewed merge delivered the commits). Closes it as delivered and returns 0; None
+    when it is not delivered. Used by both the terminal and the unattended paths, before any gate."""
+    try:
+        partner = dp.delivered_by_partner(repo, t, tk.list_tickets())
+    except (OSError, tk.TicketError, tk.TicketInvalid):
+        return None
+    return None if partner is None else _close_delivered(t, partner, repo, settings)
 
 
 def _close_delivered(t: dict, partner: dict, repo: Path, settings: dict) -> int:
@@ -913,7 +920,10 @@ def _prepare_detached(t: dict) -> tuple[str, str] | int:
         resolved = _resolve(t)
         if isinstance(resolved, int):
             return resolved
-        repo, branch, name, script, _ = resolved
+        repo, branch, name, script, settings = resolved
+        delivered = _delivered(t, repo, settings)   # before the review gate: nothing is left to merge
+        if delivered is not None:
+            return delivered
         problem = _review_if_needed(repo, name, branch, script, t)
         if problem:
             return _fail(problem)
@@ -1018,8 +1028,9 @@ class _Tee:
         self._stream, self._log = stream, log
 
     def write(self, text):
-        self._log.write(text)
-        self._log.flush()
+        with contextlib.suppress(OSError):   # a full disk must not stop the ship
+            self._log.write(text)
+            self._log.flush()
         return self._stream.write(text)
 
     def __getattr__(self, name):
