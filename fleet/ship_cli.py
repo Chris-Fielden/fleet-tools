@@ -71,19 +71,40 @@ def _step_timeout() -> int | None:
         return 3600
 
 
+def _run_group(argv: list[str], timeout: int | None, **kw) -> subprocess.CompletedProcess:
+    """subprocess.run in its own session: past `timeout` the whole process group is killed (not
+    just the direct child) and TimeoutExpired is raised."""
+    with subprocess.Popen(argv, start_new_session=True, **kw) as proc:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except BaseException as exc:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            if isinstance(exc, subprocess.TimeoutExpired):
+                raise subprocess.TimeoutExpired(argv, timeout) from None
+            raise
+        return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
 def _gate(repo: Path, wt: Path, branch: str, *fields: str, env: dict | None = None) -> subprocess.CompletedProcess:
-    """`ticket gate` the way the merge script calls it: the exact same gate."""
+    """`ticket gate` the way the merge script calls it: the exact same gate. One that hangs is
+    killed, the human is pinged once, and it comes back as a failed run (exit 124) saying so."""
     ticket = Path(__file__).resolve().parent.parent / "bin" / "ticket"
     base = dp.main_branch(repo) or "main"
     limit = _step_timeout()
     try:
-        return subprocess.run(
+        return _run_group(
             [sys.executable, str(ticket), "gate", "--base", base, "--branch", branch, "--dir", str(repo),
              "--worktree", str(wt), "--repo", repo.name,
-             *(["--ticket", _ship_ticket] if _ship_ticket else []), *fields], capture_output=True, text=True,
-            env=env, timeout=limit)
-    except subprocess.TimeoutExpired:   # a failed gate run that says why
-        return subprocess.CompletedProcess([], 124, "", f"ticket gate timed out after {limit}s")
+             *(["--ticket", _ship_ticket] if _ship_ticket else []), *fields], limit,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    except subprocess.TimeoutExpired:
+        message = f"ticket gate timed out after {limit}s"
+        if _ship_ticket:
+            with contextlib.suppress(tk.TicketError, tk.TicketInvalid):
+                _needs_human(tk.load_ticket(_ship_ticket), message)
+        return subprocess.CompletedProcess([], 124, "", message)
 
 
 def _confirm(question: str) -> bool:
@@ -176,7 +197,7 @@ def _review_if_needed(repo: Path, name: str, branch: str, script: Path, t: dict 
             return None
     env.setdefault("FLEET_TICKET", str(Path(__file__).resolve().parent.parent / "bin" / "ticket"))
     try:
-        done = subprocess.run(["bash", str(review)], cwd=wt, env=env, timeout=_step_timeout())
+        done = _run_group(["bash", str(review)], _step_timeout(), cwd=wt, env=env)
     except OSError as exc:
         return f"could not run {review}: {exc}"
     except subprocess.TimeoutExpired:
@@ -516,7 +537,13 @@ def _run_script(argv: list[str], cwd: Path, env: dict, answer: str | None, idle_
                 idle = idle_s
                 stop()
                 break
-        proc.wait()   # only reached once the script has closed its output or been stopped
+        try:   # reached once the script closed its output: the wall-clock limit still applies
+            left = None if not wall_s else max(0.0, began + wall_s - time.monotonic())
+            proc.wait(timeout=left)
+        except subprocess.TimeoutExpired:
+            idle = -wall_s
+            stop()
+            proc.wait()
         return proc.returncode, idle
     except BaseException:
         stop()

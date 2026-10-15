@@ -43,7 +43,7 @@ DEFAULTS = {
     # script as a whole (0 turns it off). A step past it is stopped and pinged.
     "ship_step_timeout_s": 3600,
     # A ship's reservation older than this many seconds no longer blocks the ticket (0 = no limit).
-    "ship_reservation_max_age_s": 7200,
+    "ship_reservation_max_age_s": 14400,
     # Where things live
     "projects_dir": "~/projects",
     "research_dir": "~/fleet-research",

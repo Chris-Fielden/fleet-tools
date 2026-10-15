@@ -260,22 +260,42 @@ def test_a_merge_that_keeps_talking_but_never_ends_is_stopped_and_pinged(shippin
     assert [p[1] for p in pings] == ["needs_human"]
 
 
-def test_a_hung_gate_comes_back_as_a_failed_run(projects, env, monkeypatch):
+def test_a_hung_gate_comes_back_as_a_failed_run_and_pings_once(projects, env, monkeypatch, pings):
     import subprocess
 
     from fleet import ship_cli
     _settings(env, ship_step_timeout_s=7)
+    t = mk()
+    monkeypatch.setattr(ship_cli, "_ship_ticket", t["id"])
+    seen = []
 
-    real = subprocess.run
-
-    def hang(*a, **kw):
-        if "gate" not in a[0]:
-            return real(*a, **kw)
-        assert kw["timeout"] == 7
-        raise subprocess.TimeoutExpired(a[0], kw["timeout"])
-    monkeypatch.setattr(ship_cli.subprocess, "run", hang)
+    def hang(argv, timeout, **kw):
+        seen.append(timeout)
+        raise subprocess.TimeoutExpired(argv, timeout)
+    monkeypatch.setattr(ship_cli, "_run_group", hang)
     done = ship_cli._gate(projects / "x", projects / "x", "task/x")
-    assert done.returncode == 124 and "timed out after 7s" in done.stderr
+    assert seen == [7] and done.returncode == 124 and "timed out after 7s" in done.stderr
+    assert [p[1] for p in pings] == ["needs_human"]
+
+
+def test_a_timed_out_step_kills_its_grandchildren(tmp_path):
+    import os
+    import subprocess
+
+    from fleet import ship_cli
+    pidfile = tmp_path / "pid"
+    with pytest.raises(subprocess.TimeoutExpired):
+        ship_cli._run_group(["bash", "-c", f"sleep 300 & echo $! > {pidfile}; wait"], 1,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    child = int(pidfile.read_text())
+    for _ in range(50):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("the grandchild is still running")
 
 
 def test_step_timeouts_are_settings(projects, env):
@@ -307,6 +327,6 @@ def test_an_old_reservation_expires_and_a_fresh_one_is_honoured(projects, env):
     _settings(env, ship_reservation_max_age_s=60)
     _hold("BD-1", pid=os.getpid(), cmd=me, at=time.time() - 3600)
     assert prep.shipping_ids() == set()
-    _hold("BD-1", pid=1, cmd=prep._cmdline(1), at=time.time() - 10)
+    _hold("BD-1", pid=os.getppid(), cmd=prep._cmdline(os.getppid()), at=time.time() - 10)
     assert prep.shipping_ids() == {"BD-1"}
     assert prep.reserve_shipping("BD-1") == "BD-1 is already being shipped"

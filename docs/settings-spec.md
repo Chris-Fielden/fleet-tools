@@ -23,7 +23,7 @@ with a plain message.
 | `prep_pass_gap_hours` | `4` | from `prep_time` on, at most one prep pass starts per this many hours; 0 turns it off |
 | `ship_prompt_timeout_s` | `900` | a merge that prints nothing for this many seconds (it is waiting at a prompt) is cancelled cleanly, its reservation freed, and one needs-human ping sent; 0 turns it off |
 | `ship_step_timeout_s` | `3600` | wall-clock limit for the merge script as a whole, for `review.sh` and for each `ticket gate` run of a ship; one past it is stopped and a needs-human ping sent; 0 turns it off |
-| `ship_reservation_max_age_s` | `7200` | a ship's reservation older than this, or whose pid now runs a different command, no longer blocks its ticket; 0 turns the age limit off |
+| `ship_reservation_max_age_s` | `14400` | a ship's reservation older than this, or whose pid now runs a different command, no longer blocks its ticket; 0 turns the age limit off |
 | `projects_dir` | `~/projects` | a ticket's repo is `<projects_dir>/<repo>` |
 | `research_dir` | `~/fleet-research` | folder for read-only research agents |
 | `herdr_workspace` | `fleet` | herdr workspace agents are launched in |

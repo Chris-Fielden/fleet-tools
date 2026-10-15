@@ -182,7 +182,7 @@ def _max_age() -> int:
     try:
         return int(dp.load_settings().get("ship_reservation_max_age_s", 0))
     except Exception:   # a bad settings file must not make every reservation vanish
-        return 7200
+        return 14400
 
 
 def _holds(r: dict) -> bool:
