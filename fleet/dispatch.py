@@ -629,8 +629,9 @@ def delivered_by_partner(repo: Path, t: dict, tickets: list[dict]) -> dict | Non
     ticket, or None. Never decided on "no new commits" alone. All of these must hold: the branch
     has commits of its own past the ticket's base commit; its tip is already in main; and some
     other ticket of the repo (not itself) has its own `Merge <branch>` in main whose merged side
-    contains this branch's tip (it was stacked on this one). The partner's branch itself may be
-    gone: finish-task deletes it after the merge."""
+    contains this branch's tip and whose main side did not (the merge is what brought it in: it
+    was stacked on this one). The partner's branch itself may be gone: finish-task deletes it
+    after the merge."""
     main, base = main_branch(repo), t.get("base_commit")
     if main is None or not base or not t.get("branch"):
         return None
@@ -651,7 +652,13 @@ def delivered_by_partner(repo: Path, t: dict, tickets: list[dict]) -> dict | Non
                 or other["branch"] == t["branch"]:
             continue
         merge = merge_commit(repo, other["branch"], other.get("base_commit"))
-        if merge and _git(repo, "merge-base", "--is-ancestor", mine, f"{merge}^2").returncode == 0:
+        if not merge:
+            continue
+        # The partner's merge must be what brought the tip into main: on its merged side and not
+        # already on the main side (a branch that merely caught up with main has commits of no one's).
+        on_merged_side = _git(repo, "merge-base", "--is-ancestor", mine, f"{merge}^2").returncode == 0
+        already_in_main = _git(repo, "merge-base", "--is-ancestor", mine, f"{merge}^1").returncode == 0
+        if on_merged_side and not already_in_main:
             return other
     return None
 

@@ -137,6 +137,30 @@ def test_no_new_commits_alone_is_not_delivered(shipping, env):
     assert dp.delivered_by_partner(repo, tk.load_ticket(other["id"]), tk.list_tickets()) is None
 
 
+def test_a_branch_that_only_caught_up_with_main_is_not_delivered(shipping, env):
+    """A branch fast-forwarded onto main before any commit of its own is not 'delivered' by a
+    partner that later branched from main."""
+    repo, t, log = shipping
+    base = git(repo, "rev-parse", "main").strip()
+    git(repo, "checkout", "-q", "-b", "task/fresh", "main")
+    (repo / "m.txt").write_text("m")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "main moved")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "-q", "--ff-only", "task/fresh")   # main now has the commit; the branch is at main
+    git(repo, "checkout", "-q", "-b", "task/partner2", "main")
+    (repo / "p2.txt").write_text("p")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "p2")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "-c", "user.name=T", "-c", "user.email=t@example.com", "merge", "-q", "--no-ff",
+        "task/partner2", "-m", "Merge task/partner2")
+    mine = claim(mk(branch="task/fresh"))
+    tk.set_status(mine["id"], "claimed", allowed_from=("claimed",), base_commit=base)
+    claim(mk(branch="task/partner2"))
+    assert dp.delivered_by_partner(repo, tk.load_ticket(mine["id"]), tk.list_tickets()) is None
+
+
 def test_an_unmerged_partner_does_not_deliver(shipping, env):
     repo, t, log = shipping
     tk.set_status(t["id"], "claimed", allowed_from=("claimed",), base_commit=git(repo, "rev-parse", "main").strip())

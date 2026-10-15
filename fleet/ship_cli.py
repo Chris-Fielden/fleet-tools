@@ -1129,7 +1129,7 @@ def main(argv=None) -> int:
         problem = _reason_problem(args.reason)
         if problem:
             return _fail(problem)
-        return _ship_one(args.id, accept={"reason": args.reason.strip()})
+        return _ship_recorded(args.id, accept={"reason": args.reason.strip()})   # its log is then really written
     if args.status:
         if args.id or args.list or args.job:
             p.error("--status takes its ticket id and nothing else")
