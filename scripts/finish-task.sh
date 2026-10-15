@@ -12,7 +12,8 @@
 # Steps: re-run the checks in the task worktree, check the risk level and that
 # the exact commit has a PASS review (high risk: from both Codex and Claude),
 # show you what will be merged, ask for confirmation (high risk: you type the
-# ticket id), merge, re-run the checks on main, push (if there's a remote,
+# ticket id), merge, re-run the checks on main, tag the ship and add a
+# CHANGELOG.md entry (scripts/release-tag.sh), push (if there's a remote,
 # which is what ArgoCD watches), and remove the worktree.
 #
 # Emergency: --emergency "why" merges despite a missing or failing review. You
@@ -150,6 +151,7 @@ EMERGENCY OVERRIDE (risk $risk): $override_reason"
     "$branch" "$tip" "$risk" "${override_reason//$'\n'/ }" >> "$log"
   echo "Override logged to $log"
 fi
+pre_merge="$(git rev-parse HEAD)"
 git merge --no-ff "$tip" -m "$merge_msg"
 
 echo
@@ -162,7 +164,16 @@ if ! bash scripts/check.sh; then
 fi
 
 echo
-echo "== 5/5 Push and clean up"
+echo "== 5/5 Tag, push and clean up"
+# The known-good point: only reached once the checks on $base passed. An annotated tag and a
+# CHANGELOG.md entry naming the ticket, committed on $base so the push carries both.
+ship_title="$($ticket_cmd show "${ticket:-$name}" 2>/dev/null | awk 'NR==1{sub(/^[^ ]+[ ]+/,""); print}' || true)"
+if ! bash "$root/scripts/release-tag.sh" "${ticket:-$name}" "$ship_title"; then
+  echo
+  echo "Tagging FAILED after merging. Not pushed, so nothing was deployed."
+  echo "Undo with:  git reset --hard $pre_merge  (or fix it and run scripts/release-tag.sh by hand)"
+  exit 1
+fi
 # Only a repo with a k8s/ folder has anything for ArgoCD to deploy; say so only then.
 pushed_note() {
   if [[ -d k8s ]]; then
@@ -172,7 +183,7 @@ pushed_note() {
   fi
 }
 if git remote get-url origin >/dev/null 2>&1; then
-  git push origin "$base"
+  git push origin "$base" --follow-tags
   pushed_note "$base"
 else
   echo "No 'origin' remote, so nothing was pushed."
