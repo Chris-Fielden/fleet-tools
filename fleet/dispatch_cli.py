@@ -80,14 +80,44 @@ def _pull_board_priorities(emit, warn) -> None:
         kaneo.mirror_quietly(t, warn)
 
 
+STUCK_CYCLES = 3   # consecutive cycles a ticket is skipped before its one "stuck" ping
+_SENT = -1         # in _SKIP_RUNS: the ping went out; no repeat while the skip lasts
+_SKIP_RUNS: dict[str, int] = {}   # ticket id -> consecutive cycles skipped; in memory
+
+
+def _stuck_pings(tickets: list[dict], stuck: set, warn) -> None:
+    """One low ping per ticket whose reconcile skip persists for STUCK_CYCLES cycles; no repeat
+    while it lasts. A skip that clears forgets the ticket, so a return pings again. A ping
+    that could not be sent is tried again next cycle."""
+    for tid in [i for i in _SKIP_RUNS if i not in stuck]:
+        del _SKIP_RUNS[tid]
+    by_id = {t["id"]: t for t in tickets}
+    for tid in sorted(stuck):
+        n = _SKIP_RUNS.get(tid, 0)
+        if n == _SENT:
+            continue
+        n += 1
+        if n >= STUCK_CYCLES and notify.notify_quietly(
+                by_id.get(tid, {"id": tid}), "reconcile_stuck", warn,
+                "its branch could not be reconciled (see dispatch.log)"):
+            n = _SENT
+        _SKIP_RUNS[tid] = n
+
+
 def _reconcile(settings: dict, emit, warn) -> None:
     """Mark merged tickets done, then close the tab of each if its agent has
     stopped."""
-    for t in dp.reconcile(tk.list_tickets(), settings):
+    tickets = tk.list_tickets()
+    stuck: set = set()
+    for t in dp.reconcile(tickets, settings, stuck=stuck):
         emit(f"{t['id']}  done ({t['branch']} merged)")
         kaneo.mirror_quietly(t, warn)
         closed, reason = lc.close_finished_tab(t["id"], settings)
         emit(f"{t['id']}  tab {'closed' if closed else 'kept'}: {reason}")
+    try:
+        _stuck_pings(tickets, stuck, warn)
+    except Exception as exc:   # noqa: BLE001 - a ping problem never stops the cycle
+        warn(f"stuck ping: {type(exc).__name__}")
 
 
 def _cmd_reconcile(settings: dict) -> int:

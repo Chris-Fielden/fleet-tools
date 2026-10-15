@@ -663,15 +663,18 @@ def delivered_by_partner(repo: Path, t: dict, tickets: list[dict]) -> dict | Non
     return None
 
 
-def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None):
+def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None, stuck: set | None = None):
     """Set claimed (or in-review) tickets whose branch was merged to done; a stacked ticket whose
     commits arrived through its partner's merge is closed as delivered. Yields the changed
-    tickets."""
+    tickets. `stuck` (a set) collects the ids skipped for a reason that will not clear by
+    itself (no repo folder, a refused move); "not merged" is the normal state and not in it."""
     for t in sorted((t for t in tickets if t["status"] in ("claimed", "review") and t["type"] != "investigate"),
                     key=tk.oldest_first_key):
         repo = settings["projects_dir"] / t["repo"]
         if repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir():
             log("RECONCILE_SKIP", f"{t['id']} repo folder {repo} not found")
+            if stuck is not None:
+                stuck.add(t["id"])
             continue
         note = None
         if not is_merged(repo, t["branch"], t.get("base_commit")):
@@ -684,6 +687,8 @@ def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None):
             new = tk.set_status(t["id"], "done", allowed_from=("claimed", "review"), close_note=note)
         except tk.TicketError as exc:
             log("RECONCILE_SKIP", f"{t['id']} {exc}")
+            if stuck is not None:
+                stuck.add(t["id"])
             continue
         log("RECONCILE_DONE", f"{t['id']} {t['branch']} merged; ticket done")
         yield new
