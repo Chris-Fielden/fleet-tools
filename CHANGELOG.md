@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.15.2] - 2026-10-15
+
+### Changed
+
+- BD-108: Docs: rollback runbook (docs/rollback.md)
+
 ## [ship-2026.10.15.1] - 2026-10-15
 
 ### Changed
