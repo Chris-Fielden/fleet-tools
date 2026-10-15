@@ -400,8 +400,8 @@ def test_a_recorded_fail_alone_never_pings(rig, ntfy):
 
 def test_a_review_saved_but_not_recorded_pings_high_once(rig, ntfy):
     rig.review_file("Codex", "PASS", age=600)
-    rig.cycle()
-    rig.cycle(5)
+    for m in (0, 2, 4, 6):   # the ping goes out on the third sighting, once
+        rig.cycle(m)
     assert len(ntfy.requests) == 1
     title, message, header = sent(ntfy)[0]
     assert title == f"Review not recorded: {rig.id}" and header == "high" and "Codex" in message
@@ -424,7 +424,8 @@ def test_one_reviewer_recorded_and_the_other_not(rig, ntfy):
     rig.review_file("Codex", "PASS")
     rig.review_file("Claude", "PASS")
     rig.verdict("PASS", "Codex")
-    rig.cycle()
+    for m in (0, 2, 4):
+        rig.cycle(m)
     assert len(ntfy.requests) == 1 and "Claude" in sent(ntfy)[0][1]
 
 
@@ -433,7 +434,8 @@ def test_a_review_file_without_a_verdict_cannot_be_recorded(rig, ntfy):
     path = rig.wt / ".reviews" / "codex.md"
     path.write_text(f"Reviewer: Codex\nCommit: {rig.tip()}\n\nno verdict here\n")
     os.utime(path, (1, 1))
-    rig.cycle()
+    for m in (0, 2, 4):
+        rig.cycle(m)
     assert len(ntfy.requests) == 1 and "no verdict" in sent(ntfy)[0][1]
 
 
@@ -515,6 +517,8 @@ def test_an_unrecorded_review_is_noticed_on_a_ready_ticket(rig, ntfy):
     rig.finish()
     rig.review_file("Claude", "FAIL", age=600)   # saved after the recorded PASS, never recorded
     rig.cycle()
+    rig.cycle(2)
+    rig.cycle(4)
     titles = [t[0] for t in sent(ntfy)]
     assert f"{rig.id} ready to ship" in titles and f"Review not recorded: {rig.id}" in titles
 
@@ -525,9 +529,43 @@ def test_an_unrecorded_review_is_noticed_on_a_ticket_in_review(rig, ntfy):
     assert rig.get()["status"] == "review"
     rig.review_file("Claude", "FAIL", age=600)
     rig.cycle(5)
+    rig.cycle(6)
+    assert f"Review not recorded: {rig.id}" not in [t[0] for t in sent(ntfy)]
+    rig.cycle(7)
     assert [t[0] for t in sent(ntfy)][-1] == f"Review not recorded: {rig.id}"
     rig.cycle(10)
     assert len(ntfy.requests) == 2
+
+
+def _unrecorded(ntfy, rig):
+    return [t for t in sent(ntfy) if t[0] == f"Review not recorded: {rig.id}"]
+
+
+def test_an_unrecorded_ping_waits_for_n_cycles_and_a_restart_keeps_the_count(rig, ntfy):
+    rig.finish()
+    rig.review_file("Claude", "FAIL", age=600)
+    rig.cycle(1)
+    rig.cycle(2)
+    state = rw._load_state(rig.warnings.append)   # as after a restart
+    assert list(state["unrecorded_seen"].values()) == [2]
+    assert _unrecorded(ntfy, rig) == []
+    rig.cycle(3)
+    assert len(_unrecorded(ntfy, rig)) == 1
+    rig.cycle(4)
+    assert len(_unrecorded(ntfy, rig)) == 1
+
+
+def test_an_unrecorded_review_that_is_gone_before_n_cycles_never_pings(rig, ntfy):
+    rig.finish()
+    rig.review_file("Claude", "FAIL", age=600)
+    rig.cycle(1)
+    rig.cycle(2)
+    for f in (rig.wt / ".reviews").glob("*"):
+        f.unlink()
+    rig.cycle(3)
+    rig.cycle(4)
+    assert _unrecorded(ntfy, rig) == []
+    assert rw._load_state(rig.warnings.append)["unrecorded_seen"] == {}
 
 
 def test_a_ticket_in_review_is_never_called_stalled(rig, ntfy):
