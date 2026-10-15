@@ -11,6 +11,7 @@
     {"level": "high", "glob": "scripts/finish-task.sh"},
     {"level": "high", "glob": "scripts/review.sh"},
     {"level": "high", "glob": "scripts/new-task.sh"},
+    {"level": "high", "glob": "scripts/release-tag.sh"},
     {"level": "high", "contains": "secret"},
     {"level": "high", "contains": "auth"},
     {"level": "high", "contains": ".env"},
