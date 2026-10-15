@@ -37,6 +37,8 @@ from . import ticket as tk
 TOOLS_WORKSPACE = "fleet-tools"
 DISPATCH_TAB = "dispatch"
 UNIT_NAME = "fleet.service"
+HEARTBEAT_SERVICE = "fleet-heartbeat.service"
+HEARTBEAT_TIMER = "fleet-heartbeat.timer"
 LAUNCHER_NAME = "fleet.desktop"
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -538,6 +540,29 @@ def unit_text() -> str:
     return "\n".join(lines)
 
 
+def heartbeat_paths() -> list[Path]:
+    """The service file and the timer file of the heartbeat check."""
+    return [unit_path().with_name(HEARTBEAT_SERVICE), unit_path().with_name(HEARTBEAT_TIMER)]
+
+
+def heartbeat_service_text() -> str:
+    env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")}
+    if os.environ.get("FLEET_HOME"):
+        env["FLEET_HOME"] = os.environ["FLEET_HOME"]
+    exe = [sys.executable, str(ROOT / "bin" / "fleet"), "heartbeat-check"]
+    lines = ["[Unit]", "Description=Ping if the fleet dispatcher looks dead or stuck", "",
+             "[Service]", "Type=oneshot"]
+    lines += [f"Environment={_unit_quote(f'{k}={v}')}" for k, v in env.items()]
+    lines += ["ExecStart=" + " ".join(_unit_quote(w, True) for w in exe), ""]
+    return "\n".join(lines)
+
+
+def heartbeat_timer_text() -> str:
+    return ("[Unit]\nDescription=Run the fleet heartbeat check every 2 minutes\n\n"
+            "[Timer]\nOnBootSec=2min\nOnUnitActiveSec=2min\nAccuracySec=15s\n\n"
+            "[Install]\nWantedBy=timers.target\n")
+
+
 def _write(path: Path, text: str, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -567,10 +592,17 @@ def cmd_autostart(state: str) -> int:
         _systemctl("daemon-reload")
         _systemctl("enable", UNIT_NAME)
         print(f"autostart on: {path} enabled")
+        service_file, timer_file = heartbeat_paths()
+        _write(service_file, heartbeat_service_text())
+        _write(timer_file, heartbeat_timer_text())
+        _systemctl("daemon-reload")
+        _systemctl("enable", "--now", HEARTBEAT_TIMER)
+        print(f"heartbeat check every 2 min: {timer_file} enabled")
         if _linger_enabled(user):
             print("linger is already on, so the fleet starts at boot without a login")
         else:
-            print("To start at boot without a login, run this once (it needs sudo, so I do not run it):")
+            print("To start at boot, and keep the heartbeat timer firing, without a login, run this once "
+                  "(it needs sudo, so I do not run it):")
             print(f"  sudo loginctl enable-linger {user}")
         return 0
     if path.is_file():
@@ -580,6 +612,12 @@ def cmd_autostart(state: str) -> int:
         print(f"autostart off: {path} removed")
     else:
         print("autostart was already off")
+    if heartbeat_paths()[1].is_file():
+        _systemctl("disable", "--now", HEARTBEAT_TIMER)
+        for p in heartbeat_paths():
+            p.unlink(missing_ok=True)
+        _systemctl("daemon-reload")
+        print("heartbeat check timer removed")
     if _linger_enabled(user):
         print("linger is still on for your user; to turn it off too (only if nothing else needs it):")
         print(f"  sudo loginctl disable-linger {user}")

@@ -198,6 +198,19 @@ already running" message and exit 0.
   `last_error` (exception class name only) and `progress_at` (last cycle whose
   output changed). No ticket text goes in it. A checker outside the dispatcher
   reads this file.
+- **Heartbeat check.** `fleet heartbeat-check` (human only; `fleet/heartbeat_check.py`)
+  runs every 2 minutes from a `systemd --user` timer (`fleet-heartbeat.timer`)
+  that the boot-service `on` switch installs and the `off` switch removes. It sends the
+  high-priority `dispatcher_down` ping when heartbeat.json is missing or
+  unreadable, its pid is not a live `dispatch --watch`, `cycle_finished` is
+  older than 360 s (3x the watch interval), `consecutive_errors` >= 3, or
+  `open` tickets exist while `progress_at` is older than 30 min. Dedupe state is
+  `$FLEET_HOME/heartbeat-check.json`: first ping at once, a repeat after 30 min,
+  then hourly, and one "recovered" ping. A failed ping is retried on the next
+  run. If the checker itself raises, it pings that and exits 1 (the unit shows
+  failed). User timers only fire without a login when linger is on
+  (`loginctl enable-linger`; the boot-service switch prints the hint). Not covered: an off-box
+  dead-man switch, and automatic restart.
 - **Safety cap.** At most `max_launches_per_day` launches are attempted per local
   day (build, fix and investigation launches together). Each launch is counted
   and saved before it starts, so an interruption or a later error cannot leave
