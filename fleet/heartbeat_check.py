@@ -87,7 +87,7 @@ def find_problems(now: float) -> list[tuple[str, str]]:
         problems.append(("errors", f"{errors} cycles in a row failed (last error: {str(beat.get('last_error'))[:60]})"))
     progress = _parse(beat.get("progress_at"))
     if progress is not None and now - progress > STALL_SECONDS and _work_owed():
-        problems.append(("stalled", f"work is waiting but nothing has changed for {int((now - progress) // 60)} min"))
+        problems.append(("stalled", f"work is waiting but nothing has changed for {int((now - progress) // 60)} min (may be an intentional pause: usage governor, launch cap or dependencies)"))
     return problems
 
 
@@ -96,7 +96,13 @@ def _load_state() -> dict:
         data = json.loads((tk.fleet_home() / "heartbeat-check.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    alerts = data.get("alerts")
+    if (not isinstance(data.get("key"), str) or isinstance(alerts, bool) or not isinstance(alerts, int)
+            or isinstance(data.get("last_alert"), bool) or not isinstance(data.get("last_alert"), (int, float))):
+        return {}   # invalid persisted state: start over rather than crash
+    return data
 
 
 def _save_state(state: dict) -> None:
