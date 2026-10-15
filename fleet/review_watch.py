@@ -77,7 +77,7 @@ LAUNCH_FAILED_NOTE = "Launch attempt failed:"   # written by launch.launch_oncal
 LAUNCH_ATTEMPTS = 3       # failed launches of one on-call ticket before it is given up
 FAILURE_KEYS_KEPT = 500   # sent-keys of closed tickets' failure pings; the oldest go first
 READY_REMINDER_AFTER = 6 * 3600   # seconds a ticket sits ready (In Review) before its one reminder ping
-LEFTOVERS_PREFIX ="SHOULD FIX leftovers from"  # saved by `ticket review-result`, not a summary
+LEFTOVERS_PREFIX = "SHOULD FIX leftovers from"  # saved by `ticket review-result`, not a summary
 
 
 def state_path() -> Path:
@@ -1050,7 +1050,11 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
             _ready_ping(new, tip, settings, now, state, warn)
         except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
             warn(f"{new['id']}: {exc}")
-    _ready_reminders(tickets, state, now, warn)
+    try:   # the statuses _check_one just settled, not the snapshot taken before it
+        current = {t["id"]: t for t in tk.list_tickets()}
+        _ready_reminders([current[t["id"]] for t in tickets if t["id"] in current], state, now, warn)
+    except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+        warn(f"ready reminders: {exc}")
     try:
         _flag_stuck_oncall(settings, warn)
     except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
