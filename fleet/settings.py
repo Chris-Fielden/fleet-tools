@@ -62,6 +62,9 @@ DEFAULTS = {
     # FAIL verdicts on different commits before a claimed ticket is "going in
     # circles" and truly fails.
     "fail_rounds_threshold": 8,
+    # A saved review that is not on the ticket pings only when it is still unrecorded on this
+    # many dispatcher cycles (1 pings on first sight).
+    "unrecorded_ping_cycles": 3,
     # A claimed ticket's agent session whose context has passed this many tokens
     # at the end of a review round is replaced by a fresh one (0 turns it off).
     "fresh_session_tokens": 100000,
@@ -221,6 +224,8 @@ def _merge(settings: dict, given, path: Path) -> None:
         settings["fail_rounds_threshold"] = _whole(path, given, "fail_rounds_threshold", 1, "1 or more")
         if settings["fail_rounds_threshold"] > tk.FAIL_COMMITS_MAX:   # only that many FAIL commits are kept
             raise SettingsError(f"{path}: fail_rounds_threshold must be {tk.FAIL_COMMITS_MAX} or less")
+    if "unrecorded_ping_cycles" in given:
+        settings["unrecorded_ping_cycles"] = _whole(path, given, "unrecorded_ping_cycles", 1, "1 or more")
     if "fresh_session_tokens" in given:
         settings["fresh_session_tokens"] = _whole(path, given, "fresh_session_tokens", 0,
                                                   "0 or more (0 turns it off)")
