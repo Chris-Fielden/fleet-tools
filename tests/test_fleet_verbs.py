@@ -35,7 +35,7 @@ def test_help_lists_every_verb(capsys):
         usage_cli.main(["help"])
     out = capsys.readouterr().out
     for verb in ("ship", "ticket", "approve", "alert", "idea", "usage", "start", "stop", "restart",
-                 "status", "logs", "autostart", "ops", "help", "doctor", "launcher"):
+                 "status", "logs", "autostart", "ops", "help", "doctor", "launcher", "heartbeat-check"):
         assert any(line.split()[:1] == [verb] for line in out.splitlines()), verb
 
 
