@@ -565,11 +565,23 @@ def test_low_risk_needs_only_a_pass_and_a_y(task, repo):
     assert r.returncode == 0 and "Risk level: LOW" in r.stdout
 
 
-def test_n_cancels(task, repo):
-    commit_in(task, "docs/a.md")
+@pytest.mark.parametrize("path", ["docs/a.md", "fleet/x.py"])
+def test_below_high_risk_asks_nothing_even_with_a_no_on_stdin(task, repo, path):
+    commit_in(task, path)
     pass_review(task)
-    r = finish(repo, "n\n")
-    assert "Cancelled" in r.stdout and not merged(repo)
+    r = finish(repo, "n\n")  # nothing reads it: there is no y/N prompt any more
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "[y/N]" not in r.stdout and "no confirmation below high risk" in r.stdout
+    assert merged(repo)
+
+
+@pytest.mark.parametrize("path", ["docs/a.md", "fleet/x.py"])
+def test_below_high_risk_does_not_hang_on_closed_stdin(task, repo, path):
+    commit_in(task, path)
+    pass_review(task)
+    r = finish(repo, "")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert merged(repo)
 
 
 def test_review_of_an_older_commit_does_not_count(task, repo):

@@ -6,6 +6,10 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+### Changed
+
+- `ship` and the merge script no longer ask y/N below high risk (EM-31). The typed ticket id at high risk is unchanged.
+
 ## [ship-2026.10.15.4] - 2026-10-15
 
 ### Changed
