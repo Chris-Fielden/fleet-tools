@@ -309,7 +309,9 @@ def _unrecorded_pings(t: dict, repo: Path, tip: str, state: dict, now: datetime,
     """A review that was saved for this tip but never reached the ticket. The ping goes out only
     when the same commit and kind has been seen unrecorded on `cycles` cycles (the first sight
     counts as one and is logged as ALERT), so a record that is merely late never pings. The count
-    is kept in state, so a restart keeps it, and dropped as soon as the review is recorded."""
+    is kept in state, so a restart keeps it, and dropped as soon as the review is recorded.
+    It counts sightings, not strictly consecutive cycles: a cycle that exits early before
+    reaching here neither advances nor resets it."""
     tid, v = t["id"], t["verdict"]
     wt = repo / ".worktrees" / t["branch"].removeprefix("task/")
     seen, unrecorded = state["unrecorded_seen"], set()
