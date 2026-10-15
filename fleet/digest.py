@@ -53,19 +53,32 @@ def _log_events(since: datetime) -> list[tuple[datetime, str, str, str]]:
     return out
 
 
+def _moved_at(t: dict) -> datetime | None:
+    """When the ticket last changed status, as far as the store can tell. There is no
+    transition timestamp, so a ticket whose updated_at is its last note's time was last
+    touched by a note, not by a status change: no answer rather than a wrong one."""
+    notes = t.get("notes") or []
+    if notes and notes[-1].get("at") == t.get("updated_at"):
+        return None
+    return _parse(t.get("updated_at"))
+
+
 def _ticket_events(since: datetime) -> list[tuple[datetime, str, str, str]]:
+    try:
+        tickets = tk.list_tickets()
+    except (tk.TicketError, OSError):   # an unreadable ticket must not hide the log events
+        return []
     out = []
-    for t in tk.list_tickets():
-        updated = _parse(t.get("updated_at"))
+    for t in tickets:
+        moved = _moved_at(t)
         created = _parse(t.get("created_at"))
-        if t["status"] == "done" and updated and updated >= since:
-            out.append((updated, "shipped", t["id"], "ticket"))
-        elif t["status"] == "failed" and updated and updated >= since:
-            out.append((updated, "failed", t["id"], "ticket"))
+        if t["status"] == "done" and moved and moved >= since:
+            event = "investigated" if t["type"] == "investigate" else "shipped"
+            out.append((moved, event, t["id"], "ticket"))
+        elif t["status"] == "failed" and moved and moved >= since:
+            out.append((moved, "failed", t["id"], "ticket"))
         elif t["status"] == "proposed" and created and created >= since:
             out.append((created, "proposed", t["id"], "ticket"))
-        if t["type"] == "investigate" and t["status"] == "done" and updated and updated >= since:
-            out.append((updated, "investigated", t["id"], "ticket"))
     return out
 
 
