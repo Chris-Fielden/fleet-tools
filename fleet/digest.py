@@ -3,9 +3,9 @@
 Sends nothing and writes nothing. Two sources that already exist:
   * the PING_SENT / PING_FAILED lines of dispatch.log (written by notify.py), which
     carry a time, an event and a ticket id: the informational events listed in EVENTS;
-  * the ticket store: tickets that went done (shipped), failed, or were proposed or
-    finished as an investigation within the window, by their updated_at/created_at.
-The ping lines are the record of what was told to the human; the ticket store fills in
+  * the ticket store's transition log (transitions.jsonl): one record, written when a
+    ticket was proposed, shipped, investigated or failed, with its time.
+The ping lines are the record of what was told to the human; the transition log fills in
 what happened while notifications were off. Ids and event names only, never titles'
 bodies or notes. Standard library only.
 """
@@ -53,34 +53,14 @@ def _log_events(since: datetime) -> list[tuple[datetime, str, str, str]]:
     return out
 
 
-def _moved_at(t: dict) -> datetime | None:
-    """When the ticket last changed status, as far as the store can tell. There is no
-    transition timestamp, so a ticket whose updated_at is its last note's time was last
-    touched by a note, not by a status change: no answer rather than a wrong one."""
-    notes = t.get("notes") or []
-    if notes and notes[-1].get("at") == t.get("updated_at"):
-        return None
-    return _parse(t.get("updated_at"))
-
-
-def _ticket_events(since: datetime) -> list[tuple[datetime, str, str, str]]:
-    try:
-        tickets = tk.list_tickets()
-    except (tk.TicketError, OSError):   # an unreadable ticket must not hide the log events
-        return []
+def _transition_events(since: datetime) -> list[tuple[datetime, str, str, str]]:
+    """The ticket store's transition records inside the window. Only what the store wrote
+    when the status changed is read; nothing is inferred from a ticket's other fields."""
     out = []
-    for t in tickets:
-        moved = _moved_at(t)
-        created = _parse(t.get("created_at"))
-        if t["status"] == "done" and moved and moved >= since:
-            # Only build and fix tickets merge code; question and review tickets close without one.
-            event = {"investigate": "investigated", "build": "shipped", "fix": "shipped"}.get(t["type"])
-            if event:
-                out.append((moved, event, t["id"], "ticket"))
-        elif t["status"] == "failed" and moved and moved >= since:
-            out.append((moved, "failed", t["id"], "ticket"))
-        elif t["status"] == "proposed" and created and created >= since:
-            out.append((created, "proposed", t["id"], "ticket"))
+    for rec in tk.read_transitions():
+        when = _parse(rec["at"])
+        if when and when >= since and rec["kind"] in EVENTS:
+            out.append((when, rec["kind"], rec["ticket"], "ticket"))
     return out
 
 
@@ -91,7 +71,8 @@ def collect(now: datetime | None = None) -> list[tuple[datetime, str, str, str]]
     since = now - WINDOW
     events = _log_events(since)
     seen = {(e[1], e[2]) for e in events}
-    events += [e for e in _ticket_events(since) if (e[1], e[2]) not in seen]
+    events += [e for e in _transition_events(since) if (e[1], e[2]) not in seen]
+    events = [e for e in events if e[0] <= now]   # a stamp in the future is not "the last 24 hours"
     events.sort(key=lambda e: (e[0], e[1], e[2]))
     return events
 
