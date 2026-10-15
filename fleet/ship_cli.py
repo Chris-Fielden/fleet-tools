@@ -63,15 +63,27 @@ def _reconcile() -> int:
 _ship_ticket = ""   # the ticket this run ships: the gate checks it is on the branch and asks for its id
 
 
+def _step_timeout() -> int | None:
+    """Wall-clock seconds one step of a ship may take (None = no limit)."""
+    try:
+        return int(dp.load_settings().get("ship_step_timeout_s", 0)) or None
+    except Exception:
+        return 3600
+
+
 def _gate(repo: Path, wt: Path, branch: str, *fields: str, env: dict | None = None) -> subprocess.CompletedProcess:
     """`ticket gate` the way the merge script calls it: the exact same gate."""
     ticket = Path(__file__).resolve().parent.parent / "bin" / "ticket"
     base = dp.main_branch(repo) or "main"
-    return subprocess.run(
-        [sys.executable, str(ticket), "gate", "--base", base, "--branch", branch, "--dir", str(repo),
-         "--worktree", str(wt), "--repo", repo.name,
-         *(["--ticket", _ship_ticket] if _ship_ticket else []), *fields], capture_output=True, text=True,
-        env=env)
+    limit = _step_timeout()
+    try:
+        return subprocess.run(
+            [sys.executable, str(ticket), "gate", "--base", base, "--branch", branch, "--dir", str(repo),
+             "--worktree", str(wt), "--repo", repo.name,
+             *(["--ticket", _ship_ticket] if _ship_ticket else []), *fields], capture_output=True, text=True,
+            env=env, timeout=limit)
+    except subprocess.TimeoutExpired:   # a failed gate run that says why
+        return subprocess.CompletedProcess([], 124, "", f"ticket gate timed out after {limit}s")
 
 
 def _confirm(question: str) -> bool:
@@ -164,9 +176,14 @@ def _review_if_needed(repo: Path, name: str, branch: str, script: Path, t: dict 
             return None
     env.setdefault("FLEET_TICKET", str(Path(__file__).resolve().parent.parent / "bin" / "ticket"))
     try:
-        done = subprocess.run(["bash", str(review)], cwd=wt, env=env)
+        done = subprocess.run(["bash", str(review)], cwd=wt, env=env, timeout=_step_timeout())
     except OSError as exc:
         return f"could not run {review}: {exc}"
+    except subprocess.TimeoutExpired:
+        message = f"{review.name} timed out after {_step_timeout()}s; nothing was merged"
+        if t is not None:
+            _needs_human(t, message)
+        return message
     if done.returncode != 0:
         return f"the reviews of {branch} did not complete (exit {done.returncode}); nothing was merged"
     return None
@@ -447,7 +464,8 @@ def _resolve(t: dict):
     return repo, branch, name, script, settings
 
 
-def _run_script(argv: list[str], cwd: Path, env: dict, answer: str | None, idle_s: int) -> tuple[int, int]:
+def _run_script(argv: list[str], cwd: Path, env: dict, answer: str | None, idle_s: int,
+                wall_s: int | None = None) -> tuple[int, int]:
     """Run the merge script in its own session with its output piped through here (shown, and
     teed to the ticket's log). Returns (exit code, idle seconds): the second is non-zero when the
     script printed nothing for `idle_s` seconds (0 = no limit), i.e. it sat at a prompt; its whole
@@ -476,9 +494,13 @@ def _run_script(argv: list[str], cwd: Path, env: dict, answer: str | None, idle_
                 proc.stdin.write((answer + "\n").encode())
                 proc.stdin.close()
         fd = proc.stdout.fileno()
-        last = time.monotonic()
+        last = began = time.monotonic()
         idle = 0
         while True:
+            if wall_s and time.monotonic() - began >= wall_s:
+                idle = -wall_s   # negative: a wall-clock stop, otherwise handled like an idle one
+                stop()
+                break
             left = 1.0 if not idle_s else min(1.0, max(0.0, last + idle_s - time.monotonic()))
             ready, _, _ = select.select([fd], [], [], left)
             if ready:
@@ -578,14 +600,17 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, pre
         in_main_before = _in_main(repo, facts["tip"], main_name)
     try:
         returncode, idle = _run_script(["bash", str(script), name, "--ticket", t["id"]], repo, env,
-                                       answer, settings.get("ship_prompt_timeout_s", 0))
+                                       answer, settings.get("ship_prompt_timeout_s", 0),
+                                       settings.get("ship_step_timeout_s", 0) or None)
     except OSError as exc:
         return _fail(f"could not run {script}: {exc}")
     if idle:
         # No merge was under way when this run started (checked above), so a MERGE_HEAD is ours.
         if dp._git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
             dp._git(repo, "merge", "--abort")
-        message = (f"timed out at a prompt: {script.name} printed nothing for {idle}s, so it was stopped; "
+        what = (f"timed out at a prompt: {script.name} printed nothing for {idle}s" if idle > 0
+                else f"timed out: {script.name} ran longer than {-idle}s")
+        message = (f"{what}, so it was stopped; "
                    f"{t['id']} was not reconciled. Check `git log` in {repo}: a merge or push that finished "
                    "before the prompt stays; the reservation is released")
         _needs_human(t, message)
