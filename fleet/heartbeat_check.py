@@ -44,34 +44,36 @@ def _work_owed() -> bool:
     return any(t.get("status") == "open" for t in tk.list_tickets())
 
 
-def find_problems(now: float) -> list[str]:
-    """Reasons the dispatcher looks unhealthy; empty when it is fine."""
+def find_problems(now: float) -> list[tuple[str, str]]:
+    """(stable id, message) for each reason the dispatcher looks unhealthy; empty
+    when it is fine. Only the ids go in the dedupe key: messages carry ages and
+    counts that change on every run."""
     path = tk.fleet_home() / "heartbeat.json"
     try:
         beat = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return ["heartbeat.json is missing (the dispatcher never ran, or it was removed)"]
+        return [("missing", "heartbeat.json is missing (the dispatcher never ran, or it was removed)")]
     except (OSError, ValueError):
-        return ["heartbeat.json is unreadable"]
+        return [("unreadable", "heartbeat.json is unreadable")]
     if not isinstance(beat, dict):
-        return ["heartbeat.json is unreadable"]
-    problems: list[str] = []
+        return [("unreadable", "heartbeat.json is unreadable")]
+    problems: list[tuple[str, str]] = []
     pid = beat.get("pid")
     live = sv.dispatcher_pid()
     if not isinstance(pid, int) or live is None or live != pid:
-        problems.append("dispatch --watch is not running as the pid in heartbeat.json")
+        problems.append(("pid", "dispatch --watch is not running as the pid in heartbeat.json"))
     finished = _parse(beat.get("cycle_finished"))
     if finished is None:
         finished = _parse(beat.get("started_at"))   # no cycle has finished yet
     if finished is None or now - finished > STALE_CYCLE_SECONDS:
         age = "unknown" if finished is None else f"{int(now - finished)}s"
-        problems.append(f"no cycle has finished for {age} (limit {STALE_CYCLE_SECONDS}s)")
+        problems.append(("stale", f"no cycle has finished for {age} (limit {STALE_CYCLE_SECONDS}s)"))
     errors = beat.get("consecutive_errors")
     if isinstance(errors, int) and errors >= ERROR_STREAK:
-        problems.append(f"{errors} cycles in a row failed (last error: {str(beat.get('last_error'))[:60]})")
+        problems.append(("errors", f"{errors} cycles in a row failed (last error: {str(beat.get('last_error'))[:60]})"))
     progress = _parse(beat.get("progress_at"))
     if progress is not None and now - progress > STALL_SECONDS and _work_owed():
-        problems.append(f"work is waiting but nothing has changed for {int((now - progress) // 60)} min")
+        problems.append(("stalled", f"work is waiting but nothing has changed for {int((now - progress) // 60)} min"))
     return problems
 
 
@@ -105,12 +107,13 @@ def run(now: float | None = None) -> int:
     problems = find_problems(now)
     state = _load_state()
     if problems:
-        key = "|".join(sorted(p.split(" (")[0] for p in problems))
+        key = "|".join(sorted(i for i, _ in problems))
+        text = "; ".join(m for _, m in problems)
         if _due(state, key, now):
-            notify.send_alert("dispatcher_down", "Fleet dispatcher is unhealthy", "; ".join(problems))
+            notify.send_alert("dispatcher_down", "Fleet dispatcher is unhealthy", text)
             same = state.get("key") == key
             _save_state({"key": key, "last_alert": now, "alerts": state.get("alerts", 0) + 1 if same else 1})
-        print("heartbeat-check: " + "; ".join(problems))
+        print("heartbeat-check: " + text)
         return 1
     if state.get("key"):
         notify.send_alert("dispatcher_down", "Fleet dispatcher recovered", "The dispatcher heartbeat is healthy again.")

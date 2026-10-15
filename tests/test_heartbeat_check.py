@@ -103,6 +103,15 @@ def test_dedupe_repeat_then_hourly_then_recovery(rig):
     assert len(rig.sent) == 4                                 # one recovery ping only
 
 
+def test_changing_ages_and_counts_do_not_re_alert(rig, monkeypatch):
+    monkeypatch.setattr(hc, "_work_owed", lambda: True)
+    for i in range(5):
+        rig(cycle_finished=iso(NOW - 400), consecutive_errors=3 + i, last_error="OSError",
+            progress_at=iso(NOW - 31 * 60))
+        hc.run(NOW + i * 120)
+    assert len(rig.sent) == 1
+
+
 def test_a_failed_ping_is_retried_next_run(rig, monkeypatch):
     def boom(*a):
         raise notify.NotifyError("down")
