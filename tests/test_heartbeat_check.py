@@ -155,3 +155,15 @@ def test_timer_units_follow_autostart(env, monkeypatch, capsys):
     assert usage_cli.main(["autostart", "off"]) == 0
     assert not svc.exists() and not timer.exists()
     assert "disable --now fleet-heartbeat.timer" in (env / "FLEET_SYSTEMCTL.log").read_text()
+
+
+@pytest.mark.parametrize("bad", [
+    {"key": "stale", "last_alert": NOW - 10, "alerts": "x"},
+    {"key": ["stale"], "last_alert": NOW - 10, "alerts": 1},
+    {"key": "stale", "last_alert": "now", "alerts": 1},
+    ["not", "a", "dict"],
+])
+def test_invalid_persisted_state_is_reset_not_fatal(rig, env, bad):
+    (env / "fleet" / "heartbeat-check.json").write_text(json.dumps(bad))
+    assert hc.run(NOW) == 1
+    assert len(rig.sent) == 1 and rig.sent[0][1] == "Fleet dispatcher is unhealthy"
