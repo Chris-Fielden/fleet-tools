@@ -98,6 +98,8 @@ def bash(command, cwd, **kw):
     "bash -c 'fleet ticket close BD-1'",
     "sudo fleet start",
     "'fleet' ship BD-1",
+    "bash scripts/release-tag.sh BD-1 title",
+    "./scripts/release-tag.sh BD-1",
 ])
 def test_human_only_commands_blocked(tmp_path, command):
     reason = bash(command, tmp_path)
