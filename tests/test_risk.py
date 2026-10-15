@@ -343,7 +343,7 @@ def fake_tool(bindir, name, verdict="PASS"):
 def task(repo, env):
     """A throwaway repo with the real scripts, a task worktree with one commit."""
     (repo / "scripts").mkdir()
-    for s in ("review.sh", "finish-task.sh"):
+    for s in ("review.sh", "finish-task.sh", "release-tag.sh"):
         shutil.copy(SCRIPTS / s, repo / "scripts" / s)
     (repo / "scripts" / "check.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
     write(repo, ".gitignore", ".worktrees/\n.reviews/\n")
@@ -691,7 +691,7 @@ def test_emergency_override_is_loud_logged_and_still_needs_typing(task, repo, en
     assert merged(repo)
     log = (env / "fleet" / "override.log").read_text()
     assert "branch=task/demo" in log and "risk=high" in log and "reason=prod is down" in log
-    assert "EMERGENCY OVERRIDE (risk high): prod is down" in git(repo, "log", "-1", "--format=%B")
+    assert "EMERGENCY OVERRIDE (risk high): prod is down" in git(repo, "log", "-1", "--format=%B", "HEAD~1")   # HEAD is the release commit
 
 
 def test_emergency_flag_is_harmless_when_reviews_are_fine(task, repo):
