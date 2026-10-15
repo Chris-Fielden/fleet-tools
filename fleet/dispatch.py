@@ -615,8 +615,41 @@ def is_merged(repo: Path, branch: str, since: str | None = None) -> bool:
                for m in out.stdout.split("\0"))
 
 
+def delivered_by_partner(repo: Path, t: dict, tickets: list[dict]) -> dict | None:
+    """A stacked ticket whose commits reached main through another ticket's merge: the partner
+    ticket, or None. Never decided on "no new commits" alone. All of these must hold: the branch
+    has commits of its own past the ticket's base commit; its tip is already in main; and some
+    other ticket of the repo (not itself) has its own `Merge <branch>` in main and a branch whose
+    tip contains this branch's tip (it was stacked on this one)."""
+    main, base = main_branch(repo), t.get("base_commit")
+    if main is None or not base or not t.get("branch"):
+        return None
+
+    def tip(branch: str) -> str:
+        out = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}")
+        return out.stdout.strip() if out.returncode == 0 else ""
+
+    mine = tip(t["branch"])
+    if not mine or mine == base:
+        return None
+    if _git(repo, "merge-base", "--is-ancestor", base, mine).returncode != 0:
+        return None
+    if _git(repo, "merge-base", "--is-ancestor", mine, main).returncode != 0:
+        return None   # its commits are not all in main yet
+    for other in sorted(tickets, key=tk.oldest_first_key):
+        if other["id"] == t["id"] or other.get("repo") != t.get("repo") or not other.get("branch") \
+                or other["branch"] == t["branch"]:
+            continue
+        theirs = tip(other["branch"])
+        if (theirs and _git(repo, "merge-base", "--is-ancestor", mine, theirs).returncode == 0
+                and is_merged(repo, other["branch"], other.get("base_commit"))):
+            return other
+    return None
+
+
 def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None):
-    """Set claimed (or in-review) tickets whose branch was merged to done. Yields the changed
+    """Set claimed (or in-review) tickets whose branch was merged to done; a stacked ticket whose
+    commits arrived through its partner's merge is closed as delivered. Yields the changed
     tickets."""
     for t in sorted((t for t in tickets if t["status"] in ("claimed", "review") and t["type"] != "investigate"),
                     key=tk.oldest_first_key):
@@ -624,11 +657,15 @@ def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None):
         if repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir():
             log("RECONCILE_SKIP", f"{t['id']} repo folder {repo} not found")
             continue
+        note = None
         if not is_merged(repo, t["branch"], t.get("base_commit")):
-            log("RECONCILE_SKIP", f"{t['id']} {t['branch']} not merged")
-            continue
+            partner = delivered_by_partner(repo, t, tickets)
+            if partner is None:
+                log("RECONCILE_SKIP", f"{t['id']} {t['branch']} not merged")
+                continue
+            note = f"delivered: its commits are in {main_branch(repo) or 'main'} through {partner['id']} ({partner['branch']})"
         try:
-            new = tk.set_status(t["id"], "done", allowed_from=("claimed", "review"))
+            new = tk.set_status(t["id"], "done", allowed_from=("claimed", "review"), close_note=note)
         except tk.TicketError as exc:
             log("RECONCILE_SKIP", f"{t['id']} {exc}")
             continue

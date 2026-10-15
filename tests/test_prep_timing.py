@@ -113,7 +113,7 @@ def test_ship_list_reports_a_ticket_that_reached_review_after_the_list_was_writt
     captured = capsys.readouterr()
     assert log_lines(env, "finish") == ["one"]
     assert f"{late['id']} is in review but NOT on the ship list" in captured.err
-    assert "reached review after the list was written" in captured.err
+    assert "has not covered its current commit" in captured.err
     assert tk.load_ticket(late["id"])["status"] == "review"
 
 

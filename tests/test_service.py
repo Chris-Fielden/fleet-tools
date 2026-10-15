@@ -211,6 +211,8 @@ def test_status_ok_with_fake_tailscale(env, monkeypatch, capsys):
                   '{"/":{"Proxy":"http://127.0.0.1:8080"}}}}}\'\n')
     ts.chmod(0o755)
     monkeypatch.setenv("FLEET_TAILSCALE", str(ts))
+    (env / "world.json").write_text(json.dumps(
+        {"workspaces": [{"workspace_id": "w1", "label": "fleet"}], "tabs": [], "agents": []}))
     try:
         assert usage_cli.main(["status"]) == 0
     finally:

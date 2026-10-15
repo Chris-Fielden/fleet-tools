@@ -14,6 +14,8 @@ import getpass
 import json
 import os
 import re
+import select
+import signal
 import subprocess
 import sys
 import time
@@ -200,9 +202,23 @@ def _unattended_answer(repo: Path, wt: Path, branch: str, name: str, expect: str
     return word if risk == "high" else "y"
 
 
+_needs_human_sent = False   # this run already sent its needs-human ping: the result ping stays quiet
+
+
+def _needs_human(t: dict, detail: str) -> bool:
+    """The one needs-human ping of a stopped or stuck ship. Never raises."""
+    global _needs_human_sent
+    from . import notify
+    sent = notify.notify_quietly(t, "needs_human", detail=detail[:300])
+    _needs_human_sent = _needs_human_sent or sent
+    return sent
+
+
 def _ping_result(ticket_id: str, code: int) -> None:
     """The one ping of a web ship: shipped, or why not. Never raises."""
     from . import notify
+    if _needs_human_sent:
+        return
     try:
         t = tk.load_ticket(ticket_id)
     except (tk.TicketError, tk.TicketInvalid):
@@ -353,13 +369,23 @@ def _conflict_agent(repo: Path, t: dict, settings: dict) -> str | None:
 def _ship_one(ticket_id: str, in_list: bool = False, expect: str | None = None, preset=None,
               accept: dict | None = None) -> int:
     """Ship one ticket; prints what happened and returns the exit code. The ticket is reserved
-    for the whole run, so no prep or reconcile agent can start on its branch meanwhile."""
+    for the whole run, so no prep or reconcile agent can start on its branch meanwhile. The
+    per-ticket log path is printed at the start and again on any failure."""
     try:
         t = tk.load_ticket(ticket_id)
     except tk.TicketInvalid as exc:
         return _fail(f"unknown ticket ID: {exc}")
     except tk.TicketError as exc:
         return _fail(str(exc))
+    log = _job_files(t["id"])["log"]
+    print(f"ship: log: {log}")
+    code = _ship_reserving(t, in_list, expect, preset, accept)
+    if code != 0:
+        print(f"ship: log: {log}", file=sys.stderr)
+    return code
+
+
+def _ship_reserving(t: dict, in_list: bool, expect, preset, accept) -> int:
     try:
         problem = prep.reserve_shipping(t["id"])
     except OSError as exc:   # fail closed: an agent may be working on it
@@ -421,6 +447,58 @@ def _resolve(t: dict):
     return repo, branch, name, script, settings
 
 
+def _run_script(argv: list[str], cwd: Path, env: dict, answer: str | None, idle_s: int) -> tuple[int, int]:
+    """Run the merge script in its own session with its output piped through here (shown, and
+    teed to the ticket's log). Returns (exit code, idle seconds): the second is non-zero when the
+    script printed nothing for `idle_s` seconds (0 = no limit), i.e. it sat at a prompt; its whole
+    process group was then stopped. An idle limit, not a wall clock: slow checks keep talking."""
+    env = {**env, "PYTHONUNBUFFERED": "1"}
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE if answer else None,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+
+    def stop() -> None:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, sig)
+            try:
+                proc.wait(timeout=5)
+                return
+            except subprocess.TimeoutExpired:
+                pass
+
+    try:
+        if answer:
+            with contextlib.suppress(OSError):
+                proc.stdin.write((answer + "\n").encode())
+                proc.stdin.close()
+        fd = proc.stdout.fileno()
+        last = time.monotonic()
+        idle = 0
+        while True:
+            left = 1.0 if not idle_s else min(1.0, max(0.0, last + idle_s - time.monotonic()))
+            ready, _, _ = select.select([fd], [], [], left)
+            if ready:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                sys.stdout.write(chunk.decode(errors="replace"))
+                sys.stdout.flush()
+                last = time.monotonic()
+            elif proc.poll() is not None:
+                break   # the script is gone; a stray background process may still hold the pipe
+            elif idle_s and time.monotonic() - last >= idle_s:
+                idle = idle_s
+                stop()
+                break
+        proc.wait()
+        return proc.returncode, idle
+    except BaseException:
+        stop()
+        raise
+    finally:
+        proc.stdout.close()
+
+
 def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, preset=None,
                    accept: dict | None = None) -> int:
     try:
@@ -437,6 +515,15 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, pre
     if isinstance(resolved, int):
         return resolved
     repo, branch, name, script, settings = resolved
+
+    # A stacked ticket whose commits reached main through its partner has nothing left to merge:
+    # finish-task would refuse it for having no new commits. Close it as delivered instead.
+    try:
+        partner = dp.delivered_by_partner(repo, t, tk.list_tickets())
+    except (OSError, tk.TicketError, tk.TicketInvalid):
+        partner = None
+    if partner is not None:
+        return _close_delivered(t, partner, repo, settings)
 
     answer = None
     if preset:
@@ -491,10 +578,19 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, pre
         main_name = dp.main_branch(repo) or "main"
         in_main_before = _in_main(repo, facts["tip"], main_name)
     try:
-        done = subprocess.run(["bash", str(script), name, "--ticket", t["id"]], cwd=repo, env=env,
-                              input=answer + "\n" if answer else None, text=True)
+        returncode, idle = _run_script(["bash", str(script), name, "--ticket", t["id"]], repo, env,
+                                       answer, settings.get("ship_prompt_timeout_s", 0))
     except OSError as exc:
         return _fail(f"could not run {script}: {exc}")
+    if idle:
+        # No merge was under way when this run started (checked above), so a MERGE_HEAD is ours.
+        if dp._git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
+            dp._git(repo, "merge", "--abort")
+        message = (f"timed out at a prompt: {script.name} printed nothing for {idle}s, so it was stopped; "
+                   f"{t['id']} was not reconciled (check `git log` in {repo}); the reservation is released")
+        _needs_human(t, message)
+        return _fail(message)
+    done = subprocess.CompletedProcess([], returncode)
     if done.returncode != 0:
         if accept:
             # No merge was under way when this run started (checked above), so a MERGE_HEAD is ours.
@@ -593,6 +689,43 @@ def _keep_unmerged(wt: Path, ticket_id: str) -> str | None:
     return name
 
 
+def _stop_agent(t: dict, settings: dict) -> tuple[bool, str]:
+    """Stop the ticket's own agent (see launch.quiesce_agent). The herdr workspace is recreated
+    first when it is gone: without it the agent cannot be found and cleanup would refuse. When the
+    agent cannot be stopped, one needs-human ping is sent (not again for the same ticket)."""
+    try:
+        lc.ensure_workspace(settings["herdr_workspace"])
+    except (lc.LaunchError, OSError):
+        pass   # quiesce_agent reports what herdr cannot do
+    ok, why = lc.quiesce_agent(t["id"], settings)
+    lc._safe_log("AGENT_QUIESCED" if ok else "AGENT_QUIESCE_FAILED", f"{t['id']} {why}")
+    if not ok:
+        mark = _job_files(t["id"])["dir"] / f"{t['id']}.stop-ping"
+        try:
+            if not mark.exists() and _needs_human(t, f"merged, but its agent could not be stopped: {why}"):
+                mark.parent.mkdir(parents=True, exist_ok=True)
+                mark.write_text(why)
+        except OSError:
+            pass
+    return ok, why
+
+
+def _close_delivered(t: dict, partner: dict, repo: Path, settings: dict) -> int:
+    """Close a stacked ticket as delivered: its commits are in main through `partner`'s merge."""
+    base = dp.main_branch(repo) or "main"
+    note = (f"delivered: its commits are in {base} through {partner['id']} ({partner['branch']}), "
+            "which was merged; nothing left to merge")
+    try:
+        tk.set_status(t["id"], "done", allowed_from=("claimed", "review"), close_note=note)
+    except tk.TicketError as exc:
+        return _fail(f"{t['id']} is delivered through {partner['id']}, but could not be closed: {exc}")
+    dp.log("RECONCILE_DONE", f"{t['id']} {t['branch']} delivered through {partner['id']}; ticket done")
+    ok, why = _stop_agent(t, settings)
+    _say(f"{t['id']} was already delivered through {partner['id']}; closed as done"
+         + ("" if ok else f" (its agent could not be stopped: {why}; a ping was sent)"))
+    return 0
+
+
 def _quiesce(ticket_id: str) -> int:
     """Stop the merged ticket's agent and close its tab, then save leftover edits. Idempotent.
     Only ever acts on a ticket whose branch is merged, and only on that ticket's own agent."""
@@ -607,8 +740,7 @@ def _quiesce(ticket_id: str) -> int:
         return _fail(f"cannot quiesce {t['id']}: no repo folder or task branch")
     if not dp.is_merged(repo, branch, t.get("base_commit")):
         return _fail(f"{t['id']} is not merged; its agent is left alone")
-    ok, why = lc.quiesce_agent(t["id"], settings)
-    lc._safe_log("AGENT_QUIESCED" if ok else "AGENT_QUIESCE_FAILED", f"{t['id']} {why}")
+    ok, why = _stop_agent(t, settings)
     if not ok:
         return _fail(f"{t['id']} merged, but its agent could not be stopped ({why}); "
                      "its worktree is left as it is")
@@ -627,65 +759,94 @@ def _quiesce(ticket_id: str) -> int:
     return 0
 
 
+def _list_members(settings: dict) -> tuple[list[dict], list[dict]]:
+    """(tickets to ship, review tickets that are not ready), rebuilt from the tickets now in
+    review each run: a ticket is ready when the prep pass covered it at its current tip. The saved
+    list file is only a hint for the order (and the annotations), never for membership."""
+    covered = prep.covered_keys()
+    saved = {i: n for n, (i, _) in enumerate(prep.read_list())}
+    ready, waiting = [], []
+    for t in prep.review_tickets(tk.list_tickets()):   # oldest first
+        tip = prep.tip_of(settings["projects_dir"] / str(t.get("repo")), str(t.get("branch")))
+        (ready if tip and f"{t['id']}:{tip}" in covered else waiting).append(t)
+    ready.sort(key=lambda t: saved.get(t["id"], len(saved)))   # the prep pass's order first; stable
+    return ready, waiting
+
+
 def _ship_list() -> int:
-    """Show the ship list and ship each ticket in order, with the merge script's own
-    confirmation for each. Stops at the first failure and says why."""
+    """Ship every ticket in review that the prep pass covered at its current tip, in order, with
+    the merge script's own confirmation for each. Stops at the first failure and says why."""
     try:
-        entries = prep.read_list()
-    except OSError as exc:
-        return _fail(f"cannot read the ship list: {exc}")
-    if not entries:
-        return _fail(f"there is no ship list ({prep.list_path()}); the prep pass writes it")
-    print("Ship list:")
-    for _, line in entries:
-        print(f"  {line}")
+        settings = dp.load_settings()
+        ready, waiting = _list_members(settings)
+        annotations = dict(prep.read_list())
+    except (OSError, dp.SettingsError, tk.TicketError, tk.TicketInvalid) as exc:
+        return _fail(f"cannot work out what to ship: {exc}")
     try:
         proposals = prep.read_proposals()
     except OSError:
         proposals = []
+    proposed = {i for i, _ in proposals}
+    reported = _report_not_ready(waiting, proposed, set())   # before anything ships
+    if not ready:
+        return _fail("nothing is ready to ship: no ticket in review has been through the prep pass "
+                     f"at its current commit ({prep.list_path()} is only written by that pass)")
+    print("Ship list:")
+    for t in ready:
+        print("  " + (annotations.get(t["id"]) or " | ".join([t["id"], t["title"], t.get("risk") or "-", "-", "-"])))
     if proposals:
         print("Proposed cancellations (duplicates; NOT done, and not shipped by this list):")
         for _, line in proposals:
             print(f"  {line}")
-    listed = {i for i, _ in entries} | {i for i, _ in proposals}
-    reported = _report_unlisted(listed, set())   # before anything ships, so a stop below cannot hide it
     shipped = 0
-    for n, (ticket_id, _) in enumerate(entries, 1):
+    for n, t in enumerate(ready, 1):
+        ticket_id = t["id"]
+        remaining = [r["id"] for r in ready[n - 1:]]
+
+        def stop(why: str) -> int:
+            return _fail(f"stopped at {ticket_id}: {why}; {shipped} shipped, "
+                         f"not shipped: {', '.join(remaining)}")
         try:
             status = tk.load_ticket(ticket_id)["status"]
         except (tk.TicketError, tk.TicketInvalid) as exc:
-            return _fail(f"stopped at {ticket_id}: {exc}")
+            return stop(str(exc))
         if status == "done":
             print(f"ship: {ticket_id} is already done; skipping")
             continue
-        print(f"\nship: {ticket_id} ({n} of {len(entries)})")
-        if _ship_one(ticket_id, in_list=True) != 0:
-            return _fail(f"stopped at {ticket_id}; the rest of the list was not shipped")
+        print(f"\nship: {ticket_id} ({n} of {len(ready)})")
+        try:
+            code = _ship_recorded(ticket_id, in_list=True)
+        except KeyboardInterrupt:
+            print()
+            return stop("interrupted")
+        except Exception as exc:   # nothing may end the list without saying why
+            return stop(f"unexpected {type(exc).__name__}: {exc}")
+        if code != 0:
+            return stop(_last_message or f"exit {code}")
         shipped += 1
     print(f"ship: the list is done ({shipped} shipped)")
-    _report_unlisted(listed, reported)
+    _report_not_ready(waiting, proposed, reported)
     return 0
 
 
-def _report_unlisted(listed: set[str], already: set[str]) -> set[str]:
-    """Say plainly which tickets are in review but were not on the list (they reached review after
-    it was written, e.g. bounced by the prep pass and back). They were not shipped: the list is
-    only what the prep pass reconciled, and a late ticket has not been reconciled against it."""
+def _report_not_ready(waiting: list[dict], proposed: set[str], already: set[str]) -> set[str]:
+    """Say plainly which tickets are in review but were not shipped because the prep pass has not
+    covered them at their current commit (new since, bounced and back, or the branch moved)."""
     try:
-        late = [t for t in prep.review_tickets(tk.list_tickets()) if t["id"] not in listed]
-        locked = prep.locked_ids() if late else set()
-    except (OSError, tk.TicketError, tk.TicketInvalid) as exc:
-        print(f"ship: could not check for tickets missing from the list ({exc})", file=sys.stderr)
+        locked = prep.locked_ids() if waiting else set()
+    except OSError as exc:
+        print(f"ship: could not check for tickets that are not ready ({exc})", file=sys.stderr)
         return already
-    for t in late:
-        if t["id"] in already:
+    for t in waiting:
+        if t["id"] in already or t["id"] in proposed:
             continue
         why = ("an agent is working on it now; wait for its ping" if t["id"] in locked else
-               "it reached review after the list was written, so it was not reconciled with the listed "
-               f"tickets; run `ship {t['id']}` (a conflict starts a reconcile agent) or wait for the next prep pass")
+               "the prep pass has not covered its current commit (not prepped, or the branch moved "
+               f"since), so it was not reconciled with the others; run `ship {t['id']}` (a conflict "
+               "starts a reconcile agent) or wait for the next prep pass")
         print(f"ship: {t['id']} is in review but NOT on the ship list, so it was not shipped: {why}",
               file=sys.stderr)
-    return already | {t["id"] for t in late}
+    return already | {t["id"] for t in waiting}
 
 
 # --- the detached ship: questions on the terminal, the rest in a background job ------------
@@ -822,18 +983,65 @@ def _ship_detached(ticket_id: str) -> int:
     return _follow(proc, files["log"], t["id"])
 
 
+def record_result(ticket_id: str, code: int, message: str) -> None:
+    """The result file `ship --status` reads, for any ship of the ticket (job, list or direct)."""
+    files = _job_files(ticket_id)
+    finished = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        files["dir"].mkdir(parents=True, exist_ok=True)
+        files["result"].write_text(json.dumps({"code": code, "message": message, "finished": finished}))
+    except OSError as exc:
+        print(f"ship: could not write the result file: {exc}", file=sys.stderr)
+
+
 def _run_job(ticket_id: str, tip: str, answer: str) -> int:
     """The detached job itself: checks, merge and push through finish-task with the answers
     already given, then the one phone ping and the result file `ship --status` reads."""
     code = _ship_one(ticket_id, preset=(answer, tip))
-    files = _job_files(ticket_id)
-    finished = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    try:
-        files["result"].write_text(json.dumps({"code": code, "message": _last_message, "finished": finished}))
-    except OSError as exc:
-        print(f"ship: could not write the result file: {exc}", file=sys.stderr)
+    record_result(ticket_id, code, _last_message)
     _ping_result(ticket_id, code)
     return code
+
+
+class _Tee:
+    """A stream that also writes to the ticket's log file."""
+
+    def __init__(self, stream, log):
+        self._stream, self._log = stream, log
+
+    def write(self, text):
+        self._log.write(text)
+        self._log.flush()
+        return self._stream.write(text)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _ship_recorded(ticket_id: str, **kw) -> int:
+    """_ship_one with what `ship --status` needs: the ticket's lock, its log (a copy of what is
+    printed) and its result file. For the list and the direct (no terminal) ship."""
+    global _last_message, _needs_human_sent
+    files = _job_files(ticket_id)
+    files["dir"].mkdir(parents=True, exist_ok=True)
+    with open(files["lock"], "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return _fail(f"{ticket_id} is already being shipped; `ship --status {ticket_id}` shows how far it got")
+        _last_message, _needs_human_sent = "", False
+        started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        files["result"].unlink(missing_ok=True)
+        out, err = sys.stdout, sys.stderr
+        with open(files["log"], "w") as log:
+            log.write(f"ship: {ticket_id} started {started}\n")
+            sys.stdout, sys.stderr = _Tee(out, log), _Tee(err, log)
+            try:
+                code = _ship_one(ticket_id, **kw)
+            finally:
+                sys.stdout, sys.stderr = out, err
+        record_result(ticket_id, code, _last_message)
+        return code
 
 
 def _status(ticket_id: str) -> int:
@@ -891,6 +1099,8 @@ def main(argv=None) -> int:
                         "still at COMMIT and the gate passes with the reviews already on file; "
                         "sends one phone ping with the result")
     args = p.parse_args(argv)
+    global _needs_human_sent
+    _needs_human_sent = False
     # Nothing ship runs (the merge script included) may stop at a pager: a detached ship sat at
     # `less (END)` overnight holding its reservation (EM-27).
     os.environ["GIT_PAGER"] = "cat"
@@ -937,7 +1147,7 @@ def main(argv=None) -> int:
         return _ship_list()
     if not args.expect and sys.stdin.isatty():
         return _ship_detached(args.id)   # no terminal: the old way, since nobody could be asked
-    code = _ship_one(args.id, expect=args.expect)
+    code = _ship_recorded(args.id, expect=args.expect)
     if args.expect:
         _ping_result(args.id, code)
     return code

@@ -85,7 +85,7 @@ def test_settings_wire_the_status_line():
 def test_snapshot_shape_estimate_then_real():
     s = status.snapshot(NOW)
     assert set(s) == {"generated_at", "tokens", "plan_usage", "governor", "agents_running", "ready_to_ship",
-                      "launches", "dispatch_alive", "kaneo_url"}
+                      "launches", "dispatch_alive", "herdr", "kaneo_url"}
     assert set(s["tokens"]["claude"]) == {"five_hour", "today", "week"}
     assert s["plan_usage"]["claude"]["estimate"] is True
     assert s["agents_running"] == [] and s["ready_to_ship"] == []

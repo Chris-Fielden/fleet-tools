@@ -36,6 +36,9 @@ DEFAULTS = {
     "prep_time": "06:00",
     # From prep_time on, at most one prep pass starts per this many hours (0 turns it off).
     "prep_pass_gap_hours": 4,
+    # A ship that sees no output from the merge script for this many seconds (it is waiting at a
+    # prompt) is cancelled and pinged (0 turns it off).
+    "ship_prompt_timeout_s": 900,
     # Where things live
     "projects_dir": "~/projects",
     "research_dir": "~/fleet-research",
@@ -174,6 +177,9 @@ def _merge(settings: dict, given, path: Path) -> None:
         settings["prep_time"] = value
     if "prep_pass_gap_hours" in given:
         settings["prep_pass_gap_hours"] = _whole(path, given, "prep_pass_gap_hours", 0, "0 or more (0 turns it off)")
+    if "ship_prompt_timeout_s" in given:
+        settings["ship_prompt_timeout_s"] = _whole(path, given, "ship_prompt_timeout_s", 0,
+                                                   "0 or more (0 turns it off)")
     for key in ("projects_dir", "research_dir", "herdr_workspace"):
         if key in given:
             if not isinstance(given[key], str) or not given[key].strip():

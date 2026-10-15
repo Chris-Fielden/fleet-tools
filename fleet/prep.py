@@ -803,6 +803,11 @@ def _line(t: dict, settings: dict, info: dict, folded: list[str], tickets: dict)
     return " | ".join([t["id"], clean(t["title"]), _branch_risk(t, settings), summary, "; ".join(extra) or "-"])
 
 
+def covered_keys() -> set[str]:
+    """The `id:tip` keys the prep pass has covered. Raises OSError when the state cannot be read."""
+    return {k for k in _load()["covered"] if isinstance(k, str)}
+
+
 def _covered(state: dict, settings: dict) -> list[str]:
     """Covered keys that still describe a ticket in review at that very tip."""
     now_review = {f"{t['id']}:{tip_of(_repo(t, settings), t['branch'])}" for t in review_tickets(tk.list_tickets())}
