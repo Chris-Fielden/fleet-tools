@@ -155,3 +155,10 @@ def test_timer_units_follow_autostart(env, monkeypatch, capsys):
     assert usage_cli.main(["autostart", "off"]) == 0
     assert not svc.exists() and not timer.exists()
     assert "disable --now fleet-heartbeat.timer" in (env / "FLEET_SYSTEMCTL.log").read_text()
+
+
+def test_limit_follows_the_recorded_watch_interval(rig):
+    rig(cycle_finished=iso(NOW - 1000), interval_seconds=600)
+    assert hc.run(NOW) == 0
+    rig(cycle_finished=iso(NOW - 1900), interval_seconds=600)
+    assert hc.run(NOW) == 1 and "limit 1800s" in rig.sent[-1][2]

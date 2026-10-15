@@ -386,7 +386,8 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None, reload=
     kept_tabs = lc.KeptTabs(clock.now)
     beat = {"pid": os.getpid(), "code_head": started_at, "started_at": tk._now(),
             "cycle_started": None, "cycle_finished": None, "cycles_ok": 0,
-            "consecutive_errors": 0, "last_error": None, "progress_at": tk._now()}
+            "consecutive_errors": 0, "last_error": None, "progress_at": tk._now(),
+            "interval_seconds": interval}
     _write_heartbeat(beat)
 
     def today() -> str:
@@ -410,6 +411,7 @@ def _cmd_watch(settings: dict, clock: dp.Clock | None = None, head=None, reload=
                 invalid = _reload_settings(settings, reload, invalid)
             interval, cap = settings["watch_interval_seconds"], settings["max_launches_per_day"]
             beat["cycle_started"] = tk._now()
+            beat["interval_seconds"] = interval
             failure = None
             try:
                 def checks(emit, warn, skip=frozenset()):

@@ -6,7 +6,8 @@ boot service). It reads $FLEET_HOME/heartbeat.json (written by `dispatch
 
 - the file is missing or unreadable;
 - its pid is dead, or is not a `dispatch --watch`;
-- the last finished cycle is older than 3x the watch interval (360s);
+- the last finished cycle is older than 3x the watch interval the dispatcher
+  recorded in the file (at least 360s);
 - 3 or more cycles in a row ended in an error;
 - tickets are waiting to launch (status `open`) but nothing has changed for 30 min.
 
@@ -65,9 +66,13 @@ def find_problems(now: float) -> list[tuple[str, str]]:
     finished = _parse(beat.get("cycle_finished"))
     if finished is None:
         finished = _parse(beat.get("started_at"))   # no cycle has finished yet
-    if finished is None or now - finished > STALE_CYCLE_SECONDS:
+    interval = beat.get("interval_seconds")
+    limit = STALE_CYCLE_SECONDS
+    if isinstance(interval, int) and not isinstance(interval, bool) and interval > 0:
+        limit = max(limit, 3 * interval)
+    if finished is None or now - finished > limit:
         age = "unknown" if finished is None else f"{int(now - finished)}s"
-        problems.append(("stale", f"no cycle has finished for {age} (limit {STALE_CYCLE_SECONDS}s)"))
+        problems.append(("stale", f"no cycle has finished for {age} (limit {limit}s)"))
     errors = beat.get("consecutive_errors")
     if isinstance(errors, int) and errors >= ERROR_STREAK:
         problems.append(("errors", f"{errors} cycles in a row failed (last error: {str(beat.get('last_error'))[:60]})"))
