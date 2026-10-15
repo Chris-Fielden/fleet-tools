@@ -18,8 +18,10 @@ echo "$*" >> "$RESTIC_REPOSITORY/calls.log"
 echo "pwfile=${RESTIC_PASSWORD_FILE:-} pw=${RESTIC_PASSWORD:+set}" >> "$RESTIC_REPOSITORY/calls.log"
 case "$1" in
   cat) test -f "$RESTIC_REPOSITORY/config" ;;
-  init) touch "$RESTIC_REPOSITORY/config" ;;
-  backup) n=$(ls -d "$RESTIC_REPOSITORY"/snap-* 2>/dev/null | wc -l)
+  init) test -n "$FAKE_FAIL_INIT" && exit 1
+        touch "$RESTIC_REPOSITORY/config" ;;
+  backup) test -n "$FAKE_FAIL_BACKUP" && exit 1
+          n=$(ls -d "$RESTIC_REPOSITORY"/snap-* 2>/dev/null | wc -l)
           mkdir "$RESTIC_REPOSITORY/snap-$n" && cp -R . "$RESTIC_REPOSITORY/snap-$n/" ;;
   *) exit 2 ;;
 esac
@@ -130,6 +132,32 @@ def test_missing_restic(setup):
     e["FLEET_RESTIC"] = "/no/such/restic"
     r = run(e)
     assert r.returncode != 0 and "restic is not installed" in r.stderr
+
+
+def test_relative_paths(setup, env):
+    e, repo, _ = setup
+    e["FLEET_BACKUP_REPO"] = "repo"
+    e["FLEET_BACKUP_PASSWORD_FILE"] = "./pw"
+    e["FLEET_RESTIC"] = "./restic"
+    r = subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True, env=e, cwd=env)
+    assert r.returncode == 0, r.stderr
+    assert (repo / "snap-0").is_dir()
+
+
+@pytest.mark.parametrize("var", ["FAKE_FAIL_INIT", "FAKE_FAIL_BACKUP"])
+def test_restic_failure_is_an_error_and_cleans_up(setup, env, var):
+    e, repo, _ = setup
+    tmp = env / "tmp"
+    tmp.mkdir()
+    e["TMPDIR"] = str(tmp)
+    e[var] = "1"
+    if var == "FAKE_FAIL_BACKUP":
+        repo.mkdir()
+        (repo / "config").write_text("")
+    r = run(e)
+    assert r.returncode != 0
+    assert "snapshot saved" not in r.stdout
+    assert list(tmp.iterdir()) == []
 
 
 @pytest.mark.skipif(shutil.which("restic") is None, reason="restic not installed")

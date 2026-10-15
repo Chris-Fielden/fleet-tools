@@ -25,18 +25,27 @@ restic_bin="${FLEET_RESTIC:-restic}"
 unit="${FLEET_BACKUP_UNIT:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/fleet.service}"
 
 command -v "$restic_bin" >/dev/null 2>&1 || die "restic is not installed ($restic_bin)"
+# Backup runs from a staging folder, so every local path must be absolute.
+if [[ "$restic_bin" == */* ]]; then
+  restic_bin="$(cd "$(dirname "$restic_bin")" 2>/dev/null && pwd -P)/$(basename "$restic_bin")"
+fi
 [[ -d "$fleet_home" ]] || die "fleet home not found: $fleet_home"
 fleet_home=$(cd "$fleet_home" && pwd -P)
 
 repo="${FLEET_BACKUP_REPO:-${RESTIC_REPOSITORY:-}}"
 [[ -n "$repo" ]] || die "set FLEET_BACKUP_REPO (or RESTIC_REPOSITORY) to a restic repository"
+# A repository without a scheme/host prefix (sftp:, s3:, rest:, ...) is a path.
+if [[ ! "$repo" =~ ^[A-Za-z][A-Za-z0-9+.-]+: && "$repo" != /* ]]; then
+  repo="$PWD/$repo"
+fi
 export RESTIC_REPOSITORY="$repo"
 
 pw_file="${FLEET_BACKUP_PASSWORD_FILE:-${RESTIC_PASSWORD_FILE:-}}"
 unset RESTIC_PASSWORD_FILE
 if [[ -n "$pw_file" ]]; then
   [[ -f "$pw_file" ]] || die "password file not found: $pw_file"
-  pw_real=$(cd "$(dirname "$pw_file")" && pwd -P)/$(basename "$pw_file")
+  pw_file=$(cd "$(dirname "$pw_file")" && pwd -P)/$(basename "$pw_file")
+  pw_real="$pw_file"
   case "$pw_real" in
     "$fleet_home"/*) die "password file must be outside the fleet home" ;;
   esac
