@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.15.4] - 2026-10-15
+
+### Changed
+
+- BD-112: Backup script: restic snapshot of fleet home with manifest
+
 ## [ship-2026.10.15.3] - 2026-10-15
 
 ### Changed
