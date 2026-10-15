@@ -83,6 +83,7 @@ def main(argv=None) -> int:
     lg.add_argument("-n", type=int, default=30, metavar="LINES", help="lines per log (default 30)")
     a = sub.add_parser("autostart", help="start the fleet at boot (a systemd --user service); default off")
     a.add_argument("state", choices=("on", "off"))
+    sub.add_parser("heartbeat-check", help="ping if dispatch --watch looks dead or stuck (run by a timer; human only)")
     la = sub.add_parser("launcher", help="install or remove the desktop launcher that runs fleet start")
     la.add_argument("state", choices=("on", "off"))
     args = p.parse_args(argv)
@@ -98,6 +99,9 @@ def main(argv=None) -> int:
         except (ValueError, OSError) as exc:
             print(f"fleet: {exc}", file=sys.stderr)
             return 1
+    if args.cmd == "heartbeat-check":
+        from . import heartbeat_check
+        return heartbeat_check.main()
     if args.cmd == "ops":
         try:
             return ops.cmd_ops()
