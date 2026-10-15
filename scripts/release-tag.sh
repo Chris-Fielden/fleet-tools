@@ -7,7 +7,8 @@
 # Tag scheme: ship-YYYY.MM.DD.N  (UTC date; N counts that day's ships from 1).
 # Not SemVer: a ship is a deploy point, not an API release, so there is no
 # honest major/minor/patch to pick. The date says when, N keeps ships on the
-# same day apart, and the tags sort in ship order: `git tag -l 'ship-*'`.
+# same day apart. List in ship order with `git tag -l --sort=version:refname 'ship-*'`
+# (plain name order puts .10 before .2).
 # Each tag is annotated with the ticket and the commit, and marks a known-good
 # point: roll back by deploying that tag or `git revert -m 1` the merge after it.
 #

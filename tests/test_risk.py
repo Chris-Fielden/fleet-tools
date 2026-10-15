@@ -31,6 +31,7 @@ def rules():
 @pytest.mark.parametrize("path", [
     "k8s/app/deploy.yaml", ".claude/settings.json", ".codex/config.toml", "CLAUDE.md", "AGENTS.md",
     "scripts/check.sh", "scripts/finish-task.sh", "scripts/review.sh", "scripts/new-task.sh",
+    "scripts/release-tag.sh",
     "fleet/secrets.py", "docs/secret-notes.md", "fleet/oauth.py", "src/Auth/login.py",
     ".env", "app/.env.example", "requirements.txt", "requirements-dev.txt", "svc/requirements.txt",
     "pyproject.toml", "web/package.json", "go.mod", "compose.yml",
