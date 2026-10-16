@@ -109,8 +109,9 @@ def _segments(command, ops_out=None):
     """Split a shell command into simple commands, as lists of words. Quotes
     are honoured, so 'dispatch' and "dispatch" count as dispatch, and a
     newline inside quotes stays part of the quoted text. If `ops_out` is a
-    list, one list per command is appended to it holding the operator (">",
-    ">>", "<", ...) of each redirection, in the order of the targets."""
+    list, one (operators, opens, closes) tuple per command is appended to it:
+    the operator (">", ">>", "<", ...) of each redirection in target order,
+    and how many ( and ) came between the previous command and this one."""
     command = command.replace("`", " ; ").replace("$(", " ; ( ")
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|(){}<>\n")
     lexer.whitespace = " \t\r"
@@ -118,6 +119,7 @@ def _segments(command, ops_out=None):
     out, current, redirects, ops = [], [], [], []
     pending_target = False
     pending_op = ""
+    opens = closes = 0
     for tok in lexer:
         # A redirection (> file, 2>> log, < in) can sit anywhere, even before
         # the program name. Its target still gets the path checks, but it is
@@ -140,14 +142,17 @@ def _segments(command, ops_out=None):
             if current or redirects:
                 out.append(current + ([REDIRECT_MARK] + redirects if redirects else []))
                 if ops_out is not None:
-                    ops_out.append(ops)
+                    ops_out.append((ops, opens, closes))
+                opens = closes = 0
             current, redirects, ops = [], [], []
+            opens += tok.count("(")
+            closes += tok.count(")")
         else:
             current.append(tok)
     if current or redirects:
         out.append(current + ([REDIRECT_MARK] + redirects if redirects else []))
         if ops_out is not None:
-            ops_out.append(ops)
+            ops_out.append((ops, opens, closes))
     return out
 
 
@@ -472,6 +477,7 @@ def writes_file(command, cwd, target, depth=0):
     except ValueError:
         return False
     here = cwd  # None once a cd leads somewhere we can't know
+    saved = []  # folders to return to when a ( ) group ends
 
     def is_target(word, base):
         if not word or _SUB.search(word):
@@ -488,7 +494,11 @@ def writes_file(command, cwd, target, depth=0):
             return None
         return os.path.realpath(e if os.path.isabs(e) else os.path.join(base, e))
 
-    for words, ops in zip(segments, ops_per_segment):
+    for words, (ops, opens, closes) in zip(segments, ops_per_segment):
+        for _ in range(closes):
+            if saved:
+                here = saved.pop()
+        saved.extend([here] * opens)
         for w in words:
             for k in _SUB.findall(w):
                 if writes_file(subs[int(k)], here if here is not None else cwd, target, depth + 1):
@@ -501,7 +511,8 @@ def writes_file(command, cwd, target, depth=0):
         if REDIRECT_MARK in words:
             targets = words[words.index(REDIRECT_MARK) + 1:]
             for op, w in zip(ops, targets):
-                if ">" in op and is_target(w, base):  # > >> >| &> <> write; < reads
+                # The shell opens redirects where it stands, before env -C moves the program.
+                if ">" in op and is_target(w, here):  # > >> >| &> <> write; < reads
                     return True
         if name == "-c":
             if writes_file(args[0] if args else "", base if base is not None else cwd, target, depth + 1):

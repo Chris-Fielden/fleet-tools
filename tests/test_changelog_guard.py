@@ -186,14 +186,17 @@ def test_bash_hook_blocks_shell_writes_to_root_changelog(tmp_path):  # T3, T7
                 'cp /tmp/n ./CHANGELOG.md', 'echo x > CHANGELOG.md', 'echo x > "CHANGELOG.md"',
                 "echo x >> 'CHANGELOG.md'", 'echo x >"$PWD/CHANGELOG.md"', "mv /tmp/n CHANGELOG.md",
                 'bash -c "echo x >> CHANGELOG.md"', 'cd docs && cd .. && echo x >> CHANGELOG.md',
-                'env -C . tee -a CHANGELOG.md', 'cd $SOMEWHERE && echo x >> CHANGELOG.md', "perl -pi -e 's/a/b/' CHANGELOG.md"]:
+                'env -C . tee -a CHANGELOG.md',
+                'env -C docs printf x > CHANGELOG.md', '(cd docs); printf x > CHANGELOG.md',
+                '(cd docs && true) && echo x >> CHANGELOG.md', 'cd $SOMEWHERE && echo x >> CHANGELOG.md', "perl -pi -e 's/a/b/' CHANGELOG.md"]:
         reason = hook("guard_bash.py", {"command": cmd}, wt)
         assert reason and "written only at ship" in reason, cmd
     for cmd in ['cat CHANGELOG.md', 'echo x >> docs/CHANGELOG.md', 'git checkout main -- CHANGELOG.md',
                 'grep ship CHANGELOG.md', 'cp CHANGELOG.md /tmp/changelog-backup',
                 'diff CHANGELOG.md docs/CHANGELOG.md', 'cat < CHANGELOG.md', 'wc -l < CHANGELOG.md',
                 'cd docs && echo x >> CHANGELOG.md', 'env -C docs sh -c "echo x >> CHANGELOG.md"',
-                'cd docs; sed -i s/a/b/ CHANGELOG.md']:
+                'cd docs; sed -i s/a/b/ CHANGELOG.md',
+                '(cd docs && echo x >> CHANGELOG.md)', 'true && (cd docs; echo x >> CHANGELOG.md)']:
         assert hook("guard_bash.py", {"command": cmd}, wt) is None, cmd
 
 
