@@ -85,7 +85,7 @@ def state_path() -> Path:
 
 def _load_state(warn) -> dict:
     state = {"sent": [], "blocked_since": {}, "stopped_since": {}, "seen": {}, "pending": [], "fresh": {},
-             "dialog_pinged": {}}
+             "dialog_pinged": {}, "unrecorded_seen": {}}
     try:
         data = json.loads(state_path().read_text(encoding="utf-8"))
         if (isinstance(data, dict) and isinstance(data.get("sent"), list)
@@ -98,6 +98,9 @@ def _load_state(warn) -> dict:
                          dialog_pinged={k: v for k, v in (data["dialog_pinged"]
                                                           if isinstance(data.get("dialog_pinged"), dict) else {}).items()
                                         if isinstance(k, str) and isinstance(v, str)},
+                         unrecorded_seen={k: v for k, v in (data["unrecorded_seen"] if isinstance(
+                             data.get("unrecorded_seen"), dict) else {}).items()
+                                          if isinstance(k, str) and type(v) is int and v > 0},
                          fresh={k: v for k, v in (data["fresh"] if isinstance(data.get("fresh"), dict) else {}).items()
                                 if isinstance(k, str) and isinstance(v, str)},
                          pending=[p for p in data.get("pending", []) if isinstance(p, dict)
@@ -280,10 +283,17 @@ def _retry_pending(state: dict, warn, settings: dict | None = None) -> None:
     state["pending"] = keep
 
 
-def _unrecorded_pings(t: dict, repo: Path, tip: str, state: dict, now: datetime, emit, warn) -> None:
-    """A review that was saved for this tip but never reached the ticket."""
+def _unrecorded_pings(t: dict, repo: Path, tip: str, state: dict, now: datetime, emit, warn,
+                      cycles: int = 3) -> None:
+    """A review that was saved for this tip but never reached the ticket. The ping goes out only
+    when the same commit and kind has been seen unrecorded on `cycles` cycles (the first sight
+    counts as one and is logged as ALERT), so a record that is merely late never pings. The count
+    is kept in state, so a restart keeps it, and dropped as soon as the review is recorded.
+    It counts sightings, not strictly consecutive cycles: a cycle that exits early before
+    reaching here neither advances nor resets it."""
     tid, v = t["id"], t["verdict"]
     wt = repo / ".worktrees" / t["branch"].removeprefix("task/")
+    seen, unrecorded = state["unrecorded_seen"], set()
     for kind, info in sorted(rk.latest_reviews(wt / ".reviews", tip).items()):
         recorded = (v is not None and v["commit"] == tip and kind in v["reviews"]
                     and v["reviews"][kind]["result"] == info["verdict"])
@@ -294,10 +304,20 @@ def _unrecorded_pings(t: dict, repo: Path, tip: str, state: dict, now: datetime,
         key = f"{tid}:review_unrecorded:{tip}:{kind}"
         if recorded or now.timestamp() - saved_at < UNRECORDED_GRACE or key in state["sent"]:
             continue
+        unrecorded.add(key)
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] == 1:
+            dp.log("ALERT", f"{tid} review_unrecorded {tip[:8]} {kind} first seen; "
+                            f"ping after {cycles} cycles")
+        if seen[key] < cycles:
+            continue
         detail = f"{info['reviewer']} review of {tip[:7]} ({info['verdict'] or 'no verdict'}) is not on the ticket"
         if _ping(t, "review_unrecorded", key, state, warn, detail):
             emit(f"{tid}  {detail}")
-            dp.log("ALERT", f"{tid} review_unrecorded {tip[:8]} {kind}")
+            dp.log("ALERT", f"{tid} review_unrecorded {tip[:8]} {kind} ping sent")
+    prefix = f"{tid}:review_unrecorded:"
+    for key in [k for k in seen if k.startswith(prefix) and k not in unrecorded]:
+        del seen[key]   # recorded, sent or the tip moved: a later one starts from zero
 
 
 # --- true failure ----------------------------------------------------------------
@@ -877,7 +897,7 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             else:
                 _ready_ping(t, tip, settings, now, state, warn)
             _end_spells(t["id"], state)
-            _unrecorded_pings(t, repo, tip, state, now, emit, warn)
+            _unrecorded_pings(t, repo, tip, state, now, emit, warn, settings["unrecorded_ping_cycles"])
             return
         new = _move(t, "claimed", ("review",), warn)
         if new:
@@ -906,11 +926,11 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             else:
                 _ready_ping(new, tip, settings, now, state, warn)
             _end_spells(t["id"], state)
-            _unrecorded_pings(new, repo, tip, state, now, emit, warn)
+            _unrecorded_pings(new, repo, tip, state, now, emit, warn, settings["unrecorded_ping_cycles"])
         return
     if fresh.refresh_if_large(t, agent, tip, settings, state, emit, warn):
         return   # a new session starts from here: judge it from the next cycle
-    _unrecorded_pings(t, repo, tip, state, now, emit, warn)
+    _unrecorded_pings(t, repo, tip, state, now, emit, warn, settings["unrecorded_ping_cycles"])
     reason = _failure_reason(t, repo, tip, agent, state, now, settings["fail_rounds_threshold"],
                             (progress or {}).get(t["id"], frozenset()),
                             leftovers=(marks or {}).get(t["id"]) == tip, waiting=t["id"] in waiting)
@@ -1045,6 +1065,8 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
     live = {t["id"] for t in tickets} | locked
     for name in ("blocked_since", "stopped_since", "seen", "fresh", "dialog_pinged"):
         state[name] = {k: v for k, v in state[name].items() if k in live}
+    state["unrecorded_seen"] = {k: n for k, n in state["unrecorded_seen"].items()
+                                if k.split(":", 1)[0] in live}
     # Keys of the failure pings stay: their ticket is closed, and the key is the record that it was sent.
     kept = [k for k in state["sent"] if k.split(":", 1)[0] in live]
     kept_failures = [k for k in state["sent"]

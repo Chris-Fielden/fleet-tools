@@ -10,6 +10,18 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 - `ship` and the merge script no longer ask y/N below high risk (EM-31). The typed ticket id at high risk is unchanged.
 
+## [ship-2026.10.16.1] - 2026-10-16
+
+### Changed
+
+- BD-110: Notify: delay review_unrecorded ping until still unrecorded after N cycles
+
+## [ship-2026.10.15.5] - 2026-10-15
+
+### Changed
+
+- BD-104: Heartbeat checker verb plus systemd timer (merges ID-34 health-check)
+
 ## [ship-2026.10.15.4] - 2026-10-15
 
 ### Changed
