@@ -4,7 +4,7 @@ Tools for the agent fleet: tickets and the dispatcher.
 
 ## One command: `fleet <verb>`
 
-`ship ID` at a terminal asks every confirmation first (at high risk, the ticket ID, in any letter case), then runs the checks, merge and push as a detached background job that survives the terminal closing or the laptop sleeping. The terminal shows the job's log while it stays open; the log is `$FLEET_HOME/ship/ID.log`, `ship --status ID` shows progress or the result later, one ntfy ping reports shipped or why not, and a second ship of the same ticket is refused while one runs. Without a terminal, `ship` runs in the foreground as before.
+`ship ID` at a terminal asks no confirmation at low or medium risk (naming the ticket is the decision); at high risk it first asks you to type the ticket ID, in any letter case. It then runs the checks, merge and push as a detached background job that survives the terminal closing or the laptop sleeping. The terminal shows the job's log while it stays open; the log is `$FLEET_HOME/ship/ID.log`, `ship --status ID` shows progress or the result later, one ntfy ping reports shipped or why not, and a second ship of the same ticket is refused while one runs. Without a terminal, `ship` runs in the foreground as before.
 
 `fleet help` lists every verb. Besides the ones below, `fleet ship ID`, `fleet ticket ARGS`, `fleet approve ID` (same as `ticket approve`), `fleet alert REPO TEXT` and `fleet idea TEXT` do exactly what `ship`, `ticket`, `alert` and `idea` do; those four keep working unchanged as aliases. Agents are blocked from the human-only verbs by the guard hook under both names (`fleet ship`, `fleet approve`, `fleet ticket approve|close|sync`, `fleet alert`, `fleet idea`, `fleet start|stop|restart|autostart|launcher|ops`).
 

@@ -80,7 +80,14 @@ def _run_group(argv: list[str], timeout: int | None, **kw) -> subprocess.Complet
         except BaseException as exc:
             with contextlib.suppress(OSError):
                 os.killpg(proc.pid, signal.SIGKILL)
-            proc.communicate()
+            try:
+                proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                # a descendant in another session still holds a pipe: stop draining and close ours
+                for stream in (proc.stdout, proc.stderr):
+                    if stream is not None:
+                        with contextlib.suppress(OSError, ValueError):
+                            stream.close()
             if isinstance(exc, subprocess.TimeoutExpired):
                 raise subprocess.TimeoutExpired(argv, timeout) from None
             raise
@@ -943,12 +950,13 @@ def _ask_to_ship(repo: Path, wt: Path, branch: str, tip: str) -> str | int:
         print("".join(f"  {line}\n" for line in others.splitlines()), end="")
     print(dp._git(repo, "log", "--oneline", f"{base}..{tip}").stdout, end="")
     print(dp._git(repo, "diff", "--stat", f"{base}...{tip}").stdout, end="")
+    if risk in ("low", "medium"):
+        return "y"
+    if risk != "high":
+        return _fail(f"unexpected risk level {risk!r}; nothing was merged")
     try:
-        if risk == "high":
-            typed = input(f"HIGH RISK change. Type the ticket id ({word}) to ship {branch} into {base}: ")
-            yes = typed.strip().lower() == word.lower()
-        else:
-            yes = input(f"Ship {branch} into {base}? [y/N] ").strip().lower() in ("y", "yes")
+        typed = input(f"HIGH RISK change. Type the ticket id ({word}) to ship {branch} into {base}: ")
+        yes = typed.strip().lower() == word.lower()
     except (EOFError, KeyboardInterrupt):
         print()
         yes = False
