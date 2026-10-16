@@ -17,20 +17,20 @@ def note(by, text):
 
 # --- part 1: no on-call for a failure only a person can fix -------------------
 
-def test_no_commit_give_up_reason_needs_a_human():
-    assert rw.needs_human_first({"notes": []}, rw.NO_COMMIT_REASON)
+def test_agent_note_in_the_standard_phrase_needs_a_human():
+    assert rw.needs_human_first({"notes": [note("claude", "Needs a human: cancel them")]})
 
 
 def test_a_real_stall_is_not_needs_human():
-    assert not rw.needs_human_first({"notes": [note("claude", "working on the parser")]}, "stalled: no commit")
-    assert not rw.needs_human_first({"notes": []}, "stalled: no commit")
+    assert not rw.needs_human_first({"notes": [note("claude", "working on the parser")]})
+    assert not rw.needs_human_first({"notes": []})
 
 
 def test_last_agent_note_decides():
     t = {"notes": [note("claude", "BLOCKED: needs the real store"), note("human", "Needs a human: x")]}
-    assert rw.needs_human_first(t, "stalled: no commit")
+    assert rw.needs_human_first(t)
     t = {"notes": [note("claude", "needs a human"), note("claude", "fixed it, continuing")]}
-    assert not rw.needs_human_first(t, "stalled: no commit")
+    assert not rw.needs_human_first(t)
 
 
 def test_stalled_ticket_with_needs_human_note_files_no_oncall(rig, ntfy, herdr_log, monkeypatch):

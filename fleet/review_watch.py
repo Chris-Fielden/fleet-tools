@@ -65,9 +65,8 @@ STOPPED_AFTER = 5 * 60    # seconds an agent sits idle on a failed tip before th
 UNRECORDED_GRACE = 2 * 60  # seconds review.sh gets to record a review it just saved
 LOG_TAIL = 256 * 1024
 BACKSTOP_ROUNDS = 15      # review rounds (commits with a recorded review) after which a still-FAILing ticket is closed
-NO_COMMIT_REASON = "agent stopped without a commit"   # a give-up, not a stall: a person must look
 NEEDS_HUMAN_RE = re.compile(r"\bneeds?\s+(?:a\s+)?human\b|\bneeds?\s+the\s+real\s+(?:ticket\s+)?store\b", re.I)
-BACKSTOP_REASON ="review-round backstop"   # starts the reason of a backstop failure
+BACKSTOP_REASON = "review-round backstop"   # starts the reason of a backstop failure
 ANALYSIS_MAX = 600        # characters of the supervisor's latest note kept in the backstop's close note
 MUST_FIX_PART = 500       # characters of a review's MUST FIX section per part of the on-call body
 MUST_FIX_PARTS = 6        # parts kept per review; the context before the spec is clipped to leave the spec whole
@@ -571,14 +570,12 @@ def _note_once(ticket_id: str, marker: str, text: str, warn) -> None:
         _note(ticket_id, text, warn)
 
 
-def needs_human_first(t: dict, reason: str) -> bool:
-    """True when an on-call agent cannot help: the give-up reason of an agent that stopped
-    without a commit, or the agent's own last note says it needs a human or the real store.
-    Untrusted text decides only a safe thing here: a person looks instead of an agent."""
-    if reason == NO_COMMIT_REASON:
-        return True
+def needs_human_first(t: dict) -> bool:
+    """True when an on-call agent cannot help: the newest note an agent wrote (not the human,
+    which is also the fleet's own author, and not the supervisor) says it needs a human or the
+    real store. Untrusted text decides only a safe thing here: a person looks instead of an agent."""
     for n in reversed(t.get("notes", [])):
-        if n.get("by") == "human" or n["text"].startswith(("SUPERVISOR", "Needs a human:", "On-call ticket")):
+        if n.get("by") == "human" or n["text"].startswith("SUPERVISOR"):
             continue
         return bool(NEEDS_HUMAN_RE.search(n["text"]))
     return False
@@ -708,7 +705,7 @@ def _recover(rec: dict, settings: dict, state: dict, now: datetime, emit, warn) 
         _note_once(tid, "Needs a human:", f"Needs a human: {detail}.", warn)
         lc._safe_log("NEEDS_HUMAN", tid)
         ping = (tid, "needs_human", None)
-    elif needs_human_first(t, rec["reason"]):   # no on-call: it cannot do what the ticket needs
+    elif needs_human_first(t):   # no on-call: it cannot do what the ticket needs
         _note_once(tid, "Needs a human:", f"Needs a human: {detail}. No on-call agent can do this work.", warn)
         lc._safe_log("NEEDS_HUMAN", tid)
         ping = (tid, "needs_human", None)
