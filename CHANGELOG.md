@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.16.5] - 2026-10-16
+
+### Changed
+
+- BD-115: Fail an idle agent with no commit after 5 min, not 45
+
 ## [ship-2026.10.16.4] - 2026-10-16
 
 ### Changed
