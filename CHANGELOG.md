@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.16.2] - 2026-10-16
+
+### Changed
+
+- BD-111: Read-only digest command for informational fleet events (last 24h)
+
 ## [ship-2026.10.16.1] - 2026-10-16
 
 ### Changed
