@@ -80,7 +80,14 @@ def _run_group(argv: list[str], timeout: int | None, **kw) -> subprocess.Complet
         except BaseException as exc:
             with contextlib.suppress(OSError):
                 os.killpg(proc.pid, signal.SIGKILL)
-            proc.communicate()
+            try:
+                proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                # a descendant in another session still holds a pipe: stop draining and close ours
+                for stream in (proc.stdout, proc.stderr):
+                    if stream is not None:
+                        with contextlib.suppress(OSError, ValueError):
+                            stream.close()
             if isinstance(exc, subprocess.TimeoutExpired):
                 raise subprocess.TimeoutExpired(argv, timeout) from None
             raise
