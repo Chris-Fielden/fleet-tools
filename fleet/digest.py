@@ -69,10 +69,10 @@ def collect(now: datetime | None = None) -> list[tuple[datetime, str, str, str]]
     already reports the same event for the same ticket."""
     now = now or datetime.now(timezone.utc)
     since = now - WINDOW
-    events = _log_events(since)
+    events = [e for e in _log_events(since) if e[0] <= now]   # a future stamp is not in the window
     seen = {(e[1], e[2]) for e in events}
     events += [e for e in _transition_events(since) if (e[1], e[2]) not in seen]
-    events = [e for e in events if e[0] <= now]   # a stamp in the future is not "the last 24 hours"
+    events = [e for e in events if e[0] <= now]
     events.sort(key=lambda e: (e[0], e[1], e[2]))
     return events
 
