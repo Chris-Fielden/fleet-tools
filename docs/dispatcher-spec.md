@@ -455,7 +455,7 @@ re-runs `scripts/check.sh` and `scripts/review.sh` (which applies the reviews th
 needs) in its task folder, then saves a `Prep pass:` note after the new verdict (the review
 watch counts it as that tip's summary). A branch that fails any of that goes back to
 `claimed` (normal handling), gets a new agent in its task folder (if none can be started it
-gets a note and one low `needs_human` ping) and stays off the list. The re-checks run on a
+gets a note and one high `needs_human` ping) and stays off the list. The re-checks run on a
 background thread (they can take hours), so the dispatch cycle keeps launching, pinging and
 running on-call meanwhile; the job stays locked until they are done (a one-shot `--once`
 waits for them). Tickets handed to an agent are locked:
@@ -484,7 +484,7 @@ no agent.
 `settings.json` is re-read at the start of every cycle, so a change takes effect on
 the next cycle without a restart. Changed keys are logged as `SETTINGS_RELOADED`
 (`changed: max_running, ...`). If the new file is invalid, the last good settings
-stay in force, `SETTINGS_INVALID` is logged and one low-priority ping
+stay in force, `SETTINGS_INVALID` is logged and one high-priority ping
 (`settings_invalid`) is sent, once per distinct problem until the file is valid
 again.
 
@@ -511,7 +511,7 @@ truly fails with reason "review-round backstop". The recovery record carries the
 supervisor's latest note (`final`, clipped to 600 characters, quoted as text and never
 acted on; "no supervisor analysis was recorded" if there is none). Recovery then closes
 the ticket as failed with that analysis in the close note, files NO on-call ticket, adds a
-"Needs a human:" note and sends one low `needs_human` ping (queued once, as for any failure).
+"Needs a human:" note and sends one high `needs_human` ping (queued once, as for any failure).
 `fail_rounds_threshold` still applies to counted rounds, as before.
 
 - **Threat model.** The backstop only closes this one ticket as failed and pings once. It
@@ -543,7 +543,7 @@ dispatcher checks the facts itself and, if they hold:
 2. marks the ticket "ready with leftovers" at that exact commit in
    `$FLEET_HOME/supervisor.json` (`leftovers`: `{commit, reason, ticket, at}`) and adds
    one note;
-3. queues ONE `leftovers` ping (default priority) per ticket, not per commit. A queued ping
+3. queues ONE `leftovers` ping (high priority) per ticket, not per commit. A queued ping
    is dropped, not sent, if the branch tip is no longer the marked commit.
 
 Refused (a note says why, nothing is filed): the ticket is not claimed with its latest
