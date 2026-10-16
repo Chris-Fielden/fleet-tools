@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.16.4] - 2026-10-16
+
+### Changed
+
+- EM-32: Stop CHANGELOG.md conflicts on every stacked ship
+
 ## [ship-2026.10.16.3] - 2026-10-16
 
 ### Changed
