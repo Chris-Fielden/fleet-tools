@@ -18,8 +18,8 @@ in the fleet home.
   `Ship refused` with the reason. It applies the same gates as `ship`: the branch must
   still be at the commit the page showed, the gate must pass with reviews already on
   file (a web ship never runs a review), and `scripts/finish-task.sh` then runs all
-  its own checks again. Its one prompt is answered with what the page made you do
-  (`y`, or the typed ticket ID at high risk). `--emergency` is not reachable.
+  its own checks again. Below high risk the merge script asks nothing; at high risk
+  its one prompt is answered with the typed ticket ID from the page. `--emergency` is not reachable.
 
 ## Audit log
 

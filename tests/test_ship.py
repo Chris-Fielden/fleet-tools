@@ -325,6 +325,17 @@ def test_ship_ctrl_c_at_the_offer_declines_without_a_traceback(real_task, monkey
     assert "Traceback" not in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("path", ["docs/a.md", "fleet/x.py"])
+def test_ship_below_high_risk_asks_no_question(real_task, env, monkeypatch, path):
+    wt, t = real_task
+    commit_in(wt, path)
+    run_review(wt, env / "bin")  # reviewed already, so no review offer either
+    asked = answer(monkeypatch, "n")  # a no would cancel if anything asked
+    assert ship_main([t["id"]]) == 0
+    assert asked == []
+    assert tk.load_ticket(t["id"])["status"] == "done"
+
+
 def test_ship_high_risk_never_prompts(real_task, monkeypatch, capsys):
     wt, t = real_task
     full = commit_in(wt, "k8s/app.yaml")

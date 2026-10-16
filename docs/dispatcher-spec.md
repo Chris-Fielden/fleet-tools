@@ -480,8 +480,8 @@ ticket in shipping order: `ID | title | risk | what it does | folded in: ..; rec
 (`-` when neither). Tickets the agent left out of `order` follow, oldest first.
 
 **`ship --list`** (human only, refused in agents like `ship`): prints the list, then ships each
-ticket in order exactly as `ship ID` does, so the merge script asks its usual confirmation for
-each. A ticket already done is skipped. It stops at the first failure (a ticket that is no longer in
+ticket in order exactly as `ship ID` does: no prompt at low or medium risk (so several tickets
+merge back to back after the list), the typed ticket id at high risk. A ticket already done is skipped. It stops at the first failure (a ticket that is no longer in
 review, a refused or declined merge, an agent still working on it) and says why. `ship ID` still
 works for one ticket.
 
