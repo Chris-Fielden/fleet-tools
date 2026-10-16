@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.16.9] - 2026-10-16
+
+### Changed
+
+- BD-106: Ship: timeouts on detached merge-job steps and age/command check on reservation
+
 ## [ship-2026.10.16.8] - 2026-10-16
 
 ### Changed
