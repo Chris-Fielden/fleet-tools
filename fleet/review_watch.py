@@ -65,6 +65,7 @@ STOPPED_AFTER = 5 * 60    # seconds an agent sits idle on a failed tip before th
 UNRECORDED_GRACE = 2 * 60  # seconds review.sh gets to record a review it just saved
 LOG_TAIL = 256 * 1024
 BACKSTOP_ROUNDS = 15      # review rounds (commits with a recorded review) after which a still-FAILing ticket is closed
+NEEDS_HUMAN_RE = re.compile(r"\bneeds?\s+(?:a\s+)?human\b|\bneeds?\s+the\s+real\s+(?:ticket\s+)?store\b", re.I)
 BACKSTOP_REASON = "review-round backstop"   # starts the reason of a backstop failure
 ANALYSIS_MAX = 600        # characters of the supervisor's latest note kept in the backstop's close note
 MUST_FIX_PART = 500       # characters of a review's MUST FIX section per part of the on-call body
@@ -569,6 +570,17 @@ def _note_once(ticket_id: str, marker: str, text: str, warn) -> None:
         _note(ticket_id, text, warn)
 
 
+def needs_human_first(t: dict) -> bool:
+    """True when an on-call agent cannot help: the newest note an agent wrote (not the human,
+    which is also the fleet's own author, and not the supervisor) says it needs a human or the
+    real store. Untrusted text decides only a safe thing here: a person looks instead of an agent."""
+    for n in reversed(t.get("notes", [])):
+        if n.get("by") == "human" or n["text"].startswith("SUPERVISOR"):
+            continue
+        return bool(NEEDS_HUMAN_RE.search(n["text"]))
+    return False
+
+
 def _file_oncall(t: dict, detail: str, tip: str, repo: Path, warn) -> dict | None:
     """File the on-call fix ticket for a failed ticket, carrying its whole spec and
     notes (an agent can read only its own ticket). None if it cannot be made for
@@ -691,6 +703,10 @@ def _recover(rec: dict, settings: dict, state: dict, now: datetime, emit, warn) 
         ping = (original, "needs_human", None)
     elif rec.get("final") is not None:   # the review-rounds backstop: no on-call attempt
         _note_once(tid, "Needs a human:", f"Needs a human: {detail}.", warn)
+        lc._safe_log("NEEDS_HUMAN", tid)
+        ping = (tid, "needs_human", None)
+    elif needs_human_first(t):   # no on-call: it cannot do what the ticket needs
+        _note_once(tid, "Needs a human:", f"Needs a human: {detail}. No on-call agent can do this work.", warn)
         lc._safe_log("NEEDS_HUMAN", tid)
         ping = (tid, "needs_human", None)
     else:
