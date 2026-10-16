@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.16.1] - 2026-10-16
+
+### Changed
+
+- BD-110: Notify: delay review_unrecorded ping until still unrecorded after N cycles
+
 ## [ship-2026.10.15.5] - 2026-10-15
 
 ### Changed
