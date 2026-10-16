@@ -340,11 +340,53 @@ def _investigation_body(t: dict) -> str:
     return head + spec
 
 
-def findings_note(inv: dict) -> str:
-    head = FINDINGS_HEAD.format(id=inv["id"])
-    notes = sorted(inv.get("notes", []), key=lambda n: not DESIGN_RE.search(n["text"]))  # the design survives a cut
-    text = head + "\n" + "\n\n".join(n["text"] for n in notes)
-    return text if len(text) <= tk.NOTE_MAX else text[:tk.NOTE_MAX - 12] + "\n[cut]"
+def _split_text(text: str, room: int) -> list[str]:
+    """Pieces of at most `room` characters, cut at line ends (inside a line only when one line is longer)."""
+    out, cur = [], ""
+    for line in text.split("\n"):
+        while len(line) > room:
+            if cur:
+                out.append(cur)
+                cur = ""
+            out.append(line[:room])
+            line = line[room:]
+        if cur and len(cur) + 1 + len(line) > room:
+            out.append(cur)
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _findings_head(inv_id: str, i: int, n: int) -> str:
+    return f"{FINDINGS_HEAD.format(id=inv_id)} part {i}/{n}"
+
+
+def findings_note(inv: dict) -> list[str]:
+    """The findings of a done investigation as notes of at most NOTE_MAX characters each,
+    split at note boundaries (at line ends inside one over-long note), numbered 'part i/n',
+    with the design note first. Nothing is dropped."""
+    notes = sorted(inv.get("notes", []), key=lambda n: not DESIGN_RE.search(n["text"]))  # design first
+    guess = 1
+    while True:
+        room = tk.NOTE_MAX - len(_findings_head(inv["id"], guess, guess)) - 1
+        bodies, cur = [], ""
+        for n in notes:
+            for piece in _split_text(n["text"], room):
+                if cur and len(cur) + 2 + len(piece) > room:
+                    bodies.append(cur)
+                    cur = piece
+                else:
+                    cur = f"{cur}\n\n{piece}" if cur else piece
+        if cur or not bodies:
+            bodies.append(cur)
+        if len(bodies) <= guess:
+            break
+        guess = len(bodies)
+    n = len(bodies)
+    return [f"{_findings_head(inv['id'], i, n)}\n{b}" for i, b in enumerate(bodies, 1)]
 
 
 def ensure_investigations(tickets: list[dict], warn=lambda m: None) -> tuple[list[str], set[str]]:
@@ -379,10 +421,19 @@ def ensure_investigations(tickets: list[dict], warn=lambda m: None) -> tuple[lis
             elif state == "ok" and needs_investigation(t, rules):
                 inv = by_id[investigation_id(t)]
                 head = FINDINGS_HEAD.format(id=inv["id"])
-                if not any(n["text"].startswith(head) for n in t.get("notes", [])):
-                    tk.add_note(t["id"], findings_note(inv))
-                    log("FINDINGS_APPENDED", f"{inv['id']} -> {t['id']}")
-                    lines.append(f"{t['id']}  findings of {inv['id']} added as a note")
+                have = [n["text"] for n in t.get("notes", [])]
+                if not any(x.startswith(head + "\n") for x in have):   # a note from before the split
+                    parts = findings_note(inv)
+                    added = 0
+                    for i, part in enumerate(parts, 1):
+                        key = _findings_head(inv["id"], i, len(parts))
+                        if any(x.startswith(key + "\n") for x in have):
+                            continue
+                        tk.add_note(t["id"], part)   # a failure here is completed by the next run
+                        added += 1
+                    if added:
+                        log("FINDINGS_APPENDED", f"{inv['id']} -> {t['id']} ({added} of {len(parts)} notes)")
+                        lines.append(f"{t['id']}  findings of {inv['id']} added as {added} note(s)")
         except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
             warn(f"investigate-first: {t['id']}: {exc}")
             held.add(t["id"])
@@ -432,6 +483,11 @@ def _judge(t: dict, tickets: dict, claimed: list[dict], settings: dict, holders:
             return d
     if t["type"] != "fix" and branch_exists(repo, t["branch"]):
         d.skip = f"branch {t['branch']} already exists in {t['repo']}"
+        return d
+    # 4b. A dependency with nothing in it yet: hold, say why, and let a human know once
+    dep = unmet_dependency(repo, t)
+    if dep:
+        d.skip = f"{UNMET_SKIP} {dep} has no commits beyond main yet; waiting for a human"
         return d
     # 5. Who works it
     if t["type"] == "build":
@@ -488,6 +544,26 @@ def started_today(tickets: list[dict], now: datetime | None = None) -> int:
 
 
 BLOCKED_SKIP = "not launched: startup blocked, waiting for a human"
+DEPENDS_RE = re.compile(r"\bDepends on (task/[a-z0-9][a-z0-9-]*)", re.I)
+UNMET_SKIP = "held: its dependency branch"   # starts every skip reason of an unmet dependency
+HELD_NOTE = "Held:"                          # starts the one note (and ping) of a held ticket
+
+
+def unmet_dependency(repo: Path, t: dict) -> str | None:
+    """The branch a ticket says it `Depends on task/<name>` while that branch exists in the
+    repo with no commits beyond main (nothing to build on), else None. A branch that is
+    gone or already merged is not unmet: finish-task deletes branches after the merge."""
+    m = DEPENDS_RE.search(t.get("body") or "")
+    main = main_branch(repo)
+    if not m or main is None or m.group(1) == t.get("branch"):
+        return None
+    dep = m.group(1)
+    if not branch_exists(repo, dep):
+        return None
+    ahead = _git(repo, "rev-list", "--count", f"{main}..refs/heads/{dep}")
+    if ahead.returncode != 0 or ahead.stdout.strip() != "0":
+        return None
+    return None if is_merged(repo, dep) else dep
 
 
 def decide_investigations(tickets: list[dict], settings: dict, now: datetime | None = None) -> list[Decision]:

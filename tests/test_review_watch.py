@@ -750,3 +750,77 @@ def test_only_the_prep_pass_success_note_counts_as_a_summary(rig, ntfy):
     tk.add_note(rig.id, f"{prep.PASS_NOTE_PREFIX} abc12345: the branch was changed; checks passed.")
     rig.cycle(5)
     assert rig.get()["status"] == "review"
+
+
+# --- an idle agent with no commit (BD-115) ----------------------------------------
+
+def _prompts(herdr_log):
+    return [c for c in calls(herdr_log) if c[:2] == ["agent", "prompt"]] if herdr_log.exists() else []
+
+
+def _no_commit(rig):
+    """The agent has not committed since the claim: the tip is the base commit."""
+    rig.edit(base_commit=rig.tip())
+    rig.set_agent("idle", revision=1)
+
+
+def test_idle_with_no_commit_is_nudged_then_failed_five_minutes_later(rig, ntfy, herdr_log):
+    _no_commit(rig)
+    rig.summary("BLOCKED: the spec contradicts itself")
+    rig.cycle(0)
+    rig.cycle(4)
+    assert _prompts(herdr_log) == [] and rig.get()["status"] == "claimed"
+    rig.cycle(6)   # idle for 5 min: one nudge, no failure yet
+    assert len(_prompts(herdr_log)) == 1 and "ticket note" in _prompts(herdr_log)[0][3]
+    assert rig.get()["status"] == "claimed"
+    rig.cycle(9)
+    assert rig.get()["status"] == "claimed" and len(_prompts(herdr_log)) == 1
+    rig.cycle(12)   # 5 min after the nudge, still idle, still no commit
+    rig.cycle(13)
+    t = rig.get()
+    assert t["status"] == "failed" and "agent stopped without a commit" in t["close_note"]
+    assert "BLOCKED: the spec contradicts itself" in t["close_note"]
+    assert len(_prompts(herdr_log)) == 1
+    assert any("BLOCKED: the spec" in m for _, m, _ in sent(ntfy)) or len(sent(ntfy)) == 1
+
+
+def test_a_commit_after_the_nudge_saves_the_ticket(rig, ntfy, herdr_log):
+    _no_commit(rig)
+    rig.cycle(0)
+    rig.cycle(6)
+    assert len(_prompts(herdr_log)) == 1
+    rig.commit("work")
+    rig.cycle(13)
+    assert rig.get()["status"] == "claimed"
+
+
+@pytest.mark.parametrize("status", ["working", "blocked", "waiting"])
+def test_no_commit_rule_never_applies_while_herdr_shows_busy(rig, ntfy, herdr_log, status):
+    rig.edit(base_commit=rig.tip())
+    rig.set_agent(status, revision=1)
+    rig.cycle(0)
+    rig.cycle(6)
+    rig.cycle(13)
+    assert _prompts(herdr_log) == []
+    t = rig.get()
+    assert t["status"] == "claimed" or "without a commit" not in t.get("close_note", "")
+
+
+def test_idle_with_a_commit_is_untouched_by_the_no_commit_rule(rig, ntfy, herdr_log):
+    rig.edit(base_commit=rig.tip())
+    rig.commit("work")
+    rig.set_agent("idle", revision=1)
+    rig.cycle(0)
+    rig.cycle(6)
+    rig.cycle(13)
+    assert _prompts(herdr_log) == [] and rig.get()["status"] == "claimed"
+
+
+def test_a_ticket_in_review_is_untouched_by_the_no_commit_rule(rig, ntfy, herdr_log):
+    rig.finish()
+    rig.edit(base_commit=rig.tip())
+    rig.cycle(0)
+    assert rig.get()["status"] == "review"
+    rig.cycle(6)
+    rig.cycle(13)
+    assert _prompts(herdr_log) == [] and rig.get()["status"] == "review"

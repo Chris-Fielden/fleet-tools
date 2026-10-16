@@ -256,6 +256,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
             started = True
             break
     decisions = dp.decide([t for t in tickets if t["id"] not in held], settings)
+    _ping_unmet(decisions, emit, warn)
     for d in decisions:
         if d.eligible:
             if reserve is not None and not reserve():
@@ -281,6 +282,25 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
         emit(f"nothing launched; {d.line()}")
         d.log_skip()
     return code
+
+
+def _ping_unmet(decisions, emit, warn) -> None:
+    """One note and one needs-human ping per ticket held for an empty dependency branch.
+    The note is the record: while it is on the ticket nothing more is sent."""
+    for d in decisions:
+        if not (d.skip and d.skip.startswith(dp.UNMET_SKIP)):
+            continue
+        t = d.ticket
+        try:
+            if any(n["text"].startswith(dp.HELD_NOTE) for n in tk.load_ticket(t["id"]).get("notes", [])):
+                continue
+            tk.add_note(t["id"], f"{dp.HELD_NOTE} {d.skip}. It launches by itself once the "
+                                 "dependency has commits."[:tk.NOTE_MAX])
+        except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+            warn(f"{t['id']}: could not record the hold: {exc}")
+            continue
+        emit(f"{t['id']}  {d.skip}")
+        notify.notify_quietly(t, "needs_human", warn, detail=d.skip[:300])
 
 
 LIMIT_REACHED = "daily launch limit reached, max_launches_per_day is spent"
