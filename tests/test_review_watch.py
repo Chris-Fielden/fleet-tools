@@ -286,6 +286,27 @@ def test_back_to_claimed_when_the_tip_moves_or_the_agent_is_busy(rig, ntfy):
     assert len(ntfy.requests) == 2   # a new commit pings again
 
 
+def test_ready_reminder_once_and_not_for_a_ticket_that_went_back_to_work(rig, ntfy):
+    rig.finish()
+    rig.cycle()
+    assert len(ntfy.requests) == 1
+    hours = rw.READY_REMINDER_AFTER // 60
+    rig.cycle(1)                                   # the reminder clock has started
+    rig.cycle(1 + hours)
+    rig.cycle(2 + hours)
+    titles = [r["body"]["title"] for r in ntfy.requests]
+    assert titles.count(f"Still waiting for you: {rig.id}") == 1
+    # waited long enough, but its agent is working again by then: not ready, so no reminder
+    rig.set_agent("working")
+    rig.cycle(3 + hours)
+    rig.set_agent("idle")
+    rig.cycle(4 + hours)                           # back in review: a new wait begins
+    rig.set_agent("working")
+    rig.cycle(5 + 2 * hours)
+    assert rig.get()["status"] == "claimed"
+    assert len([r for r in ntfy.requests if r["body"]["title"].startswith("Still waiting")]) == 1
+
+
 def test_review_is_kept_when_herdr_cannot_be_asked(rig, ntfy, monkeypatch):
     rig.finish()
     rig.cycle()

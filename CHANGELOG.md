@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.16.8] - 2026-10-16
+
+### Changed
+
+- OC-9: On-call: fix BD-105: One deduped ping per persistent warn-only stall condition
+
 ## [ship-2026.10.16.7] - 2026-10-16
 
 ### Changed

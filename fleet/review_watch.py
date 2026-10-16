@@ -83,6 +83,7 @@ FAILURE_EVENTS = ("oncall", "needs_human", "leftovers")   # pings kept until sen
 LAUNCH_FAILED_NOTE = "Launch attempt failed:"   # written by launch.launch_oncall
 LAUNCH_ATTEMPTS = 3       # failed launches of one on-call ticket before it is given up
 FAILURE_KEYS_KEPT = 500   # sent-keys of closed tickets' failure pings; the oldest go first
+READY_REMINDER_AFTER = 6 * 3600   # seconds a ticket sits ready (In Review) before its one reminder ping
 LEFTOVERS_PREFIX = "SHOULD FIX leftovers from"  # saved by `ticket review-result`, not a summary
 
 
@@ -92,7 +93,7 @@ def state_path() -> Path:
 
 def _load_state(warn) -> dict:
     state = {"sent": [], "blocked_since": {}, "stopped_since": {}, "seen": {}, "pending": [], "fresh": {},
-             "dialog_pinged": {}, "unrecorded_seen": {}, "nudged": {}}
+             "dialog_pinged": {}, "ready_since": {}, "unrecorded_seen": {}, "nudged": {}}
     try:
         data = json.loads(state_path().read_text(encoding="utf-8"))
         if (isinstance(data, dict) and isinstance(data.get("sent"), list)
@@ -105,6 +106,9 @@ def _load_state(warn) -> dict:
                          dialog_pinged={k: v for k, v in (data["dialog_pinged"]
                                                           if isinstance(data.get("dialog_pinged"), dict) else {}).items()
                                         if isinstance(k, str) and isinstance(v, str)},
+                         ready_since={k: v for k, v in (data["ready_since"]
+                                                        if isinstance(data.get("ready_since"), dict) else {}).items()
+                                      if isinstance(k, str) and isinstance(v, str)},
                          nudged={k: v for k, v in (data["nudged"] if isinstance(data.get("nudged"), dict)
                                                    else {}).items() if isinstance(k, str) and isinstance(v, str)},
                          unrecorded_seen={k: v for k, v in (data["unrecorded_seen"] if isinstance(
@@ -238,6 +242,23 @@ def _ready_ping(t: dict, tip: str, settings: dict, now: datetime, state: dict, w
         warn(f"prep state unreadable ({exc}); the ready ping of {t['id']} waits")
         return
     _ping(t, "ship", f"{t['id']}:ship:{tip}", state, warn)  # a send that failed is retried
+
+
+def _ready_reminders(tickets: list[dict], state: dict, now: datetime, warn) -> None:
+    """One low "still waiting for you" ping for a ticket that has sat ready (In Review) for
+    READY_REMINDER_AFTER after its "ready to ship" ping went out (the clock starts when this
+    watcher first sees that ping sent; a ticket held for or covered by a prep pass has no such
+    ping and gets no reminder). A ticket that leaves the ready state is forgotten, so a return
+    starts again (and may ping again)."""
+    ready = {t["id"]: t for t in tickets if t["status"] == "review"
+             and any(k.startswith(f"{t['id']}:ship:") for k in state["sent"])}
+    for tid in [i for i in state["ready_since"] if i not in ready]:
+        del state["ready_since"][tid]
+        state["sent"] = [k for k in state["sent"] if k != f"{tid}:ready_reminder"]
+    for tid, t in ready.items():
+        since = _parse(state["ready_since"].setdefault(tid, _stamp(now)))
+        if since is not None and (now - since).total_seconds() >= READY_REMINDER_AFTER:
+            _ping(t, "ready_reminder", f"{tid}:ready_reminder", state, warn, "ready and not shipped yet")
 
 
 def _queue_ping(ticket_id: str, event: str, state: dict, warn, detail: str | None = None,
@@ -1115,6 +1136,11 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
             _ready_ping(new, tip, settings, now, state, warn)
         except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
             warn(f"{new['id']}: {exc}")
+    try:   # the statuses _check_one just settled, not the snapshot taken before it
+        current = {t["id"]: t for t in tk.list_tickets()}
+        _ready_reminders([current[t["id"]] for t in tickets if t["id"] in current], state, now, warn)
+    except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+        warn(f"ready reminders: {exc}")
     try:
         _flag_stuck_oncall(settings, warn)
     except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
@@ -1129,7 +1155,7 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
         warn(f"supervisor restart: {exc}")
     _run_supervisor(sup, settings, now, busy | set(sup["pending"]), warn)
     live = {t["id"] for t in tickets} | locked
-    for name in ("blocked_since", "stopped_since", "seen", "fresh", "dialog_pinged"):
+    for name in ("blocked_since", "stopped_since", "seen", "fresh", "dialog_pinged", "ready_since"):
         state[name] = {k: v for k, v in state[name].items() if k in live}
     state["unrecorded_seen"] = {k: n for k, n in state["unrecorded_seen"].items()
                                 if k.split(":", 1)[0] in live}
