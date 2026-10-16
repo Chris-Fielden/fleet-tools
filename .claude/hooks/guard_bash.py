@@ -105,16 +105,19 @@ SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", ";;", "|&", "{", "}"}
 KEYWORDS = {"if", "then", "else", "elif", "while", "until", "do", "!", "{", "}", "fi", "done"}
 
 
-def _segments(command):
+def _segments(command, ops_out=None):
     """Split a shell command into simple commands, as lists of words. Quotes
     are honoured, so 'dispatch' and "dispatch" count as dispatch, and a
-    newline inside quotes stays part of the quoted text."""
+    newline inside quotes stays part of the quoted text. If `ops_out` is a
+    list, one list per command is appended to it holding the operator (">",
+    ">>", "<", ...) of each redirection, in the order of the targets."""
     command = command.replace("`", " ; ").replace("$(", " ; ( ")
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|(){}<>\n")
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
-    out, current, redirects = [], [], []
+    out, current, redirects, ops = [], [], [], []
     pending_target = False
+    pending_op = ""
     for tok in lexer:
         # A redirection (> file, 2>> log, < in) can sit anywhere, even before
         # the program name. Its target still gets the path checks, but it is
@@ -123,9 +126,11 @@ def _segments(command):
             if current and current[-1].isdigit():
                 current.pop()  # the 2 in 2>file
             pending_target = True
+            pending_op = tok
             continue
         if pending_target and not (set(tok) <= set(";&|(){}<>\n")):
             redirects.append(tok)
+            ops.append(pending_op)
             pending_target = False
             continue
         pending_target = False
@@ -134,11 +139,15 @@ def _segments(command):
         if tok in SEPARATORS or (set(tok) <= set(";&|(){}<>\n") and set(tok) & set(";&|(){}\n")):
             if current or redirects:
                 out.append(current + ([REDIRECT_MARK] + redirects if redirects else []))
-            current, redirects = [], []
+                if ops_out is not None:
+                    ops_out.append(ops)
+            current, redirects, ops = [], [], []
         else:
             current.append(tok)
     if current or redirects:
         out.append(current + ([REDIRECT_MARK] + redirects if redirects else []))
+        if ops_out is not None:
+            ops_out.append(ops)
     return out
 
 
@@ -446,57 +455,74 @@ def scan_command(command, places, depth=0, cwd_known=True):
 
 def writes_file(command, cwd, target, depth=0):
     """True if some simple command in `command` writes to the file `target`
-    (an absolute path): a redirection onto it, tee, sed -i / perl -i, truncate
-    or mv on it, or cp/install with it as the destination. Words are parsed, so
-    quoting doesn't hide it. Reading it, and `git checkout REV -- CHANGELOG.md`
-    (how a branch heals), are not writes. Best effort: scripts run in other
-    languages are not seen; scripts/check.sh is the backstop."""
+    (an absolute path): an output redirection onto it, tee, sed -i / perl -i,
+    truncate or mv on it, or cp/install with it as the destination. Words are
+    parsed, so quoting doesn't hide it; `cd` and `env -C` are followed. Reading
+    it (`cat < CHANGELOG.md`, `cp CHANGELOG.md /tmp/x`) and `git checkout REV --
+    CHANGELOG.md` (how a branch heals) are not writes. Best effort: scripts run
+    in other languages, globs and unparseable commands are not seen;
+    scripts/check.sh is the backstop. When a `cd` goes somewhere unknowable
+    ($VAR), any word ending in the protected name counts."""
     if depth > MAX_DEPTH:
         return False
     try:
         command, subs = _pull_quoted_subs(command)
-        segments = _segments(command)
+        ops_per_segment = []
+        segments = _segments(command, ops_per_segment)
     except ValueError:
         return False
+    here = cwd  # None once a cd leads somewhere we can't know
 
-    def is_target(word):
+    def is_target(word, base):
         if not word or _SUB.search(word):
             return False
         expanded = _expand(word)
-        if expanded is None:  # $VAR we can't know: refuse if it ends in the protected name
+        if expanded is None or (base is None and not os.path.isabs(expanded)):
             return os.path.basename(word) == os.path.basename(target)
-        word = expanded
-        full =word if os.path.isabs(word) else os.path.join(cwd, word)
+        full = expanded if os.path.isabs(expanded) else os.path.join(base, expanded)
         return os.path.realpath(full) == target
 
-    for words in segments:
+    def moved(base, d):
+        e = _expand(d)
+        if base is None or e is None:
+            return None
+        return os.path.realpath(e if os.path.isabs(e) else os.path.join(base, e))
+
+    for words, ops in zip(segments, ops_per_segment):
         for w in words:
             for k in _SUB.findall(w):
-                if writes_file(subs[int(k)], cwd, target, depth + 1):
+                if writes_file(subs[int(k)], here if here is not None else cwd, target, depth + 1):
                     return True
+        chdirs = []
+        name, args = _unwrap(words, chdirs)
+        base = here
+        for d in chdirs:
+            base = moved(base, d)
         if REDIRECT_MARK in words:
-            if any(is_target(w) for w in words[words.index(REDIRECT_MARK) + 1:]):
-                return True
-        name, args = _unwrap(words)
+            targets = words[words.index(REDIRECT_MARK) + 1:]
+            for op, w in zip(ops, targets):
+                if ">" in op and is_target(w, base):  # > >> >| &> <> write; < reads
+                    return True
         if name == "-c":
-            if writes_file(args[0] if args else "", cwd, target, depth + 1):
+            if writes_file(args[0] if args else "", base if base is not None else cwd, target, depth + 1):
                 return True
             continue
-        operands = [a for a in args if a != REDIRECT_MARK]
-        if REDIRECT_MARK in args:
-            operands = args[:args.index(REDIRECT_MARK)]
+        operands = args[:args.index(REDIRECT_MARK)] if REDIRECT_MARK in args else list(args)
         files = [a for a in operands if not a.startswith("-")]
-        if name in ("tee", "truncate", "mv") and any(is_target(a) for a in files):
+        if name in ("cd", "pushd"):
+            here = moved(here, files[0] if files else "~")
+            continue
+        if name in ("tee", "truncate", "mv") and any(is_target(a, base) for a in files):
             return True
         if name in ("sed", "perl", "ruby") and any(
-                re.match(r"^-[a-zA-Z]*i|^--in-place", a) for a in operands) and any(is_target(a) for a in files):
+                re.match(r"^-[a-zA-Z]*i|^--in-place", a) for a in operands) and any(is_target(a, base) for a in files):
             return True
-        if name in ("cp", "install") and files and is_target(files[-1]):
+        if name in ("cp", "install") and files and is_target(files[-1], base):
             return True
         for i, a in enumerate(operands):  # cp -t DIR / --target-directory=DIR
             if name in ("cp", "mv", "install") and (a in ("-t", "--target-directory") or a.startswith("--target-directory=")):
                 d = a.split("=", 1)[1] if "=" in a else (operands[i + 1] if i + 1 < len(operands) else "")
-                if d and any(is_target(os.path.join(d, os.path.basename(f))) for f in files):
+                if d and any(is_target(os.path.join(d, os.path.basename(f)), base) for f in files):
                     return True
     return False
 

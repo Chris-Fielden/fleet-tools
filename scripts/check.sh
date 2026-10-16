@@ -113,12 +113,15 @@ if [[ "$cl_branch" == task/* ]]; then
   if [[ -z "$cl_bases" ]]; then
     skip "changelog guard (no merge-base with $cl_base)"
   else
-    cl_now="$(git hash-object CHANGELOG.md 2>/dev/null || echo none)"
+    # Both the committed copy and the working copy must match, so an
+    # uncommitted restore cannot hide an edit the branch still carries.
+    cl_work="$(git hash-object CHANGELOG.md 2>/dev/null || echo none)"
+    cl_head="$(git rev-parse -q --verify "HEAD:CHANGELOG.md" 2>/dev/null || echo none)"
     cl_same=0
-    # A restoring commit (copy of the base tip's file) counts as untouched too.
+    # A restoring commit (copy of the base tip file) counts as untouched too.
     for mb in $cl_bases "$cl_base"; do
       cl_then="$(git rev-parse -q --verify "$mb:CHANGELOG.md" 2>/dev/null || echo none)"
-      [[ "$cl_then" == "$cl_now" ]] && cl_same=1
+      [[ "$cl_then" == "$cl_work" && "$cl_then" == "$cl_head" ]] && cl_same=1
     done
     if [[ $cl_same -eq 1 ]]; then
       pass "changelog guard (CHANGELOG.md untouched)"
