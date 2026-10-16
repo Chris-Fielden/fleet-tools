@@ -131,3 +131,35 @@ def write_transitions(*recs):
     home = Path(tk.fleet_home())
     home.mkdir(parents=True, exist_ok=True)
     (home / "transitions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
+
+
+def test_repeated_set_status_records_one_event():
+    t = _make("build")
+    tk.set_status(t["id"], "claimed", allowed_from=("open",))
+    tk.set_status(t["id"], "done", allowed_from=("claimed", "done"))
+    tk.set_status(t["id"], "done", allowed_from=("claimed", "done"))
+    assert [r["kind"] for r in tk.read_transitions() if r["ticket"] == t["id"]
+            and r["kind"] == "shipped"] == ["shipped"]
+
+
+def test_log_write_failure_does_not_fail_the_status_change(monkeypatch, capsys):
+    t = _make("build")
+    real_open = open
+
+    def failing_open(path, *a, **kw):
+        if str(path).endswith("transitions.jsonl"):
+            raise OSError("disk full")
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", failing_open)
+    closed = tk.close_ticket(t["id"], "done")
+    assert closed["status"] == "done"
+    assert "could not record" in capsys.readouterr().err
+
+
+def test_future_ping_line_does_not_hide_a_real_transition():
+    t = _make("build")
+    tk.close_ticket(t["id"], "done")
+    future = datetime.now(timezone.utc) + timedelta(hours=2)
+    write_log(f"{future.strftime('%Y-%m-%dT%H:%M:%SZ')} PING_SENT shipped {t['id']}")
+    assert _kinds() == [("shipped", t["id"])]

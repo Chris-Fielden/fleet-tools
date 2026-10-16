@@ -211,11 +211,16 @@ def _record_transition(ticket: dict, at: str) -> None:
               "base_commit": ticket.get("base_commit")}
     path = transitions_path()
     refuse_real_store_in_tests(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, sort_keys=True) + "\n")
-        fh.flush()
-        os.fsync(fh.fileno())
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError as exc:
+        # The ticket is already saved and the log is informational: warn, don't fail the caller.
+        print(f"warning: could not record the {kind} event for {ticket['id']}: {exc}",
+              file=sys.stderr)
 
 
 def read_transitions() -> list[dict]:
@@ -769,6 +774,7 @@ def set_status(ticket_id: str, status: str, *, allowed_from, assignee=_KEEP,
             raise TicketError(
                 f"{ticket_id} is {ticket['status']}; it can only change from: "
                 + ", ".join(allowed_from))
+        previous = ticket["status"]
         ticket["status"] = status
         if assignee is not _KEEP:
             ticket["assignee"] = assignee
@@ -784,7 +790,8 @@ def set_status(ticket_id: str, status: str, *, allowed_from, assignee=_KEEP,
             ticket["started_at"] = started_at
         ticket["updated_at"] = _now()
         _write_atomic(_ticket_path(ticket_id), ticket)
-        _record_transition(ticket, ticket["updated_at"])
+        if previous != status:   # a repeated call is not a new event
+            _record_transition(ticket, ticket["updated_at"])
     return ticket
 
 

@@ -183,6 +183,14 @@ def test_timer_units_follow_autostart(env, monkeypatch, capsys):
     assert "disable --now fleet-heartbeat.timer" in (env / "FLEET_SYSTEMCTL.log").read_text()
 
 
+def test_stale_limit_follows_the_configured_interval(rig, env):
+    (env / "fleet" / "settings.json").write_text(json.dumps({"watch_interval_seconds": 600}))
+    rig(cycle_finished=iso(NOW - 1700))
+    assert hc.run(NOW) == 0
+    rig(cycle_finished=iso(NOW - 1900))
+    assert hc.run(NOW) == 1 and "limit 1800s" in rig.sent[0][2]
+
+
 @pytest.mark.parametrize("bad", [
     {"key": "stale", "last_alert": NOW - 10, "alerts": "x"},
     {"key": ["stale"], "last_alert": NOW - 10, "alerts": 1},
