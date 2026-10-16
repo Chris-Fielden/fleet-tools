@@ -100,7 +100,41 @@ else
   fail "gitleaks (not installed: see SETUP-GUIDE.md, 'Install gitleaks')"
 fi
 
-# 6. Add project-specific checks here, e.g.:
+# 6. CHANGELOG.md is written only by the release tagger, on the base branch.
+#    A task branch that edits it collides with the next Release commit (both
+#    insert right after [Unreleased]) and breaks every stacked branch. Compare
+#    with each merge-base, so a branch that merely merged main in passes, and
+#    a criss-cross with several merge-bases passes if it matches any of them.
+cl_branch="$(git branch --show-current)"
+if [[ "$cl_branch" == task/* ]]; then
+  cl_base="main"
+  git rev-parse --verify --quiet main >/dev/null || cl_base="master"
+  cl_bases="$(git merge-base --all HEAD "$cl_base" 2>/dev/null || true)"
+  if [[ -z "$cl_bases" ]]; then
+    skip "changelog guard (no merge-base with $cl_base)"
+  else
+    cl_now="$(git hash-object CHANGELOG.md 2>/dev/null || echo none)"
+    cl_same=0
+    # A restoring commit (copy of the base tip's file) counts as untouched too.
+    for mb in $cl_bases "$cl_base"; do
+      cl_then="$(git rev-parse -q --verify "$mb:CHANGELOG.md" 2>/dev/null || echo none)"
+      [[ "$cl_then" == "$cl_now" ]] && cl_same=1
+    done
+    if [[ $cl_same -eq 1 ]]; then
+      pass "changelog guard (CHANGELOG.md untouched)"
+    else
+      echo "  CHANGELOG.md differs from $cl_base. Task branches must not edit it: the entry"
+      echo "  is written at ship from the ticket title. Restore it with:"
+      echo "    git checkout \$(git merge-base HEAD $cl_base) -- CHANGELOG.md"
+      echo "  (or delete the file if $cl_base does not have one)"
+      fail "changelog guard (CHANGELOG.md is written only at ship)"
+    fi
+  fi
+else
+  skip "changelog guard (not a task/* branch)"
+fi
+
+# 7. Add project-specific checks here, e.g.:
 #    ruff check . && pass "lint" || fail "lint"
 
 echo

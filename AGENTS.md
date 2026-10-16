@@ -9,7 +9,9 @@ rulebook for every agent here, you included. The short version:
 1. Work only inside your task worktree (`.worktrees/<task-name>/`), on your
    `task/<name>` branch. The main checkout belongs to the human.
 2. The work isn't done until `scripts/check.sh` passes and your changes are
-   committed. Don't weaken or skip checks.
+   committed. Don't weaken or skip checks. Never edit the root `CHANGELOG.md`
+   on a task branch: only the release tagger writes it, at ship, from the
+   ticket title.
 3. A different model reviews every change. **You are the author, so Claude
    reviews your work:** run `scripts/review.sh` (it picks Claude for you, and
    runs both reviewers on high-risk branches; if it ever picks Codex, rerun

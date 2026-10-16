@@ -67,6 +67,12 @@ UNSAFE_AGENT_FLAGS = re.compile(
     r"|--dangerously-bypass-hook-trust|danger-full-access|(^|\s)--yolo(\s|$)"
 )
 WORKTREE_CLEANUP = re.compile(r"\bgit\s+(worktree\s+(remove|prune)|branch\s+-D)\b")
+# Shell writes to CHANGELOG.md: redirects, tee, sed -i, cp/mv/install onto it.
+# Reading it, and `git checkout <rev> -- CHANGELOG.md` (how a branch heals), stay allowed.
+CHANGELOG_WRITE = re.compile(
+    r"(>|\btee\s+(-a\s+)?|\bsed\s+(-\w*i\w*|--in-place)\b[^;&|]*?"
+    r"|\b(cp|mv|install|truncate)\b[^;&|]*?)"
+    r"\s*(?P<dir>\S*/)?CHANGELOG\.md(\s|$|[;&|)'\"])")
 ENV_WRITE = re.compile(r"(>|>>|tee\s+(-a\s+)?)\s*\S*\.env(\.\S+)?(\s|$)")
 
 # Fleet commands only the human runs. Matched where a command starts: at the
@@ -476,6 +482,16 @@ def main():
     if WORKTREE_CLEANUP.search(command):
         deny("Removing worktrees or force-deleting branches is done by the human "
              "(scripts/finish-task.sh cleans up after merging).")
+    if CHANGELOG_WRITE.search(command):
+        cl_info = repo_info(cwd)
+        # Only the root file counts: docs/CHANGELOG.md and friends are fine.
+        cl_root = os.path.join(os.path.realpath(cl_info["root"]), "CHANGELOG.md") if cl_info else ""
+        if cl_info is not None and cl_info["is_worktree"] and any(
+                os.path.realpath(os.path.join(cwd, m.group("dir") or "") + "CHANGELOG.md") == cl_root
+                for m in CHANGELOG_WRITE.finditer(command)):
+            deny("CHANGELOG.md is written only at ship, from the ticket title, by the "
+                 "release tagger. Don't edit it on a task branch: it conflicts with "
+                 "every other branch's release entry. Put the wording in the ticket title.")
     if ENV_WRITE.search(command):
         deny("Don't write .env files. Secrets never go in the repo; ask the human "
              "to put real values in place.")

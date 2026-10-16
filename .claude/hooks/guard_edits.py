@@ -26,6 +26,10 @@ SECRET_PATTERNS = [
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"), "a Slack token"),
 ]
 
+CHANGELOG_MSG = ("CHANGELOG.md is written only at ship, from the ticket title, by the "
+                 "release tagger. Don't edit it on a task branch: it conflicts with "
+                 "every other branch's release entry. Put the wording in the ticket title.")
+
 ENV_FILE = re.compile(r"(^|/)\.env(\.[^/]+)?$")
 
 # Codex apply_patch headers, e.g. "*** Update File: src/app.py"
@@ -76,6 +80,12 @@ def main():
         if ENV_FILE.search(path) and not path.endswith(".env.example"):
             deny("Don't create or edit .env files. Secrets stay out of the repo. "
                  "You may edit .env.example with placeholder values.")
+        full = path if os.path.isabs(path) else os.path.join(cwd, path)
+        cl_info = repo_info(full)
+        # Only the root file: docs/CHANGELOG.md and the like are not guarded.
+        if (cl_info is not None and cl_info["is_worktree"]
+                and os.path.realpath(full) == os.path.join(os.path.realpath(cl_info["root"]), "CHANGELOG.md")):
+            deny(CHANGELOG_MSG)
         info = repo_info(path)
         if info is not None and not info["is_worktree"]:
             deny(f"{path} is in the main checkout, which belongs to the human. Edits "
