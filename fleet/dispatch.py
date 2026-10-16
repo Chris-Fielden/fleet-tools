@@ -433,6 +433,11 @@ def _judge(t: dict, tickets: dict, claimed: list[dict], settings: dict, holders:
     if t["type"] != "fix" and branch_exists(repo, t["branch"]):
         d.skip = f"branch {t['branch']} already exists in {t['repo']}"
         return d
+    # 4b. A dependency with nothing in it yet: hold, say why, and let a human know once
+    dep = unmet_dependency(repo, t)
+    if dep:
+        d.skip = f"{UNMET_SKIP} {dep} has no commits beyond main yet; waiting for a human"
+        return d
     # 5. Who works it
     if t["type"] == "build":
         agent = settings["builder"]
@@ -488,6 +493,26 @@ def started_today(tickets: list[dict], now: datetime | None = None) -> int:
 
 
 BLOCKED_SKIP = "not launched: startup blocked, waiting for a human"
+DEPENDS_RE = re.compile(r"\bDepends on (task/[a-z0-9][a-z0-9-]*)", re.I)
+UNMET_SKIP = "held: its dependency branch"   # starts every skip reason of an unmet dependency
+HELD_NOTE = "Held:"                          # starts the one note (and ping) of a held ticket
+
+
+def unmet_dependency(repo: Path, t: dict) -> str | None:
+    """The branch a ticket says it `Depends on task/<name>` while that branch exists in the
+    repo with no commits beyond main (nothing to build on), else None. A branch that is
+    gone or already merged is not unmet: finish-task deletes branches after the merge."""
+    m = DEPENDS_RE.search(t.get("body") or "")
+    main = main_branch(repo)
+    if not m or main is None or m.group(1) == t.get("branch"):
+        return None
+    dep = m.group(1)
+    if not branch_exists(repo, dep):
+        return None
+    ahead = _git(repo, "rev-list", "--count", f"{main}..refs/heads/{dep}")
+    if ahead.returncode != 0 or ahead.stdout.strip() != "0":
+        return None
+    return None if is_merged(repo, dep) else dep
 
 
 def decide_investigations(tickets: list[dict], settings: dict, now: datetime | None = None) -> list[Decision]:
