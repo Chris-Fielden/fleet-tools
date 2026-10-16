@@ -67,12 +67,6 @@ UNSAFE_AGENT_FLAGS = re.compile(
     r"|--dangerously-bypass-hook-trust|danger-full-access|(^|\s)--yolo(\s|$)"
 )
 WORKTREE_CLEANUP = re.compile(r"\bgit\s+(worktree\s+(remove|prune)|branch\s+-D)\b")
-# Shell writes to CHANGELOG.md: redirects, tee, sed -i, cp/mv/install onto it.
-# Reading it, and `git checkout <rev> -- CHANGELOG.md` (how a branch heals), stay allowed.
-CHANGELOG_WRITE = re.compile(
-    r"(>|\btee\s+(-a\s+)?|\bsed\s+(-\w*i\w*|--in-place)\b[^;&|]*?"
-    r"|\b(cp|mv|install|truncate)\b[^;&|]*?)"
-    r"\s*(?P<dir>\S*/)?CHANGELOG\.md(\s|$|[;&|)'\"])")
 ENV_WRITE = re.compile(r"(>|>>|tee\s+(-a\s+)?)\s*\S*\.env(\.\S+)?(\s|$)")
 
 # Fleet commands only the human runs. Matched where a command starts: at the
@@ -450,6 +444,63 @@ def scan_command(command, places, depth=0, cwd_known=True):
     return None
 
 
+def writes_file(command, cwd, target, depth=0):
+    """True if some simple command in `command` writes to the file `target`
+    (an absolute path): a redirection onto it, tee, sed -i / perl -i, truncate
+    or mv on it, or cp/install with it as the destination. Words are parsed, so
+    quoting doesn't hide it. Reading it, and `git checkout REV -- CHANGELOG.md`
+    (how a branch heals), are not writes. Best effort: scripts run in other
+    languages are not seen; scripts/check.sh is the backstop."""
+    if depth > MAX_DEPTH:
+        return False
+    try:
+        command, subs = _pull_quoted_subs(command)
+        segments = _segments(command)
+    except ValueError:
+        return False
+
+    def is_target(word):
+        if not word or _SUB.search(word):
+            return False
+        expanded = _expand(word)
+        if expanded is None:  # $VAR we can't know: refuse if it ends in the protected name
+            return os.path.basename(word) == os.path.basename(target)
+        word = expanded
+        full =word if os.path.isabs(word) else os.path.join(cwd, word)
+        return os.path.realpath(full) == target
+
+    for words in segments:
+        for w in words:
+            for k in _SUB.findall(w):
+                if writes_file(subs[int(k)], cwd, target, depth + 1):
+                    return True
+        if REDIRECT_MARK in words:
+            if any(is_target(w) for w in words[words.index(REDIRECT_MARK) + 1:]):
+                return True
+        name, args = _unwrap(words)
+        if name == "-c":
+            if writes_file(args[0] if args else "", cwd, target, depth + 1):
+                return True
+            continue
+        operands = [a for a in args if a != REDIRECT_MARK]
+        if REDIRECT_MARK in args:
+            operands = args[:args.index(REDIRECT_MARK)]
+        files = [a for a in operands if not a.startswith("-")]
+        if name in ("tee", "truncate", "mv") and any(is_target(a) for a in files):
+            return True
+        if name in ("sed", "perl", "ruby") and any(
+                re.match(r"^-[a-zA-Z]*i|^--in-place", a) for a in operands) and any(is_target(a) for a in files):
+            return True
+        if name in ("cp", "install") and files and is_target(files[-1]):
+            return True
+        for i, a in enumerate(operands):  # cp -t DIR / --target-directory=DIR
+            if name in ("cp", "mv", "install") and (a in ("-t", "--target-directory") or a.startswith("--target-directory=")):
+                d = a.split("=", 1)[1] if "=" in a else (operands[i + 1] if i + 1 < len(operands) else "")
+                if d and any(is_target(os.path.join(d, os.path.basename(f))) for f in files):
+                    return True
+    return False
+
+
 def main():
     if RULES_OFF:
         allow_silently()
@@ -482,13 +533,11 @@ def main():
     if WORKTREE_CLEANUP.search(command):
         deny("Removing worktrees or force-deleting branches is done by the human "
              "(scripts/finish-task.sh cleans up after merging).")
-    if CHANGELOG_WRITE.search(command):
+    if "CHANGELOG.md" in command:
         cl_info = repo_info(cwd)
         # Only the root file counts: docs/CHANGELOG.md and friends are fine.
         cl_root = os.path.join(os.path.realpath(cl_info["root"]), "CHANGELOG.md") if cl_info else ""
-        if cl_info is not None and cl_info["is_worktree"] and any(
-                os.path.realpath(os.path.join(cwd, m.group("dir") or "") + "CHANGELOG.md") == cl_root
-                for m in CHANGELOG_WRITE.finditer(command)):
+        if cl_info is not None and cl_info["is_worktree"] and writes_file(command, cwd, cl_root):
             deny("CHANGELOG.md is written only at ship, from the ticket title, by the "
                  "release tagger. Don't edit it on a task branch: it conflicts with "
                  "every other branch's release entry. Put the wording in the ticket title.")

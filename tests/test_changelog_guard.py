@@ -45,8 +45,7 @@ def make_repo(tmp_path):
 
 def check(repo):
     # Only the changelog section matters; other checks may fail in a bare repo.
-    r = subprocess.run(["bash", "scripts/check.sh"], cwd=repo, capture_output=True, text=True,
-                       env={**os.environ, "PATH": os.environ["PATH"]})
+    r = subprocess.run(["bash", "scripts/check.sh"], cwd=repo, capture_output=True, text=True)
     return r.stdout
 
 
@@ -124,21 +123,20 @@ def test_branch_that_only_merged_main_is_not_flagged(tmp_path):  # T4
 
 def test_criss_cross_with_two_merge_bases(tmp_path):  # T4
     repo = make_repo(tmp_path)
-    release(repo, "ID-1", "x")
     branch(repo, "task/p")
-    commit_file(repo, "p.txt", "p\n")
+    commit_file(repo, "p.txt", "p\n")                 # p1
     git(repo, "checkout", "-q", "main")
-    commit_file(repo, "m.txt", "m\n")
-    git(repo, "branch", "task/q", "task/p")
-    # criss-cross: main merges p's tip, task/q (at p's old tip) merges main's old tip
-    old_main = git(repo, "rev-parse", "HEAD").stdout.strip()
-    git(repo, "merge", "-q", "--no-ff", "-m", "m<-p", "task/p")
-    git(repo, "checkout", "-q", "task/q")
-    git(repo, "merge", "-q", "--no-ff", "-m", "q<-m", old_main)
+    release(repo, "ID-1", "x")                        # q1 (main), writes CHANGELOG.md
     git(repo, "checkout", "-q", "task/p")
-    git(repo, "merge", "-q", "--no-ff", "-m", "p<-m", "main")
-    assert len(git(repo, "merge-base", "--all", "task/p", "main").stdout.split()) >= 1
-    assert "untouched" in check(repo)
+    git(repo, "merge", "-q", "--no-ff", "-m", "p<-main", "main")   # P
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "-q", "--no-ff", "-m", "main<-p1", "task/p~1")  # M
+    assert len(git(repo, "merge-base", "--all", "task/p", "main").stdout.split()) == 2
+    git(repo, "checkout", "-q", "task/p")
+    out = check(repo)
+    assert "untouched" in out and not guard_failed(out)
+    (repo / "CHANGELOG.md").write_text("changed\n")
+    assert guard_failed(check(repo))
 
 
 def test_same_day_releases_count_up_and_unreleased_stays_empty(tmp_path):  # T6
@@ -185,11 +183,14 @@ def test_edit_hook_blocks_root_changelog_only(tmp_path):  # T3, T7
 def test_bash_hook_blocks_shell_writes_to_root_changelog(tmp_path):  # T3, T7
     wt = worktree(tmp_path)
     for cmd in ['echo x >> CHANGELOG.md', "sed -i 's/a/b/' CHANGELOG.md", 'printf x | tee -a CHANGELOG.md',
-                'cp /tmp/n ./CHANGELOG.md', 'echo x > CHANGELOG.md']:
+                'cp /tmp/n ./CHANGELOG.md', 'echo x > CHANGELOG.md', 'echo x > "CHANGELOG.md"',
+                "echo x >> 'CHANGELOG.md'", 'echo x >"$PWD/CHANGELOG.md"', "mv /tmp/n CHANGELOG.md",
+                'bash -c "echo x >> CHANGELOG.md"', "perl -pi -e 's/a/b/' CHANGELOG.md"]:
         reason = hook("guard_bash.py", {"command": cmd}, wt)
         assert reason and "written only at ship" in reason, cmd
     for cmd in ['cat CHANGELOG.md', 'echo x >> docs/CHANGELOG.md', 'git checkout main -- CHANGELOG.md',
-                'grep ship CHANGELOG.md']:
+                'grep ship CHANGELOG.md', 'cp CHANGELOG.md /tmp/changelog-backup',
+                'diff CHANGELOG.md docs/CHANGELOG.md']:
         assert hook("guard_bash.py", {"command": cmd}, wt) is None, cmd
 
 
