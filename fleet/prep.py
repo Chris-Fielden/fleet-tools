@@ -170,6 +170,37 @@ def _state():
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
+def _cmdline(pid: int) -> str | None:
+    """The command line of a process, or None where it cannot be read."""
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+    except OSError:
+        return None
+
+
+def _max_age() -> int:
+    try:
+        return int(dp.load_settings().get("ship_reservation_max_age_s", 0))
+    except Exception:   # a bad settings file must not make every reservation vanish
+        return 14400
+
+
+def _holds(r: dict) -> bool:
+    """True while a reservation still holds its ticket: its pid is alive, still runs the command
+    that reserved it (a reused pid does not), and it is younger than the age limit."""
+    if not _alive(r["pid"]):
+        return False
+    at, limit = r.get("at"), _max_age()
+    if isinstance(at, (int, float)) and limit and datetime.now(timezone.utc).timestamp() - at > limit:
+        return False
+    cmd = r.get("cmd")
+    if isinstance(cmd, str) and cmd:
+        now = _cmdline(r["pid"])
+        if now is not None and now != cmd:
+            return False
+    return True
+
+
 def _alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -183,7 +214,7 @@ def _alive(pid: int) -> bool:
 def _busy(state: dict) -> set[str]:
     """Ids held by an agent job or by a running `ship` (a dead one holds nothing)."""
     ids = {i for j in state["jobs"] for i in j["ids"] if isinstance(i, str)}
-    return ids | {r["id"] for r in state["shipping"] if _alive(r["pid"])}
+    return ids | {r["id"] for r in state["shipping"] if _holds(r)}
 
 
 def locked_ids() -> set[str]:
@@ -195,7 +226,7 @@ def locked_ids() -> set[str]:
 def shipping_ids() -> set[str]:
     """Ids of tickets a running `ship` holds right now (a dead process holds nothing).
     Raises OSError when the state cannot be read: callers must fail closed."""
-    return {r["id"] for r in _load()["shipping"] if _alive(r["pid"])}
+    return {r["id"] for r in _load()["shipping"] if _holds(r)}
 
 
 def reserve_shipping(ticket_id: str) -> str | None:
@@ -204,10 +235,11 @@ def reserve_shipping(ticket_id: str) -> str | None:
     with _state() as st:
         if any(ticket_id in j["ids"] for j in st["jobs"]):
             return f"an agent is still working on {ticket_id}; wait for its ping"
-        if any(r["id"] == ticket_id and r["pid"] != os.getpid() and _alive(r["pid"]) for r in st["shipping"]):
+        if any(r["id"] == ticket_id and r["pid"] != os.getpid() and _holds(r) for r in st["shipping"]):
             return f"{ticket_id} is already being shipped"
-        st["shipping"] = [r for r in st["shipping"] if r["id"] != ticket_id and _alive(r["pid"])]
-        st["shipping"].append({"id": ticket_id, "pid": os.getpid()})
+        st["shipping"] = [r for r in st["shipping"] if r["id"] != ticket_id and _holds(r)]
+        st["shipping"].append({"id": ticket_id, "pid": os.getpid(), "cmd": _cmdline(os.getpid()) or "",
+                               "at": datetime.now(timezone.utc).timestamp()})
     return None
 
 
