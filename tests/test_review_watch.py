@@ -377,13 +377,13 @@ def test_a_recorded_fail_alone_never_pings(rig, ntfy):
     assert ntfy.requests == [] and rig.get()["status"] == "claimed"
 
 
-def test_a_review_saved_but_not_recorded_pings_high_once(rig, ntfy):
+def test_a_review_saved_but_not_recorded_pings_low_once(rig, ntfy):
     rig.review_file("Codex", "PASS", age=600)
     rig.cycle()
     rig.cycle(5)
     assert len(ntfy.requests) == 1
     title, message, header = sent(ntfy)[0]
-    assert title == f"Review not recorded: {rig.id}" and header == "high" and "Codex" in message
+    assert title == f"Review not recorded: {rig.id}" and header == "low" and "Codex" in message
 
 
 def test_a_review_still_inside_its_grace_period_is_not_pinged(rig, ntfy):
@@ -642,10 +642,11 @@ def test_watch_moves_the_ticket_and_says_so(rig, ntfy, capsys):
 # --- priorities in notify.json -------------------------------------------------------
 
 @pytest.mark.parametrize("event, level", [
-    ("urgent", "high"), ("failed", "high"), ("blocked", "high"), ("review_failed", "high"),
-    ("review_unrecorded", "high"), ("ship", "default"), ("ready", "default"),
+    ("urgent", "low"), ("failed", "high"), ("blocked", "high"), ("review_failed", "high"),
+    ("review_unrecorded", "low"), ("ship", "default"), ("ready", "low"),
     ("stalled", "default"), ("proposed", "low"), ("investigated", "low"),
-    ("oncall", "low"), ("needs_human", "low")])
+    ("oncall", "low"), ("needs_human", "high"), ("dialog", "high"),
+    ("settings_invalid", "high"), ("leftovers", "high"), ("usage_pause", "low"), ("shipped", "low")])
 def test_default_priorities(event, level):
     assert notify.PRIORITIES[event] == level and set(notify.PRIORITIES) == set(notify.EVENTS)
 

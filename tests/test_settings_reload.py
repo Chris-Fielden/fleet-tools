@@ -82,14 +82,14 @@ def test_a_bad_value_is_invalid_too_and_a_fixed_file_is_picked_up_again(projects
     assert len(pings) == 1
 
 
-def test_the_ping_priority_is_low(env, monkeypatch):
+def test_the_ping_priority_is_high(env, monkeypatch):
     (env / "fleet").mkdir(exist_ok=True)
     (env / "fleet" / "notify.json").write_text(json.dumps({"url": "http://127.0.0.1:9", "topic": "t"}))
     (env / "fleet" / "notify.json").chmod(0o600)
     got = {}
     monkeypatch.setenv("FLEET_HOME", str(env / "fleet"))
     monkeypatch.setattr(notify, "_post", lambda c, m, p: got.update(p=p) or True)
-    assert notify.send_alert("settings_invalid", "t", "x") and got["p"] == "low"
+    assert notify.send_alert("settings_invalid", "t", "x") and got["p"] == "high"
 
 
 def test_a_missing_ping_config_does_not_stop_the_watch(projects, herdr_log, env):

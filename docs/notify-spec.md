@@ -47,7 +47,7 @@ that finds anything (or cannot run), only the one-line summary is sent.
 
 ### Ready with leftovers
 
-`leftovers` (default priority, `broom`): the supervisor judged a failed review SQUIRRELS and
+`leftovers` (high priority, `broom`): the supervisor judged a failed review SQUIRRELS and
 the dispatcher marked the ticket ready with leftovers (EM-8 step F). One ping per ticket;
 it is dropped if the branch tip moves before it is sent. The message holds the id, type,
 status, title and the supervisor's one-line reason (secret-scanned, since it goes to a phone).
@@ -56,15 +56,17 @@ status, title and the supervisor's one-line reason (secret-scanned, since it goe
 
 | Event | When |
 |---|---|
-| `shipped` | A web ship merged the ticket. Default priority. |
+| `shipped` | A web ship merged the ticket. Low priority. |
 | `ship_failed` | A web ship was refused or failed, with the reason. High. |
 
 ### Priorities
 
 Each message carries its ntfy priority in the JSON body and in a `Priority`
-header. Defaults: `urgent`, `failed`, `blocked`, `review_failed`,
-`review_unrecorded` = `high`; `ready`, `ship`, `stalled`, `leftovers` = `default`;
-`proposed`, `investigated`, `oncall`, `needs_human` = `low`. (`blocked`, `stalled` and
+header. Defaults: `needs_human`, `dialog`, `settings_invalid`, `leftovers`,
+`failed`, `blocked`, `review_failed`, `ship_failed`, `dispatcher_down`,
+`usage_stop` = `high`; `ship`, `stalled`, `ship_list` = `default`; `urgent`,
+`review_unrecorded`, `ready`, `proposed`, `investigated`, `oncall`, `shipped`,
+`usage_pause` = `low`. (`blocked`, `stalled` and
 `review_failed` are no longer sent; their defaults only matter if you set them.) Override any of them in `notify.json`:
 `"priorities": {"stalled": "low", "ship": "high"}` (values: `min`, `low`,
 `default`, `high`, `max`). An unknown event or value makes the file unusable.
