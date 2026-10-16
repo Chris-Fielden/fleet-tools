@@ -6,7 +6,8 @@ boot service). It reads $FLEET_HOME/heartbeat.json (written by `dispatch
 
 - the file is missing or unreadable;
 - its pid is dead, or is not a `dispatch --watch`;
-- the last finished cycle is older than 3x the configured watch interval (360s at the default 120s);
+- the last finished cycle is older than 3x the configured watch_interval_seconds
+  (360s at the default 120s);
 - 3 or more cycles in a row ended in an error;
 - tickets are waiting to launch (status `open`) but nothing has changed for 30 min.
 
@@ -27,12 +28,22 @@ from . import service as sv
 from . import settings as st
 from . import ticket as tk
 
-STALE_CYCLE_FACTOR = 3             # a cycle is stale after this many watch intervals
+STALE_CYCLES = 3                   # a cycle may take up to this many watch intervals
 DEFAULT_WATCH_INTERVAL = 120
 ERROR_STREAK = 3
 STALL_SECONDS = 30 * 60
 FIRST_REPEAT_SECONDS = 30 * 60
 REPEAT_SECONDS = 60 * 60
+
+
+def stale_cycle_seconds() -> int:
+    """3x the configured watch interval. Unreadable settings fall back to the
+    default interval: the checker must keep checking."""
+    try:
+        interval = int(st.load_settings()["watch_interval_seconds"])
+    except Exception:
+        interval = DEFAULT_WATCH_INTERVAL
+    return STALE_CYCLES * interval
 
 
 def _parse(value) -> float | None:
@@ -44,15 +55,6 @@ def _parse(value) -> float | None:
 
 def _work_owed() -> bool:
     return any(t.get("status") == "open" for t in tk.list_tickets())
-
-
-def _stale_limit() -> int:
-    """3 x the configured watch_interval_seconds; the default interval if settings can't load."""
-    try:
-        interval = int(st.load_settings().get("watch_interval_seconds") or DEFAULT_WATCH_INTERVAL)
-    except Exception:
-        interval = DEFAULT_WATCH_INTERVAL
-    return STALE_CYCLE_FACTOR * max(interval, 1)
 
 
 def find_problems(now: float) -> list[tuple[str, str]]:
@@ -76,7 +78,7 @@ def find_problems(now: float) -> list[tuple[str, str]]:
     finished = _parse(beat.get("cycle_finished"))
     if finished is None:
         finished = _parse(beat.get("started_at"))   # no cycle has finished yet
-    limit = _stale_limit()
+    limit = stale_cycle_seconds()
     if finished is None or now - finished > limit:
         age = "unknown" if finished is None else f"{int(now - finished)}s"
         problems.append(("stale", f"no cycle has finished for {age} (limit {limit}s)"))

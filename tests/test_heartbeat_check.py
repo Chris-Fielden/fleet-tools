@@ -70,12 +70,30 @@ def test_cycle_just_inside_the_limit_is_fine(rig):
     assert hc.run(NOW) == 0
 
 
-def test_stale_limit_follows_the_configured_interval(rig, monkeypatch):
-    monkeypatch.setattr(hc.st, "load_settings", lambda: {"watch_interval_seconds": 600})
-    rig(cycle_finished=iso(NOW - 1500))
-    assert hc.run(NOW) == 0
+def _set_interval(env, seconds):
+    (env / "fleet" / "settings.json").write_text(json.dumps({"watch_interval_seconds": seconds}))
+
+
+def test_stale_limit_follows_a_slower_watch_interval(rig, env):
+    _set_interval(env, 600)
+    rig(cycle_finished=iso(NOW - 1500))      # healthy at a 600 s interval (limit 1800 s)
+    assert hc.run(NOW) == 0 and rig.sent == []
     rig(cycle_finished=iso(NOW - 1900))
     assert hc.run(NOW) == 1 and "limit 1800s" in rig.sent[0][2]
+
+
+def test_stale_limit_follows_a_faster_watch_interval(rig, env):
+    _set_interval(env, 30)
+    rig(cycle_finished=iso(NOW - 120))       # limit is 90 s
+    assert hc.run(NOW) == 1 and "limit 90s" in rig.sent[0][2]
+
+
+def test_bad_settings_fall_back_to_the_default_limit(rig, env):
+    (env / "fleet" / "settings.json").write_text("{nope")
+    rig(cycle_finished=iso(NOW - 360))
+    assert hc.run(NOW) == 0
+    rig(cycle_finished=iso(NOW - 400))
+    assert hc.run(NOW) == 1
 
 
 def test_error_streak(rig):
