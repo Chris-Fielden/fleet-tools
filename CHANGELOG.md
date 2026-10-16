@@ -6,9 +6,23 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.16.4] - 2026-10-16
+
 ### Changed
 
-- `ship` and the merge script no longer ask y/N below high risk (EM-31). The typed ticket id at high risk is unchanged.
+- EM-32: Stop CHANGELOG.md conflicts on every stacked ship
+
+## [ship-2026.10.16.3] - 2026-10-16
+
+### Changed
+
+- BD-117: Rebuild BD-116: hold tickets with unmet needs
+
+## [ship-2026.10.16.2] - 2026-10-16
+
+### Changed
+
+- BD-111: Read-only digest command for informational fleet events (last 24h)
 
 ## [ship-2026.10.16.1] - 2026-10-16
 

@@ -20,6 +20,9 @@ read its message, fix the cause, and try again. Never try to get around a hook.
   to make them pass.
 - Commit your work on your task branch before you stop. Uncommitted work
   does not count.
+- Never edit the root `CHANGELOG.md` on a task branch. Only the release
+  tagger writes it, at ship, from the ticket title; put the wording there.
+  `scripts/check.sh` fails a branch whose copy differs from main's.
 
 ## 3. A different reviewer looks at every change
 

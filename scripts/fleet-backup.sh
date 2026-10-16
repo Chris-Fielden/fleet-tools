@@ -2,7 +2,7 @@
 # Snapshot the fleet home with restic, plus a manifest of what was saved.
 #
 # Saved: tickets/*.json, settings.json, kaneo.json, notify.json,
-# kaneo-map.json (whichever exist) and the fleet.service unit file.
+# kaneo-map.json, transitions.jsonl (whichever exist) and the fleet.service unit file.
 # Not saved: logs, locks, and anything else in the fleet home.
 #
 # Repository and password come from the environment or a password file that
@@ -79,7 +79,7 @@ if [[ -d "$fleet_home/tickets" ]]; then
   done
 fi
 
-for name in settings.json kaneo.json notify.json kaneo-map.json; do
+for name in settings.json kaneo.json notify.json kaneo-map.json transitions.jsonl; do
   if [[ -f "$fleet_home/$name" ]]; then cp -p "$fleet_home/$name" "$stage/$name"; fi
 done
 if [[ -f "$unit" ]]; then
