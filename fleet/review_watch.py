@@ -11,7 +11,8 @@
 * A claimed ticket TRULY FAILS when its agent sat idle on a failed commit for
   5 minutes, it has `fail_rounds_threshold` (default 8) FAIL verdicts on different commits, its agent was blocked
   for 20 minutes, or it had no activity for 45 minutes while its agent was idle or waiting. It is then closed as
-  failed and an on-call fix ticket is filed (launched by the dispatch cycle in
+  failed and an on-call fix ticket is filed (except an agent idle with no commit since the claim:
+  nudged once after GIVE_UP_AFTER, failed GIVE_UP_AFTER later with a needs_human ping, no on-call) (launched by the dispatch cycle in
   its own slot); see _fail_ticket. A mid-loop FAIL verdict never pings.
 * A commit landing after a PASS (the tip is past the commit the PASS is on, and its agent has
   stopped) clears the ready state and re-runs check.sh and the reviews on that exact tip in the
@@ -61,7 +62,12 @@ from . import ticket as tk
 BLOCKED_AFTER = 20 * 60   # seconds an agent waits for input before the ticket fails
 STALL_AFTER = 45 * 60     # seconds with no commit, note or log output before the ticket fails
 STALL_STATES = ("idle", "done", "blocked", "waiting")   # herdr states in which a stall counts; never "working"
-STOPPED_AFTER = 5 * 60    # seconds an agent sits idle on a failed tip before the ticket fails
+GIVE_UP_AFTER = 5 * 60    # seconds an agent sits idle with no commit (and again after one nudge) before the ticket fails
+NO_COMMIT_REASON = "agent stopped without a commit"
+NUDGE_TEXT = ("You stopped without making a commit. Commit your work now, or write a ticket note "
+              "(ticket note <ID> TEXT) explaining why you stopped. Never ask questions in chat: "
+              "write them as a ticket note.")
+STOPPED_AFTER = 5 * 60   # seconds an agent sits idle on a failed tip before the ticket fails
 UNRECORDED_GRACE = 2 * 60  # seconds review.sh gets to record a review it just saved
 LOG_TAIL = 256 * 1024
 BACKSTOP_ROUNDS = 15      # review rounds (commits with a recorded review) after which a still-FAILing ticket is closed
@@ -85,7 +91,7 @@ def state_path() -> Path:
 
 def _load_state(warn) -> dict:
     state = {"sent": [], "blocked_since": {}, "stopped_since": {}, "seen": {}, "pending": [], "fresh": {},
-             "dialog_pinged": {}, "unrecorded_seen": {}}
+             "dialog_pinged": {}, "unrecorded_seen": {}, "nudged": {}}
     try:
         data = json.loads(state_path().read_text(encoding="utf-8"))
         if (isinstance(data, dict) and isinstance(data.get("sent"), list)
@@ -98,6 +104,8 @@ def _load_state(warn) -> dict:
                          dialog_pinged={k: v for k, v in (data["dialog_pinged"]
                                                           if isinstance(data.get("dialog_pinged"), dict) else {}).items()
                                         if isinstance(k, str) and isinstance(v, str)},
+                         nudged={k: v for k, v in (data["nudged"] if isinstance(data.get("nudged"), dict)
+                                                   else {}).items() if isinstance(k, str) and isinstance(v, str)},
                          unrecorded_seen={k: v for k, v in (data["unrecorded_seen"] if isinstance(
                              data.get("unrecorded_seen"), dict) else {}).items()
                                           if isinstance(k, str) and type(v) is int and v > 0},
@@ -367,6 +375,43 @@ def _end_spells(ticket_id: str, state: dict) -> None:
     state["blocked_since"].pop(ticket_id, None)
     state["stopped_since"].pop(ticket_id, None)
     state["dialog_pinged"].pop(ticket_id, None)
+    state["nudged"].pop(ticket_id, None)
+
+
+def _agent_last_note(t: dict) -> str:
+    """The newest note not written by the human or the supervisor, clipped; "" if none. Untrusted text."""
+    for n in reversed(t.get("notes", [])):
+        if n.get("by") != "human" and not n["text"].startswith("SUPERVISOR "):
+            return _clip(" ".join(n["text"].split()), ANALYSIS_MAX)
+    return ""
+
+
+def _no_commit_check(t: dict, tip: str, agent: dict | None, idle: float, state: dict,
+                     now: datetime) -> str | None:
+    """An agent that ended its turn with no commit since the claim (the branch tip is still the
+    base commit). Idle for GIVE_UP_AFTER: it is nudged once (commit, or write a note saying why).
+    Still idle with no commit GIVE_UP_AFTER after the nudge: the ticket fails. Never while herdr
+    shows working, blocked or waiting."""
+    tid = t["id"]
+    base = t.get("base_commit")
+    if not base or tip != base:
+        state["nudged"].pop(tid, None)
+        return None
+    if agent is None or agent.get("agent_status") not in ("idle", "done") or idle < GIVE_UP_AFTER:
+        return None
+    nudged = _parse(state["nudged"].get(tid))
+    if nudged is None:
+        try:
+            lc.herdr("agent", "prompt", agent.get("name") or tid.lower(), NUDGE_TEXT)
+        except lc.LaunchError as exc:
+            dp.log("NUDGE_FAILED", f"{tid} {_clip(str(exc), 200)}")
+            return None   # not recorded: tried again next cycle
+        state["nudged"][tid] = _stamp(now)
+        dp.log("NUDGED", f"{tid} idle with no commit for {int(idle // 60)} min")
+        return None
+    if (now - nudged).total_seconds() >= GIVE_UP_AFTER:
+        return NO_COMMIT_REASON
+    return None
 
 
 def _dialog_ping(t: dict, agent: dict, state: dict, now: datetime) -> None:
@@ -440,6 +485,8 @@ def _failure_reason(t: dict, repo: Path, tip: str, agent: dict | None, state: di
     # the agent's status changes, so it counts from when the agent stopped working.
     last = _last_activity(t, repo, tip, agent, state, now)
     idle = (now - last).total_seconds()
+    if reason is None:
+        reason = _no_commit_check(t, tip, agent, idle, state, now)
     if reason is None and idle >= STALL_AFTER and agent_state in STALL_STATES:
         reason = f"stalled: no commit, note, log output or agent change for {int(idle // 60)} min"
     return reason
@@ -667,7 +714,8 @@ def _recover(rec: dict, settings: dict, state: dict, now: datetime, emit, warn) 
     t = tk.load_ticket(tid)
     detail = f"{rec['reason']}; failed by: {rec['reviewer']}; FAIL rounds: {rec['rounds']}"
     if rec.get("final") is not None:
-        detail += f"; supervisor: {rec['final']}"
+        label = "agent's last note" if rec["reason"] == NO_COMMIT_REASON else "supervisor"
+        detail += f"; {label}: {rec['final']}"
     if tk.check_secrets("close note", detail):   # the reviewer name and analysis are free text: scan like any note
         detail = f"{rec['reason']}; FAIL rounds: {rec['rounds']} (reviewer name and analysis withheld)"
     # 1. close it as failed (its card moves to Failed)
@@ -936,6 +984,8 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
                             leftovers=(marks or {}).get(t["id"]) == tip, waiting=t["id"] in waiting)
     if reason:
         final = latest_analysis(t) if reason.startswith(BACKSTOP_REASON) else None
+        if reason == NO_COMMIT_REASON:   # no on-call attempt: a person reads the agent's last note
+            final = _agent_last_note(t) or "no note was written"
         write_recovery(t, reason, tip, final)   # first: everything else is driven from the record
 
 
