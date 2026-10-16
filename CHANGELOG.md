@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.16.6] - 2026-10-16
+
+### Changed
+
+- BD-114: Split long findings into several notes, do not cut at 4000
+
 ## [ship-2026.10.16.5] - 2026-10-16
 
 ### Changed
