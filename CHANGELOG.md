@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.16.3] - 2026-10-16
+
+### Changed
+
+- BD-117: Rebuild BD-116: hold tickets with unmet needs
+
 ## [ship-2026.10.16.2] - 2026-10-16
 
 ### Changed
