@@ -131,9 +131,10 @@ elif [[ "$risk" == "high" ]]; then
   typed="$(printf '%s' "$answer" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
   wanted="$(printf '%s' "$confirm_word" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
   [[ "$typed" == "$wanted" ]] || { echo "Cancelled. Nothing changed."; exit 0; }
+elif [[ "$risk" == "low" || "$risk" == "medium" ]]; then
+  echo "Merging $branch into $base (risk $risk; no confirmation below high risk)."
 else
-  read -r -p "Merge $branch into $base? [y/N] " answer
-  [[ "$answer" =~ ^[Yy]$ ]] || { echo "Cancelled. Nothing changed."; exit 0; }
+  echo "Unexpected risk level '$risk'. Not merging."; exit 1
 fi
 
 [[ "$(git rev-parse --verify "$branch^{commit}")" == "$tip" ]] \

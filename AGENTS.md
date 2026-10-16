@@ -16,7 +16,8 @@ rulebook for every agent here, you included. The short version:
    with `REVIEWER=claude`), then fix every MUST FIX item, commit, and run the
    checks again.
 4. Only the human merges, with `ship` (or `scripts/finish-task.sh`). Never run
-   either, and never push to main.
+   either, and never push to main. Below high risk the human is not asked a
+   y/N question; at high risk they must type the ticket id.
    `ship ID --accept-leftovers --reason TEXT` is human-only, from a terminal.
    It merges one exact commit despite a Codex FAIL, only when the supervisor
    marked that commit ready with leftovers and a saved Claude PASS exists on

@@ -62,8 +62,10 @@ def test_closing_the_terminal_mid_ship_still_merges(reviewed, env):
     proc.wait()
     os.close(master)
     assert wait_for(lambda: tk.load_ticket(t["id"])["status"] == "done"), "the detached job did not finish"
+    log = env / "fleet" / "ship" / f"{t['id']}.log"
+    # the status flips inside the reconcile; the job writes this line just after it returns
+    assert wait_for(lambda: "merged and marked done" in log.read_text()), log.read_text()
     assert ship_cli._status(t["id"]) == 0
-    assert "merged and marked done" in (env / "fleet" / "ship" / f"{t['id']}.log").read_text()
 
 
 def test_a_second_ship_of_the_same_ticket_is_refused(reviewed, env, monkeypatch, capsys):

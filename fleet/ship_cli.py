@@ -950,12 +950,13 @@ def _ask_to_ship(repo: Path, wt: Path, branch: str, tip: str) -> str | int:
         print("".join(f"  {line}\n" for line in others.splitlines()), end="")
     print(dp._git(repo, "log", "--oneline", f"{base}..{tip}").stdout, end="")
     print(dp._git(repo, "diff", "--stat", f"{base}...{tip}").stdout, end="")
+    if risk in ("low", "medium"):
+        return "y"
+    if risk != "high":
+        return _fail(f"unexpected risk level {risk!r}; nothing was merged")
     try:
-        if risk == "high":
-            typed = input(f"HIGH RISK change. Type the ticket id ({word}) to ship {branch} into {base}: ")
-            yes = typed.strip().lower() == word.lower()
-        else:
-            yes = input(f"Ship {branch} into {base}? [y/N] ").strip().lower() in ("y", "yes")
+        typed = input(f"HIGH RISK change. Type the ticket id ({word}) to ship {branch} into {base}: ")
+        yes = typed.strip().lower() == word.lower()
     except (EOFError, KeyboardInterrupt):
         print()
         yes = False
