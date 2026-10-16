@@ -20,6 +20,9 @@ read its message, fix the cause, and try again. Never try to get around a hook.
   to make them pass.
 - Commit your work on your task branch before you stop. Uncommitted work
   does not count.
+- Never edit the root `CHANGELOG.md` on a task branch. Only the release
+  tagger writes it, at ship, from the ticket title; put the wording there.
+  `scripts/check.sh` fails a branch whose copy differs from main's.
 
 ## 3. A different reviewer looks at every change
 
@@ -59,6 +62,8 @@ weaken its own rules.
 
 - Merging is done by the human with `ship` (or `scripts/finish-task.sh
   <task-name>`). Do not run either, and do not push to `main` or `master`.
+  Below high risk the human is not asked a y/N question; at high risk they
+  must type the ticket id.
 - `ship ID --accept-leftovers --reason TEXT` is human-only, from a terminal.
   It merges one exact commit despite a Codex FAIL, only when the supervisor
   marked that commit ready with leftovers and a saved Claude PASS exists on

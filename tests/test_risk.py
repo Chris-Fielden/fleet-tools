@@ -31,6 +31,7 @@ def rules():
 @pytest.mark.parametrize("path", [
     "k8s/app/deploy.yaml", ".claude/settings.json", ".codex/config.toml", "CLAUDE.md", "AGENTS.md",
     "scripts/check.sh", "scripts/finish-task.sh", "scripts/review.sh", "scripts/new-task.sh",
+    "scripts/release-tag.sh",
     "fleet/secrets.py", "docs/secret-notes.md", "fleet/oauth.py", "src/Auth/login.py",
     ".env", "app/.env.example", "requirements.txt", "requirements-dev.txt", "svc/requirements.txt",
     "pyproject.toml", "web/package.json", "go.mod", "compose.yml",
@@ -343,7 +344,7 @@ def fake_tool(bindir, name, verdict="PASS"):
 def task(repo, env):
     """A throwaway repo with the real scripts, a task worktree with one commit."""
     (repo / "scripts").mkdir()
-    for s in ("review.sh", "finish-task.sh"):
+    for s in ("review.sh", "finish-task.sh", "release-tag.sh"):
         shutil.copy(SCRIPTS / s, repo / "scripts" / s)
     (repo / "scripts" / "check.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
     write(repo, ".gitignore", ".worktrees/\n.reviews/\n")
@@ -564,11 +565,23 @@ def test_low_risk_needs_only_a_pass_and_a_y(task, repo):
     assert r.returncode == 0 and "Risk level: LOW" in r.stdout
 
 
-def test_n_cancels(task, repo):
-    commit_in(task, "docs/a.md")
+@pytest.mark.parametrize("path", ["docs/a.md", "fleet/x.py"])
+def test_below_high_risk_asks_nothing_even_with_a_no_on_stdin(task, repo, path):
+    commit_in(task, path)
     pass_review(task)
-    r = finish(repo, "n\n")
-    assert "Cancelled" in r.stdout and not merged(repo)
+    r = finish(repo, "n\n")  # nothing reads it: there is no y/N prompt any more
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "[y/N]" not in r.stdout and "no confirmation below high risk" in r.stdout
+    assert merged(repo)
+
+
+@pytest.mark.parametrize("path", ["docs/a.md", "fleet/x.py"])
+def test_below_high_risk_does_not_hang_on_closed_stdin(task, repo, path):
+    commit_in(task, path)
+    pass_review(task)
+    r = finish(repo, "")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert merged(repo)
 
 
 def test_review_of_an_older_commit_does_not_count(task, repo):
@@ -691,7 +704,7 @@ def test_emergency_override_is_loud_logged_and_still_needs_typing(task, repo, en
     assert merged(repo)
     log = (env / "fleet" / "override.log").read_text()
     assert "branch=task/demo" in log and "risk=high" in log and "reason=prod is down" in log
-    assert "EMERGENCY OVERRIDE (risk high): prod is down" in git(repo, "log", "-1", "--format=%B")
+    assert "EMERGENCY OVERRIDE (risk high): prod is down" in git(repo, "log", "-1", "--format=%B", "HEAD~1")   # HEAD is the release commit
 
 
 def test_emergency_flag_is_harmless_when_reviews_are_fine(task, repo):

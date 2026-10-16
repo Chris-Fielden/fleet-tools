@@ -174,6 +174,74 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# --- transition log ------------------------------------------------------------
+# An append-only record of the moments that matter to the digest: a ticket was
+# proposed, shipped, investigated or failed. One JSON object per line, written under
+# the store lock at the moment the status changes. Nothing else reads a ticket's
+# fields to guess when that happened.
+TRANSITION_KINDS = ("proposed", "shipped", "investigated", "failed")
+
+
+def transitions_path() -> Path:
+    return fleet_home() / "transitions.jsonl"
+
+
+def transition_kind(ticket: dict) -> str | None:
+    """The informational event a ticket's new status stands for, or None. Only build and
+    fix tickets merge code (shipped); question and review tickets close without one."""
+    status, kind = ticket.get("status"), ticket.get("type")
+    if status == "failed":
+        return "failed"
+    if status == "proposed":
+        return "proposed"
+    if status == "done":
+        return {"build": "shipped", "fix": "shipped", "investigate": "investigated"}.get(kind)
+    return None
+
+
+def _record_transition(ticket: dict, at: str) -> None:
+    """Append the transition `ticket` just made (call under the lock, after the ticket is
+    written). Writes nothing when its new status is not an informational event."""
+    kind = transition_kind(ticket)
+    if kind is None:
+        return
+    verdict = ticket.get("verdict") or {}
+    record = {"ticket": ticket["id"], "kind": kind, "at": at,
+              "commit": ticket.get("commit") or verdict.get("commit"),
+              "base_commit": ticket.get("base_commit")}
+    path = transitions_path()
+    refuse_real_store_in_tests(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError as exc:
+        # The ticket is already saved and the log is informational: warn, don't fail the caller.
+        print(f"warning: could not record the {kind} event for {ticket['id']}: {exc}",
+              file=sys.stderr)
+
+
+def read_transitions() -> list[dict]:
+    """Every well-formed record of the transition log, oldest first. A missing log is empty;
+    a damaged line is skipped, it must not hide the rest."""
+    try:
+        text = transitions_path().read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out = []
+    for line in text.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(rec, dict) and rec.get("kind") in TRANSITION_KINDS
+                and _is_str(rec.get("ticket")) and _is_time(rec.get("at"))):
+            out.append(rec)
+    return out
+
+
 # --- validation --------------------------------------------------------------
 
 def _is_str(value) -> bool:
@@ -601,6 +669,7 @@ def create_ticket(fields: dict, *, needs_approval: bool = False, oncall: bool = 
             if oncall_base is not None:
                 ticket["oncall_base"] = oncall_base
         _write_atomic(_ticket_path(ticket["id"]), ticket)
+        _record_transition(ticket, now)
     return ticket
 
 
@@ -705,6 +774,7 @@ def set_status(ticket_id: str, status: str, *, allowed_from, assignee=_KEEP,
             raise TicketError(
                 f"{ticket_id} is {ticket['status']}; it can only change from: "
                 + ", ".join(allowed_from))
+        previous = ticket["status"]
         ticket["status"] = status
         if assignee is not _KEEP:
             ticket["assignee"] = assignee
@@ -720,6 +790,8 @@ def set_status(ticket_id: str, status: str, *, allowed_from, assignee=_KEEP,
             ticket["started_at"] = started_at
         ticket["updated_at"] = _now()
         _write_atomic(_ticket_path(ticket_id), ticket)
+        if previous != status:   # a repeated call is not a new event
+            _record_transition(ticket, ticket["updated_at"])
     return ticket
 
 
@@ -762,6 +834,7 @@ def finish_investigation(ticket_id: str) -> dict:
             ticket["close_note"] = "the research agent stopped without recording any findings"
         ticket["updated_at"] = _now()
         _write_atomic(_ticket_path(ticket_id), ticket)
+        _record_transition(ticket, ticket["updated_at"])
     return ticket
 
 

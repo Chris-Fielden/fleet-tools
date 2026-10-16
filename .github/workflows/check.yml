@@ -1,18 +1,20 @@
 # Server-side run of scripts/check.sh, independent of any agent's machine.
+# Post-merge backstop: runs on pushes to main only. The merge script already
+# runs check.sh before merging, so this catches drift, not pre-merge failures.
 # No secrets are used. Actions are pinned to full commit SHAs.
 name: check
 
 on:
   push:
     branches: [main]
-  pull_request:
 
 permissions:
   contents: read
 
 concurrency:
   group: check-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel on main: a newer push must not hide an earlier commit's failure.
+  cancel-in-progress: false
 
 jobs:
   check:

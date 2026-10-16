@@ -39,6 +39,11 @@ DEFAULTS = {
     # A ship that sees no output from the merge script for this many seconds (it is waiting at a
     # prompt) is cancelled and pinged (0 turns it off).
     "ship_prompt_timeout_s": 900,
+    # Wall-clock limit for each other step of a ship (review.sh, the gate) and for the merge
+    # script as a whole (0 turns it off). A step past it is stopped and pinged.
+    "ship_step_timeout_s": 3600,
+    # A ship's reservation older than this many seconds no longer blocks the ticket (0 = no limit).
+    "ship_reservation_max_age_s": 14400,
     # Where things live
     "projects_dir": "~/projects",
     "research_dir": "~/fleet-research",
@@ -57,6 +62,9 @@ DEFAULTS = {
     # FAIL verdicts on different commits before a claimed ticket is "going in
     # circles" and truly fails.
     "fail_rounds_threshold": 8,
+    # A saved review that is not on the ticket pings only when it is still unrecorded on this
+    # many dispatcher cycles (1 pings on first sight).
+    "unrecorded_ping_cycles": 3,
     # A claimed ticket's agent session whose context has passed this many tokens
     # at the end of a review round is replaced by a fresh one (0 turns it off).
     "fresh_session_tokens": 100000,
@@ -180,6 +188,9 @@ def _merge(settings: dict, given, path: Path) -> None:
     if "ship_prompt_timeout_s" in given:
         settings["ship_prompt_timeout_s"] = _whole(path, given, "ship_prompt_timeout_s", 0,
                                                    "0 or more (0 turns it off)")
+    for key in ("ship_step_timeout_s", "ship_reservation_max_age_s"):
+        if key in given:
+            settings[key] = _whole(path, given, key, 0, "0 or more (0 turns it off)")
     for key in ("projects_dir", "research_dir", "herdr_workspace"):
         if key in given:
             if not isinstance(given[key], str) or not given[key].strip():
@@ -213,6 +224,8 @@ def _merge(settings: dict, given, path: Path) -> None:
         settings["fail_rounds_threshold"] = _whole(path, given, "fail_rounds_threshold", 1, "1 or more")
         if settings["fail_rounds_threshold"] > tk.FAIL_COMMITS_MAX:   # only that many FAIL commits are kept
             raise SettingsError(f"{path}: fail_rounds_threshold must be {tk.FAIL_COMMITS_MAX} or less")
+    if "unrecorded_ping_cycles" in given:
+        settings["unrecorded_ping_cycles"] = _whole(path, given, "unrecorded_ping_cycles", 1, "1 or more")
     if "fresh_session_tokens" in given:
         settings["fresh_session_tokens"] = _whole(path, given, "fresh_session_tokens", 0,
                                                   "0 or more (0 turns it off)")

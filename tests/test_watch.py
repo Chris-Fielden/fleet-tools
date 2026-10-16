@@ -677,6 +677,6 @@ def test_heartbeat_written_at_start_and_every_cycle(projects, env):
     watch({}, clock)
     beat = json.loads(path.read_text())
     assert set(beat) == {"pid", "code_head", "started_at", "cycle_started", "cycle_finished", "cycles_ok",
-                         "consecutive_errors", "last_error", "progress_at"}
+                         "consecutive_errors", "last_error", "progress_at", "interval_seconds"}
     assert seen[0]["cycles_ok"] == 1 and beat["cycles_ok"] == 2
     assert beat["cycle_finished"] and beat["last_error"] is None

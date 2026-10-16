@@ -286,6 +286,27 @@ def test_back_to_claimed_when_the_tip_moves_or_the_agent_is_busy(rig, ntfy):
     assert len(ntfy.requests) == 2   # a new commit pings again
 
 
+def test_ready_reminder_once_and_not_for_a_ticket_that_went_back_to_work(rig, ntfy):
+    rig.finish()
+    rig.cycle()
+    assert len(ntfy.requests) == 1
+    hours = rw.READY_REMINDER_AFTER // 60
+    rig.cycle(1)                                   # the reminder clock has started
+    rig.cycle(1 + hours)
+    rig.cycle(2 + hours)
+    titles = [r["body"]["title"] for r in ntfy.requests]
+    assert titles.count(f"Still waiting for you: {rig.id}") == 1
+    # waited long enough, but its agent is working again by then: not ready, so no reminder
+    rig.set_agent("working")
+    rig.cycle(3 + hours)
+    rig.set_agent("idle")
+    rig.cycle(4 + hours)                           # back in review: a new wait begins
+    rig.set_agent("working")
+    rig.cycle(5 + 2 * hours)
+    assert rig.get()["status"] == "claimed"
+    assert len([r for r in ntfy.requests if r["body"]["title"].startswith("Still waiting")]) == 1
+
+
 def test_review_is_kept_when_herdr_cannot_be_asked(rig, ntfy, monkeypatch):
     rig.finish()
     rig.cycle()
@@ -379,8 +400,8 @@ def test_a_recorded_fail_alone_never_pings(rig, ntfy):
 
 def test_a_review_saved_but_not_recorded_pings_low_once(rig, ntfy):
     rig.review_file("Codex", "PASS", age=600)
-    rig.cycle()
-    rig.cycle(5)
+    for m in (0, 2, 4, 6):   # the ping goes out on the third sighting, once
+        rig.cycle(m)
     assert len(ntfy.requests) == 1
     title, message, header = sent(ntfy)[0]
     assert title == f"Review not recorded: {rig.id}" and header == "low" and "Codex" in message
@@ -403,7 +424,8 @@ def test_one_reviewer_recorded_and_the_other_not(rig, ntfy):
     rig.review_file("Codex", "PASS")
     rig.review_file("Claude", "PASS")
     rig.verdict("PASS", "Codex")
-    rig.cycle()
+    for m in (0, 2, 4):
+        rig.cycle(m)
     assert len(ntfy.requests) == 1 and "Claude" in sent(ntfy)[0][1]
 
 
@@ -412,7 +434,8 @@ def test_a_review_file_without_a_verdict_cannot_be_recorded(rig, ntfy):
     path = rig.wt / ".reviews" / "codex.md"
     path.write_text(f"Reviewer: Codex\nCommit: {rig.tip()}\n\nno verdict here\n")
     os.utime(path, (1, 1))
-    rig.cycle()
+    for m in (0, 2, 4):
+        rig.cycle(m)
     assert len(ntfy.requests) == 1 and "no verdict" in sent(ntfy)[0][1]
 
 
@@ -494,6 +517,8 @@ def test_an_unrecorded_review_is_noticed_on_a_ready_ticket(rig, ntfy):
     rig.finish()
     rig.review_file("Claude", "FAIL", age=600)   # saved after the recorded PASS, never recorded
     rig.cycle()
+    rig.cycle(2)
+    rig.cycle(4)
     titles = [t[0] for t in sent(ntfy)]
     assert f"{rig.id} ready to ship" in titles and f"Review not recorded: {rig.id}" in titles
 
@@ -504,9 +529,43 @@ def test_an_unrecorded_review_is_noticed_on_a_ticket_in_review(rig, ntfy):
     assert rig.get()["status"] == "review"
     rig.review_file("Claude", "FAIL", age=600)
     rig.cycle(5)
+    rig.cycle(6)
+    assert f"Review not recorded: {rig.id}" not in [t[0] for t in sent(ntfy)]
+    rig.cycle(7)
     assert [t[0] for t in sent(ntfy)][-1] == f"Review not recorded: {rig.id}"
     rig.cycle(10)
     assert len(ntfy.requests) == 2
+
+
+def _unrecorded(ntfy, rig):
+    return [t for t in sent(ntfy) if t[0] == f"Review not recorded: {rig.id}"]
+
+
+def test_an_unrecorded_ping_waits_for_n_cycles_and_a_restart_keeps_the_count(rig, ntfy):
+    rig.finish()
+    rig.review_file("Claude", "FAIL", age=600)
+    rig.cycle(1)
+    rig.cycle(2)
+    state = rw._load_state(rig.warnings.append)   # as after a restart
+    assert list(state["unrecorded_seen"].values()) == [2]
+    assert _unrecorded(ntfy, rig) == []
+    rig.cycle(3)
+    assert len(_unrecorded(ntfy, rig)) == 1
+    rig.cycle(4)
+    assert len(_unrecorded(ntfy, rig)) == 1
+
+
+def test_an_unrecorded_review_that_is_gone_before_n_cycles_never_pings(rig, ntfy):
+    rig.finish()
+    rig.review_file("Claude", "FAIL", age=600)
+    rig.cycle(1)
+    rig.cycle(2)
+    for f in (rig.wt / ".reviews").glob("*"):
+        f.unlink()
+    rig.cycle(3)
+    rig.cycle(4)
+    assert _unrecorded(ntfy, rig) == []
+    assert rw._load_state(rig.warnings.append)["unrecorded_seen"] == {}
 
 
 def test_a_ticket_in_review_is_never_called_stalled(rig, ntfy):
@@ -692,3 +751,77 @@ def test_only_the_prep_pass_success_note_counts_as_a_summary(rig, ntfy):
     tk.add_note(rig.id, f"{prep.PASS_NOTE_PREFIX} abc12345: the branch was changed; checks passed.")
     rig.cycle(5)
     assert rig.get()["status"] == "review"
+
+
+# --- an idle agent with no commit (BD-115) ----------------------------------------
+
+def _prompts(herdr_log):
+    return [c for c in calls(herdr_log) if c[:2] == ["agent", "prompt"]] if herdr_log.exists() else []
+
+
+def _no_commit(rig):
+    """The agent has not committed since the claim: the tip is the base commit."""
+    rig.edit(base_commit=rig.tip())
+    rig.set_agent("idle", revision=1)
+
+
+def test_idle_with_no_commit_is_nudged_then_failed_five_minutes_later(rig, ntfy, herdr_log):
+    _no_commit(rig)
+    rig.summary("BLOCKED: the spec contradicts itself")
+    rig.cycle(0)
+    rig.cycle(4)
+    assert _prompts(herdr_log) == [] and rig.get()["status"] == "claimed"
+    rig.cycle(6)   # idle for 5 min: one nudge, no failure yet
+    assert len(_prompts(herdr_log)) == 1 and "ticket note" in _prompts(herdr_log)[0][3]
+    assert rig.get()["status"] == "claimed"
+    rig.cycle(9)
+    assert rig.get()["status"] == "claimed" and len(_prompts(herdr_log)) == 1
+    rig.cycle(12)   # 5 min after the nudge, still idle, still no commit
+    rig.cycle(13)
+    t = rig.get()
+    assert t["status"] == "failed" and "agent stopped without a commit" in t["close_note"]
+    assert "BLOCKED: the spec contradicts itself" in t["close_note"]
+    assert len(_prompts(herdr_log)) == 1
+    assert any("BLOCKED: the spec" in m for _, m, _ in sent(ntfy)) or len(sent(ntfy)) == 1
+
+
+def test_a_commit_after_the_nudge_saves_the_ticket(rig, ntfy, herdr_log):
+    _no_commit(rig)
+    rig.cycle(0)
+    rig.cycle(6)
+    assert len(_prompts(herdr_log)) == 1
+    rig.commit("work")
+    rig.cycle(13)
+    assert rig.get()["status"] == "claimed"
+
+
+@pytest.mark.parametrize("status", ["working", "blocked", "waiting"])
+def test_no_commit_rule_never_applies_while_herdr_shows_busy(rig, ntfy, herdr_log, status):
+    rig.edit(base_commit=rig.tip())
+    rig.set_agent(status, revision=1)
+    rig.cycle(0)
+    rig.cycle(6)
+    rig.cycle(13)
+    assert _prompts(herdr_log) == []
+    t = rig.get()
+    assert t["status"] == "claimed" or "without a commit" not in t.get("close_note", "")
+
+
+def test_idle_with_a_commit_is_untouched_by_the_no_commit_rule(rig, ntfy, herdr_log):
+    rig.edit(base_commit=rig.tip())
+    rig.commit("work")
+    rig.set_agent("idle", revision=1)
+    rig.cycle(0)
+    rig.cycle(6)
+    rig.cycle(13)
+    assert _prompts(herdr_log) == [] and rig.get()["status"] == "claimed"
+
+
+def test_a_ticket_in_review_is_untouched_by_the_no_commit_rule(rig, ntfy, herdr_log):
+    rig.finish()
+    rig.edit(base_commit=rig.tip())
+    rig.cycle(0)
+    assert rig.get()["status"] == "review"
+    rig.cycle(6)
+    rig.cycle(13)
+    assert _prompts(herdr_log) == [] and rig.get()["status"] == "review"

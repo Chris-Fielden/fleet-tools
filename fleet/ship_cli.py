@@ -63,15 +63,55 @@ def _reconcile() -> int:
 _ship_ticket = ""   # the ticket this run ships: the gate checks it is on the branch and asks for its id
 
 
+def _step_timeout() -> int | None:
+    """Wall-clock seconds one step of a ship may take (None = no limit)."""
+    try:
+        return int(dp.load_settings().get("ship_step_timeout_s", 0)) or None
+    except Exception:
+        return 3600
+
+
+def _run_group(argv: list[str], timeout: int | None, **kw) -> subprocess.CompletedProcess:
+    """subprocess.run in its own session: past `timeout` the whole process group is killed (not
+    just the direct child) and TimeoutExpired is raised."""
+    with subprocess.Popen(argv, start_new_session=True, **kw) as proc:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except BaseException as exc:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            try:
+                proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                # a descendant in another session still holds a pipe: stop draining and close ours
+                for stream in (proc.stdout, proc.stderr):
+                    if stream is not None:
+                        with contextlib.suppress(OSError, ValueError):
+                            stream.close()
+            if isinstance(exc, subprocess.TimeoutExpired):
+                raise subprocess.TimeoutExpired(argv, timeout) from None
+            raise
+        return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
 def _gate(repo: Path, wt: Path, branch: str, *fields: str, env: dict | None = None) -> subprocess.CompletedProcess:
-    """`ticket gate` the way the merge script calls it: the exact same gate."""
+    """`ticket gate` the way the merge script calls it: the exact same gate. One that hangs is
+    killed, the human is pinged once, and it comes back as a failed run (exit 124) saying so."""
     ticket = Path(__file__).resolve().parent.parent / "bin" / "ticket"
     base = dp.main_branch(repo) or "main"
-    return subprocess.run(
-        [sys.executable, str(ticket), "gate", "--base", base, "--branch", branch, "--dir", str(repo),
-         "--worktree", str(wt), "--repo", repo.name,
-         *(["--ticket", _ship_ticket] if _ship_ticket else []), *fields], capture_output=True, text=True,
-        env=env)
+    limit = _step_timeout()
+    try:
+        return _run_group(
+            [sys.executable, str(ticket), "gate", "--base", base, "--branch", branch, "--dir", str(repo),
+             "--worktree", str(wt), "--repo", repo.name,
+             *(["--ticket", _ship_ticket] if _ship_ticket else []), *fields], limit,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    except subprocess.TimeoutExpired:
+        message = f"ticket gate timed out after {limit}s"
+        if _ship_ticket:
+            with contextlib.suppress(tk.TicketError, tk.TicketInvalid):
+                _needs_human(tk.load_ticket(_ship_ticket), message)
+        return subprocess.CompletedProcess([], 124, "", message)
 
 
 def _confirm(question: str) -> bool:
@@ -164,9 +204,14 @@ def _review_if_needed(repo: Path, name: str, branch: str, script: Path, t: dict 
             return None
     env.setdefault("FLEET_TICKET", str(Path(__file__).resolve().parent.parent / "bin" / "ticket"))
     try:
-        done = subprocess.run(["bash", str(review)], cwd=wt, env=env)
+        done = _run_group(["bash", str(review)], _step_timeout(), cwd=wt, env=env)
     except OSError as exc:
         return f"could not run {review}: {exc}"
+    except subprocess.TimeoutExpired:
+        message = f"{review.name} timed out after {_step_timeout()}s; nothing was merged"
+        if t is not None:
+            _needs_human(t, message)
+        return message
     if done.returncode != 0:
         return f"the reviews of {branch} did not complete (exit {done.returncode}); nothing was merged"
     return None
@@ -447,7 +492,8 @@ def _resolve(t: dict):
     return repo, branch, name, script, settings
 
 
-def _run_script(argv: list[str], cwd: Path, env: dict, answer: str | None, idle_s: int) -> tuple[int, int]:
+def _run_script(argv: list[str], cwd: Path, env: dict, answer: str | None, idle_s: int,
+                wall_s: int | None = None) -> tuple[int, int]:
     """Run the merge script in its own session with its output piped through here (shown, and
     teed to the ticket's log). Returns (exit code, idle seconds): the second is non-zero when the
     script printed nothing for `idle_s` seconds (0 = no limit), i.e. it sat at a prompt; its whole
@@ -476,9 +522,13 @@ def _run_script(argv: list[str], cwd: Path, env: dict, answer: str | None, idle_
                 proc.stdin.write((answer + "\n").encode())
                 proc.stdin.close()
         fd = proc.stdout.fileno()
-        last = time.monotonic()
+        last = began = time.monotonic()
         idle = 0
         while True:
+            if wall_s and time.monotonic() - began >= wall_s:
+                idle = -wall_s   # negative: a wall-clock stop, otherwise handled like an idle one
+                stop()
+                break
             left = 1.0 if not idle_s else min(1.0, max(0.0, last + idle_s - time.monotonic()))
             ready, _, _ = select.select([fd], [], [], left)
             if ready:
@@ -494,7 +544,13 @@ def _run_script(argv: list[str], cwd: Path, env: dict, answer: str | None, idle_
                 idle = idle_s
                 stop()
                 break
-        proc.wait()   # only reached once the script has closed its output or been stopped
+        try:   # reached once the script closed its output: the wall-clock limit still applies
+            left = None if not wall_s else max(0.0, began + wall_s - time.monotonic())
+            proc.wait(timeout=left)
+        except subprocess.TimeoutExpired:
+            idle = -wall_s
+            stop()
+            proc.wait()
         return proc.returncode, idle
     except BaseException:
         stop()
@@ -578,14 +634,17 @@ def _ship_reserved(ticket_id: str, in_list: bool, expect: str | None = None, pre
         in_main_before = _in_main(repo, facts["tip"], main_name)
     try:
         returncode, idle = _run_script(["bash", str(script), name, "--ticket", t["id"]], repo, env,
-                                       answer, settings.get("ship_prompt_timeout_s", 0))
+                                       answer, settings.get("ship_prompt_timeout_s", 0),
+                                       settings.get("ship_step_timeout_s", 0) or None)
     except OSError as exc:
         return _fail(f"could not run {script}: {exc}")
     if idle:
         # No merge was under way when this run started (checked above), so a MERGE_HEAD is ours.
         if dp._git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
             dp._git(repo, "merge", "--abort")
-        message = (f"timed out at a prompt: {script.name} printed nothing for {idle}s, so it was stopped; "
+        what = (f"timed out at a prompt: {script.name} printed nothing for {idle}s" if idle > 0
+                else f"timed out: {script.name} ran longer than {-idle}s")
+        message = (f"{what}, so it was stopped; "
                    f"{t['id']} was not reconciled. Check `git log` in {repo}: a merge or push that finished "
                    "before the prompt stays; the reservation is released")
         _needs_human(t, message)
@@ -891,12 +950,13 @@ def _ask_to_ship(repo: Path, wt: Path, branch: str, tip: str) -> str | int:
         print("".join(f"  {line}\n" for line in others.splitlines()), end="")
     print(dp._git(repo, "log", "--oneline", f"{base}..{tip}").stdout, end="")
     print(dp._git(repo, "diff", "--stat", f"{base}...{tip}").stdout, end="")
+    if risk in ("low", "medium"):
+        return "y"
+    if risk != "high":
+        return _fail(f"unexpected risk level {risk!r}; nothing was merged")
     try:
-        if risk == "high":
-            typed = input(f"HIGH RISK change. Type the ticket id ({word}) to ship {branch} into {base}: ")
-            yes = typed.strip().lower() == word.lower()
-        else:
-            yes = input(f"Ship {branch} into {base}? [y/N] ").strip().lower() in ("y", "yes")
+        typed = input(f"HIGH RISK change. Type the ticket id ({word}) to ship {branch} into {base}: ")
+        yes = typed.strip().lower() == word.lower()
     except (EOFError, KeyboardInterrupt):
         print()
         yes = False

@@ -11,7 +11,8 @@
 * A claimed ticket TRULY FAILS when its agent sat idle on a failed commit for
   5 minutes, it has `fail_rounds_threshold` (default 8) FAIL verdicts on different commits, its agent was blocked
   for 20 minutes, or it had no activity for 45 minutes while its agent was idle or waiting. It is then closed as
-  failed and an on-call fix ticket is filed (launched by the dispatch cycle in
+  failed and an on-call fix ticket is filed (except an agent idle with no commit since the claim:
+  nudged once after GIVE_UP_AFTER, failed GIVE_UP_AFTER later with a needs_human ping, no on-call) (launched by the dispatch cycle in
   its own slot); see _fail_ticket. A mid-loop FAIL verdict never pings.
 * A commit landing after a PASS (the tip is past the commit the PASS is on, and its agent has
   stopped) clears the ready state and re-runs check.sh and the reviews on that exact tip in the
@@ -61,10 +62,16 @@ from . import ticket as tk
 BLOCKED_AFTER = 20 * 60   # seconds an agent waits for input before the ticket fails
 STALL_AFTER = 45 * 60     # seconds with no commit, note or log output before the ticket fails
 STALL_STATES = ("idle", "done", "blocked", "waiting")   # herdr states in which a stall counts; never "working"
-STOPPED_AFTER = 5 * 60    # seconds an agent sits idle on a failed tip before the ticket fails
+GIVE_UP_AFTER = 5 * 60    # seconds an agent sits idle with no commit (and again after one nudge) before the ticket fails
+NO_COMMIT_REASON = "agent stopped without a commit"
+NUDGE_TEXT = ("You stopped without making a commit. Commit your work now, or write a ticket note "
+              "(ticket note <ID> TEXT) explaining why you stopped. Never ask questions in chat: "
+              "write them as a ticket note.")
+STOPPED_AFTER = 5 * 60   # seconds an agent sits idle on a failed tip before the ticket fails
 UNRECORDED_GRACE = 2 * 60  # seconds review.sh gets to record a review it just saved
 LOG_TAIL = 256 * 1024
 BACKSTOP_ROUNDS = 15      # review rounds (commits with a recorded review) after which a still-FAILing ticket is closed
+NEEDS_HUMAN_RE = re.compile(r"\bneeds?\s+(?:a\s+)?human\b|\bneeds?\s+the\s+real\s+(?:ticket\s+)?store\b", re.I)
 BACKSTOP_REASON = "review-round backstop"   # starts the reason of a backstop failure
 ANALYSIS_MAX = 600        # characters of the supervisor's latest note kept in the backstop's close note
 MUST_FIX_PART = 500       # characters of a review's MUST FIX section per part of the on-call body
@@ -76,6 +83,7 @@ FAILURE_EVENTS = ("oncall", "needs_human", "leftovers")   # pings kept until sen
 LAUNCH_FAILED_NOTE = "Launch attempt failed:"   # written by launch.launch_oncall
 LAUNCH_ATTEMPTS = 3       # failed launches of one on-call ticket before it is given up
 FAILURE_KEYS_KEPT = 500   # sent-keys of closed tickets' failure pings; the oldest go first
+READY_REMINDER_AFTER = 6 * 3600   # seconds a ticket sits ready (In Review) before its one reminder ping
 LEFTOVERS_PREFIX = "SHOULD FIX leftovers from"  # saved by `ticket review-result`, not a summary
 
 
@@ -85,7 +93,7 @@ def state_path() -> Path:
 
 def _load_state(warn) -> dict:
     state = {"sent": [], "blocked_since": {}, "stopped_since": {}, "seen": {}, "pending": [], "fresh": {},
-             "dialog_pinged": {}}
+             "dialog_pinged": {}, "ready_since": {}, "unrecorded_seen": {}, "nudged": {}}
     try:
         data = json.loads(state_path().read_text(encoding="utf-8"))
         if (isinstance(data, dict) and isinstance(data.get("sent"), list)
@@ -98,6 +106,14 @@ def _load_state(warn) -> dict:
                          dialog_pinged={k: v for k, v in (data["dialog_pinged"]
                                                           if isinstance(data.get("dialog_pinged"), dict) else {}).items()
                                         if isinstance(k, str) and isinstance(v, str)},
+                         ready_since={k: v for k, v in (data["ready_since"]
+                                                        if isinstance(data.get("ready_since"), dict) else {}).items()
+                                      if isinstance(k, str) and isinstance(v, str)},
+                         nudged={k: v for k, v in (data["nudged"] if isinstance(data.get("nudged"), dict)
+                                                   else {}).items() if isinstance(k, str) and isinstance(v, str)},
+                         unrecorded_seen={k: v for k, v in (data["unrecorded_seen"] if isinstance(
+                             data.get("unrecorded_seen"), dict) else {}).items()
+                                          if isinstance(k, str) and type(v) is int and v > 0},
                          fresh={k: v for k, v in (data["fresh"] if isinstance(data.get("fresh"), dict) else {}).items()
                                 if isinstance(k, str) and isinstance(v, str)},
                          pending=[p for p in data.get("pending", []) if isinstance(p, dict)
@@ -228,6 +244,23 @@ def _ready_ping(t: dict, tip: str, settings: dict, now: datetime, state: dict, w
     _ping(t, "ship", f"{t['id']}:ship:{tip}", state, warn)  # a send that failed is retried
 
 
+def _ready_reminders(tickets: list[dict], state: dict, now: datetime, warn) -> None:
+    """One low "still waiting for you" ping for a ticket that has sat ready (In Review) for
+    READY_REMINDER_AFTER after its "ready to ship" ping went out (the clock starts when this
+    watcher first sees that ping sent; a ticket held for or covered by a prep pass has no such
+    ping and gets no reminder). A ticket that leaves the ready state is forgotten, so a return
+    starts again (and may ping again)."""
+    ready = {t["id"]: t for t in tickets if t["status"] == "review"
+             and any(k.startswith(f"{t['id']}:ship:") for k in state["sent"])}
+    for tid in [i for i in state["ready_since"] if i not in ready]:
+        del state["ready_since"][tid]
+        state["sent"] = [k for k in state["sent"] if k != f"{tid}:ready_reminder"]
+    for tid, t in ready.items():
+        since = _parse(state["ready_since"].setdefault(tid, _stamp(now)))
+        if since is not None and (now - since).total_seconds() >= READY_REMINDER_AFTER:
+            _ping(t, "ready_reminder", f"{tid}:ready_reminder", state, warn, "ready and not shipped yet")
+
+
 def _queue_ping(ticket_id: str, event: str, state: dict, warn, detail: str | None = None,
                 commit: str | None = None) -> None:
     """Queue the one ping of a failure (event oncall or needs_human, or leftovers: the ticket
@@ -280,10 +313,17 @@ def _retry_pending(state: dict, warn, settings: dict | None = None) -> None:
     state["pending"] = keep
 
 
-def _unrecorded_pings(t: dict, repo: Path, tip: str, state: dict, now: datetime, emit, warn) -> None:
-    """A review that was saved for this tip but never reached the ticket."""
+def _unrecorded_pings(t: dict, repo: Path, tip: str, state: dict, now: datetime, emit, warn,
+                      cycles: int = 3) -> None:
+    """A review that was saved for this tip but never reached the ticket. The ping goes out only
+    when the same commit and kind has been seen unrecorded on `cycles` cycles (the first sight
+    counts as one and is logged as ALERT), so a record that is merely late never pings. The count
+    is kept in state, so a restart keeps it, and dropped as soon as the review is recorded.
+    It counts sightings, not strictly consecutive cycles: a cycle that exits early before
+    reaching here neither advances nor resets it."""
     tid, v = t["id"], t["verdict"]
     wt = repo / ".worktrees" / t["branch"].removeprefix("task/")
+    seen, unrecorded = state["unrecorded_seen"], set()
     for kind, info in sorted(rk.latest_reviews(wt / ".reviews", tip).items()):
         recorded = (v is not None and v["commit"] == tip and kind in v["reviews"]
                     and v["reviews"][kind]["result"] == info["verdict"])
@@ -294,10 +334,20 @@ def _unrecorded_pings(t: dict, repo: Path, tip: str, state: dict, now: datetime,
         key = f"{tid}:review_unrecorded:{tip}:{kind}"
         if recorded or now.timestamp() - saved_at < UNRECORDED_GRACE or key in state["sent"]:
             continue
+        unrecorded.add(key)
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] == 1:
+            dp.log("ALERT", f"{tid} review_unrecorded {tip[:8]} {kind} first seen; "
+                            f"ping after {cycles} cycles")
+        if seen[key] < cycles:
+            continue
         detail = f"{info['reviewer']} review of {tip[:7]} ({info['verdict'] or 'no verdict'}) is not on the ticket"
         if _ping(t, "review_unrecorded", key, state, warn, detail):
             emit(f"{tid}  {detail}")
-            dp.log("ALERT", f"{tid} review_unrecorded {tip[:8]} {kind}")
+            dp.log("ALERT", f"{tid} review_unrecorded {tip[:8]} {kind} ping sent")
+    prefix = f"{tid}:review_unrecorded:"
+    for key in [k for k in seen if k.startswith(prefix) and k not in unrecorded]:
+        del seen[key]   # recorded, sent or the tip moved: a later one starts from zero
 
 
 # --- true failure ----------------------------------------------------------------
@@ -347,6 +397,43 @@ def _end_spells(ticket_id: str, state: dict) -> None:
     state["blocked_since"].pop(ticket_id, None)
     state["stopped_since"].pop(ticket_id, None)
     state["dialog_pinged"].pop(ticket_id, None)
+    state["nudged"].pop(ticket_id, None)
+
+
+def _agent_last_note(t: dict) -> str:
+    """The newest note not written by the human or the supervisor, clipped; "" if none. Untrusted text."""
+    for n in reversed(t.get("notes", [])):
+        if n.get("by") != "human" and not n["text"].startswith("SUPERVISOR "):
+            return _clip(" ".join(n["text"].split()), ANALYSIS_MAX)
+    return ""
+
+
+def _no_commit_check(t: dict, tip: str, agent: dict | None, idle: float, state: dict,
+                     now: datetime) -> str | None:
+    """An agent that ended its turn with no commit since the claim (the branch tip is still the
+    base commit). Idle for GIVE_UP_AFTER: it is nudged once (commit, or write a note saying why).
+    Still idle with no commit GIVE_UP_AFTER after the nudge: the ticket fails. Never while herdr
+    shows working, blocked or waiting."""
+    tid = t["id"]
+    base = t.get("base_commit")
+    if not base or tip != base:
+        state["nudged"].pop(tid, None)
+        return None
+    if agent is None or agent.get("agent_status") not in ("idle", "done") or idle < GIVE_UP_AFTER:
+        return None
+    nudged = _parse(state["nudged"].get(tid))
+    if nudged is None:
+        try:
+            lc.herdr("agent", "prompt", agent.get("name") or tid.lower(), NUDGE_TEXT)
+        except lc.LaunchError as exc:
+            dp.log("NUDGE_FAILED", f"{tid} {_clip(str(exc), 200)}")
+            return None   # not recorded: tried again next cycle
+        state["nudged"][tid] = _stamp(now)
+        dp.log("NUDGED", f"{tid} idle with no commit for {int(idle // 60)} min")
+        return None
+    if (now - nudged).total_seconds() >= GIVE_UP_AFTER:
+        return NO_COMMIT_REASON
+    return None
 
 
 def _dialog_ping(t: dict, agent: dict, state: dict, now: datetime) -> None:
@@ -420,6 +507,8 @@ def _failure_reason(t: dict, repo: Path, tip: str, agent: dict | None, state: di
     # the agent's status changes, so it counts from when the agent stopped working.
     last = _last_activity(t, repo, tip, agent, state, now)
     idle = (now - last).total_seconds()
+    if reason is None:
+        reason = _no_commit_check(t, tip, agent, idle, state, now)
     if reason is None and idle >= STALL_AFTER and agent_state in STALL_STATES:
         reason = f"stalled: no commit, note, log output or agent change for {int(idle // 60)} min"
     return reason
@@ -549,6 +638,17 @@ def _note_once(ticket_id: str, marker: str, text: str, warn) -> None:
         _note(ticket_id, text, warn)
 
 
+def needs_human_first(t: dict) -> bool:
+    """True when an on-call agent cannot help: the newest note an agent wrote (not the human,
+    which is also the fleet's own author, and not the supervisor) says it needs a human or the
+    real store. Untrusted text decides only a safe thing here: a person looks instead of an agent."""
+    for n in reversed(t.get("notes", [])):
+        if n.get("by") == "human" or n["text"].startswith("SUPERVISOR"):
+            continue
+        return bool(NEEDS_HUMAN_RE.search(n["text"]))
+    return False
+
+
 def _file_oncall(t: dict, detail: str, tip: str, repo: Path, warn) -> dict | None:
     """File the on-call fix ticket for a failed ticket, carrying its whole spec and
     notes (an agent can read only its own ticket). None if it cannot be made for
@@ -647,7 +747,8 @@ def _recover(rec: dict, settings: dict, state: dict, now: datetime, emit, warn) 
     t = tk.load_ticket(tid)
     detail = f"{rec['reason']}; failed by: {rec['reviewer']}; FAIL rounds: {rec['rounds']}"
     if rec.get("final") is not None:
-        detail += f"; supervisor: {rec['final']}"
+        label = "agent's last note" if rec["reason"] == NO_COMMIT_REASON else "supervisor"
+        detail += f"; {label}: {rec['final']}"
     if tk.check_secrets("close note", detail):   # the reviewer name and analysis are free text: scan like any note
         detail = f"{rec['reason']}; FAIL rounds: {rec['rounds']} (reviewer name and analysis withheld)"
     # 1. close it as failed (its card moves to Failed)
@@ -671,6 +772,10 @@ def _recover(rec: dict, settings: dict, state: dict, now: datetime, emit, warn) 
         ping = (original, "needs_human", None)
     elif rec.get("final") is not None:   # the review-rounds backstop: no on-call attempt
         _note_once(tid, "Needs a human:", f"Needs a human: {detail}.", warn)
+        lc._safe_log("NEEDS_HUMAN", tid)
+        ping = (tid, "needs_human", None)
+    elif needs_human_first(t):   # no on-call: it cannot do what the ticket needs
+        _note_once(tid, "Needs a human:", f"Needs a human: {detail}. No on-call agent can do this work.", warn)
         lc._safe_log("NEEDS_HUMAN", tid)
         ping = (tid, "needs_human", None)
     else:
@@ -877,7 +982,7 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             else:
                 _ready_ping(t, tip, settings, now, state, warn)
             _end_spells(t["id"], state)
-            _unrecorded_pings(t, repo, tip, state, now, emit, warn)
+            _unrecorded_pings(t, repo, tip, state, now, emit, warn, settings["unrecorded_ping_cycles"])
             return
         new = _move(t, "claimed", ("review",), warn)
         if new:
@@ -906,16 +1011,18 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             else:
                 _ready_ping(new, tip, settings, now, state, warn)
             _end_spells(t["id"], state)
-            _unrecorded_pings(new, repo, tip, state, now, emit, warn)
+            _unrecorded_pings(new, repo, tip, state, now, emit, warn, settings["unrecorded_ping_cycles"])
         return
     if fresh.refresh_if_large(t, agent, tip, settings, state, emit, warn):
         return   # a new session starts from here: judge it from the next cycle
-    _unrecorded_pings(t, repo, tip, state, now, emit, warn)
+    _unrecorded_pings(t, repo, tip, state, now, emit, warn, settings["unrecorded_ping_cycles"])
     reason = _failure_reason(t, repo, tip, agent, state, now, settings["fail_rounds_threshold"],
                             (progress or {}).get(t["id"], frozenset()),
                             leftovers=(marks or {}).get(t["id"]) == tip, waiting=t["id"] in waiting)
     if reason:
         final = latest_analysis(t) if reason.startswith(BACKSTOP_REASON) else None
+        if reason == NO_COMMIT_REASON:   # no on-call attempt: a person reads the agent's last note
+            final = _agent_last_note(t) or "no note was written"
         write_recovery(t, reason, tip, final)   # first: everything else is driven from the record
 
 
@@ -1029,6 +1136,11 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
             _ready_ping(new, tip, settings, now, state, warn)
         except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
             warn(f"{new['id']}: {exc}")
+    try:   # the statuses _check_one just settled, not the snapshot taken before it
+        current = {t["id"]: t for t in tk.list_tickets()}
+        _ready_reminders([current[t["id"]] for t in tickets if t["id"] in current], state, now, warn)
+    except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+        warn(f"ready reminders: {exc}")
     try:
         _flag_stuck_oncall(settings, warn)
     except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
@@ -1043,8 +1155,10 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
         warn(f"supervisor restart: {exc}")
     _run_supervisor(sup, settings, now, busy | set(sup["pending"]), warn)
     live = {t["id"] for t in tickets} | locked
-    for name in ("blocked_since", "stopped_since", "seen", "fresh", "dialog_pinged"):
+    for name in ("blocked_since", "stopped_since", "seen", "fresh", "dialog_pinged", "ready_since"):
         state[name] = {k: v for k, v in state[name].items() if k in live}
+    state["unrecorded_seen"] = {k: n for k, n in state["unrecorded_seen"].items()
+                                if k.split(":", 1)[0] in live}
     # Keys of the failure pings stay: their ticket is closed, and the key is the record that it was sent.
     kept = [k for k in state["sent"] if k.split(":", 1)[0] in live]
     kept_failures = [k for k in state["sent"]

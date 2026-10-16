@@ -60,7 +60,7 @@ BROAD_RM = re.compile(
     r"\s+(/|~|\$HOME|\.\.?(/)?|\*)(\s|$)"
 )
 
-HUMAN_ONLY_SCRIPTS = re.compile(r"finish-task\.sh")
+HUMAN_ONLY_SCRIPTS = re.compile(r"(finish-task|release-tag)\.sh")
 # Flags that switch off an agent's own safety sandbox or permission prompts.
 UNSAFE_AGENT_FLAGS = re.compile(
     r"--dangerously-skip-permissions|--dangerously-bypass-approvals-and-sandbox"
@@ -105,16 +105,21 @@ SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", ";;", "|&", "{", "}"}
 KEYWORDS = {"if", "then", "else", "elif", "while", "until", "do", "!", "{", "}", "fi", "done"}
 
 
-def _segments(command):
+def _segments(command, ops_out=None):
     """Split a shell command into simple commands, as lists of words. Quotes
     are honoured, so 'dispatch' and "dispatch" count as dispatch, and a
-    newline inside quotes stays part of the quoted text."""
+    newline inside quotes stays part of the quoted text. If `ops_out` is a
+    list, one (operators, opens, closes) tuple per command is appended to it:
+    the operator (">", ">>", "<", ...) of each redirection in target order,
+    and how many ( and ) came between the previous command and this one."""
     command = command.replace("`", " ; ").replace("$(", " ; ( ")
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|(){}<>\n")
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
-    out, current, redirects = [], [], []
+    out, current, redirects, ops = [], [], [], []
     pending_target = False
+    pending_op = ""
+    opens = closes = 0
     for tok in lexer:
         # A redirection (> file, 2>> log, < in) can sit anywhere, even before
         # the program name. Its target still gets the path checks, but it is
@@ -123,9 +128,11 @@ def _segments(command):
             if current and current[-1].isdigit():
                 current.pop()  # the 2 in 2>file
             pending_target = True
+            pending_op = tok
             continue
         if pending_target and not (set(tok) <= set(";&|(){}<>\n")):
             redirects.append(tok)
+            ops.append(pending_op)
             pending_target = False
             continue
         pending_target = False
@@ -134,11 +141,18 @@ def _segments(command):
         if tok in SEPARATORS or (set(tok) <= set(";&|(){}<>\n") and set(tok) & set(";&|(){}\n")):
             if current or redirects:
                 out.append(current + ([REDIRECT_MARK] + redirects if redirects else []))
-            current, redirects = [], []
+                if ops_out is not None:
+                    ops_out.append((ops, opens, closes))
+                opens = closes = 0
+            current, redirects, ops = [], [], []
+            opens += tok.count("(")
+            closes += tok.count(")")
         else:
             current.append(tok)
     if current or redirects:
         out.append(current + ([REDIRECT_MARK] + redirects if redirects else []))
+        if ops_out is not None:
+            ops_out.append((ops, opens, closes))
     return out
 
 
@@ -444,6 +458,86 @@ def scan_command(command, places, depth=0, cwd_known=True):
     return None
 
 
+def writes_file(command, cwd, target, depth=0):
+    """True if some simple command in `command` writes to the file `target`
+    (an absolute path): an output redirection onto it, tee, sed -i / perl -i,
+    truncate or mv on it, or cp/install with it as the destination. Words are
+    parsed, so quoting doesn't hide it; `cd` and `env -C` are followed. Reading
+    it (`cat < CHANGELOG.md`, `cp CHANGELOG.md /tmp/x`) and `git checkout REV --
+    CHANGELOG.md` (how a branch heals) are not writes. Best effort: scripts run
+    in other languages, globs and unparseable commands are not seen;
+    scripts/check.sh is the backstop. When a `cd` goes somewhere unknowable
+    ($VAR), any word ending in the protected name counts."""
+    if depth > MAX_DEPTH:
+        return False
+    try:
+        command, subs = _pull_quoted_subs(command)
+        ops_per_segment = []
+        segments = _segments(command, ops_per_segment)
+    except ValueError:
+        return False
+    here = cwd  # None once a cd leads somewhere we can't know
+    saved = []  # folders to return to when a ( ) group ends
+
+    def is_target(word, base):
+        if not word or _SUB.search(word):
+            return False
+        expanded = _expand(word)
+        if expanded is None or (base is None and not os.path.isabs(expanded)):
+            return os.path.basename(word) == os.path.basename(target)
+        full = expanded if os.path.isabs(expanded) else os.path.join(base, expanded)
+        return os.path.realpath(full) == target
+
+    def moved(base, d):
+        e = _expand(d)
+        if base is None or e is None:
+            return None
+        return os.path.realpath(e if os.path.isabs(e) else os.path.join(base, e))
+
+    for words, (ops, opens, closes) in zip(segments, ops_per_segment):
+        for _ in range(closes):
+            if saved:
+                here = saved.pop()
+        saved.extend([here] * opens)
+        for w in words:
+            for k in _SUB.findall(w):
+                if writes_file(subs[int(k)], here if here is not None else cwd, target, depth + 1):
+                    return True
+        chdirs = []
+        name, args = _unwrap(words, chdirs)
+        base = here
+        for d in chdirs:
+            base = moved(base, d)
+        if REDIRECT_MARK in words:
+            targets = words[words.index(REDIRECT_MARK) + 1:]
+            for op, w in zip(ops, targets):
+                # The shell opens redirects where it stands, before env -C moves the program.
+                if ">" in op and is_target(w, here):  # > >> >| &> <> write; < reads
+                    return True
+        if name == "-c":
+            if writes_file(args[0] if args else "", base if base is not None else cwd, target, depth + 1):
+                return True
+            continue
+        operands = args[:args.index(REDIRECT_MARK)] if REDIRECT_MARK in args else list(args)
+        files = [a for a in operands if not a.startswith("-")]
+        if name in ("cd", "pushd"):
+            here = moved(here, files[0] if files else "~")
+            continue
+        if name in ("tee", "truncate", "mv") and any(is_target(a, base) for a in files):
+            return True
+        if name in ("sed", "perl", "ruby") and any(
+                re.match(r"^-[a-zA-Z]*i|^--in-place", a) for a in operands) and any(is_target(a, base) for a in files):
+            return True
+        if name in ("cp", "install") and files and is_target(files[-1], base):
+            return True
+        for i, a in enumerate(operands):  # cp -t DIR / --target-directory=DIR
+            if name in ("cp", "mv", "install") and (a in ("-t", "--target-directory") or a.startswith("--target-directory=")):
+                d = a.split("=", 1)[1] if "=" in a else (operands[i + 1] if i + 1 < len(operands) else "")
+                if d and any(is_target(os.path.join(d, os.path.basename(f)), base) for f in files):
+                    return True
+    return False
+
+
 def main():
     if RULES_OFF:
         allow_silently()
@@ -476,6 +570,14 @@ def main():
     if WORKTREE_CLEANUP.search(command):
         deny("Removing worktrees or force-deleting branches is done by the human "
              "(scripts/finish-task.sh cleans up after merging).")
+    if "CHANGELOG.md" in command:
+        cl_info = repo_info(cwd)
+        # Only the root file counts: docs/CHANGELOG.md and friends are fine.
+        cl_root = os.path.join(os.path.realpath(cl_info["root"]), "CHANGELOG.md") if cl_info else ""
+        if cl_info is not None and cl_info["is_worktree"] and writes_file(command, cwd, cl_root):
+            deny("CHANGELOG.md is written only at ship, from the ticket title, by the "
+                 "release tagger. Don't edit it on a task branch: it conflicts with "
+                 "every other branch's release entry. Put the wording in the ticket title.")
     if ENV_WRITE.search(command):
         deny("Don't write .env files. Secrets never go in the repo; ask the human "
              "to put real values in place.")

@@ -243,3 +243,90 @@ def test_fleet_status_row_fails_when_the_workspace_is_gone(projects, monkeypatch
     monkeypatch.setattr(lc, "find_workspace", gone)
     rows = {r[1]: r for r in sv.status_rows()}
     assert rows["herdr"][0] == "ok" and rows["workspace"][0] == "fail"
+
+
+# --- BD-106: timeouts on every step, and a reservation that cannot block forever ---------------
+
+def test_a_merge_that_keeps_talking_but_never_ends_is_stopped_and_pinged(shipping, env, monkeypatch, capsys, pings):
+    repo, t, log = shipping
+    _settings(env, ship_prompt_timeout_s=0, ship_step_timeout_s=2)
+    script = repo / "scripts" / "finish-task.sh"
+    script.write_text("#!/bin/bash\nwhile true; do echo working; sleep 0.2; done\n")
+    began = time.monotonic()
+    assert ship_main([t["id"]]) == 1
+    assert time.monotonic() - began < 30
+    assert "ran longer than 2s" in capsys.readouterr().err
+    assert prep.shipping_ids() == set()
+    assert [p[1] for p in pings] == ["needs_human"]
+
+
+def test_a_hung_gate_comes_back_as_a_failed_run_and_pings_once(projects, env, monkeypatch, pings):
+    import subprocess
+
+    from fleet import ship_cli
+    _settings(env, ship_step_timeout_s=7)
+    t = mk()
+    monkeypatch.setattr(ship_cli, "_ship_ticket", t["id"])
+    seen = []
+
+    def hang(argv, timeout, **kw):
+        seen.append(timeout)
+        raise subprocess.TimeoutExpired(argv, timeout)
+    monkeypatch.setattr(ship_cli, "_run_group", hang)
+    done = ship_cli._gate(projects / "x", projects / "x", "task/x")
+    assert seen == [7] and done.returncode == 124 and "timed out after 7s" in done.stderr
+    assert [p[1] for p in pings] == ["needs_human"]
+
+
+def test_a_timed_out_step_kills_its_grandchildren(tmp_path):
+    import os
+    import subprocess
+
+    from fleet import ship_cli
+    pidfile = tmp_path / "pid"
+    with pytest.raises(subprocess.TimeoutExpired):
+        ship_cli._run_group(["bash", "-c", f"sleep 300 & echo $! > {pidfile}; wait"], 1,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    child = int(pidfile.read_text())
+    for _ in range(50):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("the grandchild is still running")
+
+
+def test_step_timeouts_are_settings(projects, env):
+    _settings(env, ship_step_timeout_s=0, ship_reservation_max_age_s=30)
+    s = dp.load_settings()
+    assert s["ship_step_timeout_s"] == 0 and s["ship_reservation_max_age_s"] == 30
+    _settings(env, ship_step_timeout_s=-1)
+    with pytest.raises(Exception):
+        dp.load_settings()
+
+
+def _hold(ticket_id, **rec):
+    with prep._state() as st:
+        st["shipping"] = [{"id": ticket_id, **rec}]
+
+
+def test_a_live_but_unrelated_pid_does_not_hold_a_reservation(projects, env):
+    import os
+    now = time.time()
+    _hold("BD-1", pid=os.getpid(), cmd="some other command entirely", at=now)   # a reused pid
+    assert prep.shipping_ids() == set()
+    _hold("BD-1", pid=os.getpid(), cmd=prep._cmdline(os.getpid()), at=now)      # the same command
+    assert prep.shipping_ids() == {"BD-1"}
+
+
+def test_an_old_reservation_expires_and_a_fresh_one_is_honoured(projects, env):
+    import os
+    me = prep._cmdline(os.getpid())
+    _settings(env, ship_reservation_max_age_s=60)
+    _hold("BD-1", pid=os.getpid(), cmd=me, at=time.time() - 3600)
+    assert prep.shipping_ids() == set()
+    _hold("BD-1", pid=os.getppid(), cmd=prep._cmdline(os.getppid()), at=time.time() - 10)
+    assert prep.shipping_ids() == {"BD-1"}
+    assert prep.reserve_shipping("BD-1") == "BD-1 is already being shipped"

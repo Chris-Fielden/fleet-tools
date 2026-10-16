@@ -68,6 +68,7 @@ def main(argv=None) -> int:
     u.add_argument("--by-ticket", action="store_true",
                    help="top tickets by tokens over the last 7 days (build vs review, Claude vs Codex)")
     u.add_argument("--json", action="store_true", help="machine-readable output")
+    sub.add_parser("digest", help="informational events of the last 24 hours, plain text (read-only, sends nothing)")
     sub.add_parser("doctor", help="check the settings, the tools on PATH and the tracker (read-only)")
     s = sub.add_parser("start", help="start herdr (headless), the workspaces and dispatch --watch; safe to repeat")
     s.add_argument("--pause", action="store_true", help="wait for Enter at the end (for the desktop launcher)")
@@ -83,10 +84,14 @@ def main(argv=None) -> int:
     lg.add_argument("-n", type=int, default=30, metavar="LINES", help="lines per log (default 30)")
     a = sub.add_parser("autostart", help="start the fleet at boot (a systemd --user service); default off")
     a.add_argument("state", choices=("on", "off"))
+    sub.add_parser("heartbeat-check", help="ping if dispatch --watch looks dead or stuck (run by a timer; human only)")
     la = sub.add_parser("launcher", help="install or remove the desktop launcher that runs fleet start")
     la.add_argument("state", choices=("on", "off"))
     args = p.parse_args(argv)
 
+    if args.cmd == "digest":
+        from . import digest
+        return digest.main()
     if args.cmd == "doctor":
         return doctor.main()
     if args.cmd == "status" and args.json:
@@ -98,6 +103,9 @@ def main(argv=None) -> int:
         except (ValueError, OSError) as exc:
             print(f"fleet: {exc}", file=sys.stderr)
             return 1
+    if args.cmd == "heartbeat-check":
+        from . import heartbeat_check
+        return heartbeat_check.main()
     if args.cmd == "ops":
         try:
             return ops.cmd_ops()

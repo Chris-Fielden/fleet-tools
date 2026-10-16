@@ -17,7 +17,7 @@ Only on a real transition, never on a re-run or a note:
 | `investigated` | An investigation ends done (`dispatch`). |
 | `ship` | `dispatch --watch` moved a ticket to In Review: "<ID> ready to ship", with risk level and title. |
 | `review_failed` | No longer sent: a mid-loop FAIL never pings (see `oncall`). The name stays valid in `priorities`. |
-| `review_unrecorded` | A review for the current tip is saved in `.reviews/` but is not on the ticket (`ticket review-result` failed or was never run). |
+| `review_unrecorded` | A review for the current tip is saved in `.reviews/` but is not on the ticket (`ticket review-result` failed or was never run). Sent only when the same commit and kind is still unrecorded on `unrecorded_ping_cycles` dispatcher cycles (default 3, first sight counts as 1; the first sight is logged as `ALERT`); the count is kept in `review-watch.json` and dropped once the review is recorded. |
 | `blocked`, `stalled` | No longer sent: a blocked (20 min) or stalled (45 min) agent is a true failure (see `oncall`). The names stay valid in `priorities`. |
 | `oncall` | The dispatcher closed a ticket as failed and filed an on-call ticket: "<ID> failed, on-call <OC ID> is on it". Low. |
 | `needs_human` | A failed ticket the on-call agent will not (or could not) fix, or one closed by the 15-review-round backstop: "<ID> needs a human, see notes". High. |

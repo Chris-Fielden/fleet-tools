@@ -22,6 +22,8 @@ with a plain message.
 | `prep_time` | `06:00` | HH:MM, America/Los_Angeles: the prep pass over tickets in review (two or more waiting) runs once a day at this time (or when nothing is left to build) |
 | `prep_pass_gap_hours` | `4` | from `prep_time` on, at most one prep pass starts per this many hours; 0 turns it off |
 | `ship_prompt_timeout_s` | `900` | a merge that prints nothing for this many seconds (it is waiting at a prompt) is cancelled cleanly, its reservation freed, and one needs-human ping sent; 0 turns it off |
+| `ship_step_timeout_s` | `3600` | wall-clock limit for the merge script as a whole, for `review.sh` and for each `ticket gate` run of a ship; one past it is stopped and a needs-human ping sent; 0 turns it off |
+| `ship_reservation_max_age_s` | `14400` | a ship's reservation older than this, or whose pid now runs a different command, no longer blocks its ticket; 0 turns the age limit off |
 | `projects_dir` | `~/projects` | a ticket's repo is `<projects_dir>/<repo>` |
 | `research_dir` | `~/fleet-research` | folder for read-only research agents |
 | `herdr_workspace` | `fleet` | herdr workspace agents are launched in |
@@ -34,6 +36,7 @@ with a plain message.
 | `pause_weekly_pct` | `90` | weekly plan usage (from the status line) at which no agent of any kind is launched: normal, urgent, on-call, investigations, reconcile, prep, relaunches, fresh sessions. Checked every dispatch cycle; logs `LAUNCH_PAUSED` and sends one low ping on crossing. Lifts at the weekly reset; 0 turns it off |
 | `hard_stop_weekly_pct` | `95` | weekly usage at which running agents are stopped too: each gets up to 20 s to finish its tool call, then is interrupted (Escape); work stays in its task folder; its ticket gets a note and is held (not failed) and a new agent starts after the weekly reset; one high ping. Shown in `fleet status`; 0 turns it off |
 | `fail_rounds_threshold` | `8` | FAIL verdicts on different commits (latest still FAIL) after which a claimed ticket is "going in circles" and truly fails; 1 or more |
+| `unrecorded_ping_cycles` | `3` | A saved review that is not on the ticket pings only when still unrecorded on this many dispatcher cycles (first sight counts as 1; 1 pings at once); 1 or more |
 | `kaneo.workspace_id` | `null` | used when `kaneo.json` lacks it (the url stays in `kaneo.json`: it decides where the key is sent) |
 | `kaneo.project_icon` | `Layout` | icon of projects the mirror creates |
 

@@ -36,7 +36,7 @@ DEPRECATED_EVENTS = ("blocked", "review_failed", "stalled")
 EVENTS = ("ready", "urgent", "failed", "proposed", "investigated", "ship", "blocked",
           "review_failed", "review_unrecorded", "stalled", "oncall", "needs_human",
           "shipped", "ship_failed", "dispatcher_down", "ship_list", "settings_invalid", "usage_pause", "usage_stop",
-          "dialog", "leftovers")
+          "dialog", "leftovers", "ready_reminder", "reconcile_stuck")
 _HEADLINE = {"ready": "Review ready", "urgent": "Urgent ticket", "failed": "Ticket failed",
              "proposed": "Follow-up proposed", "investigated": "Investigation done",
              "ship": "Ready to ship", "blocked": "Agent blocked", "review_failed": "Review FAILED",
@@ -46,7 +46,8 @@ _HEADLINE = {"ready": "Review ready", "urgent": "Urgent ticket", "failed": "Tick
              "dispatcher_down": "Dispatcher down", "ship_list": "Ship list ready",
              "settings_invalid": "Settings invalid", "usage_pause": "Launches paused",
              "usage_stop": "Agents stopped: weekly usage", "dialog": "Agent dialog",
-             "leftovers": "Ready with leftovers"}
+             "leftovers": "Ready with leftovers", "ready_reminder": "Still waiting for you",
+             "reconcile_stuck": "Ticket stuck"}
 # ntfy's own names for its five priorities.
 PRIORITY_NUMBERS = {"min": 1, "low": 2, "default": 3, "high": 4, "max": 5}
 # Per event; override any of them under "priorities" in notify.json.
@@ -56,7 +57,8 @@ PRIORITIES = {"ready": "low", "urgent": "low", "failed": "high", "proposed": "lo
               "oncall": "low", "needs_human": "high", "shipped": "low", "ship_failed": "high",
               "dispatcher_down": "high", "ship_list": "default",
               "settings_invalid": "high", "usage_pause": "low", "usage_stop": "high",
-              "dialog": "high", "leftovers": "high"}
+              "dialog": "high", "leftovers": "high", "ready_reminder": "low",
+              "reconcile_stuck": "low"}
 _TAGS = {"ready": ["mag"], "urgent": ["rotating_light"], "failed": ["x"], "proposed": ["bulb"],
          "investigated": ["mag_right"], "ship": ["white_check_mark"], "blocked": ["hand"],
          "review_failed": ["x"], "review_unrecorded": ["warning"], "stalled": ["hourglass"],
@@ -64,7 +66,7 @@ _TAGS = {"ready": ["mag"], "urgent": ["rotating_light"], "failed": ["x"], "propo
          "ship_failed": ["no_entry"], "dispatcher_down": ["rotating_light"], "ship_list": ["package"],
          "settings_invalid": ["warning"], "usage_pause": ["pause_button"],
          "usage_stop": ["octagonal_sign"], "dialog": ["hand"],
-         "leftovers": ["broom"]}
+         "leftovers": ["broom"], "ready_reminder": ["bell"], "reconcile_stuck": ["hourglass"]}
 # Events about a failure: their message says why (see _failure_lines).
 FAILURE_EVENTS = ("failed", "oncall", "needs_human")
 # Events whose `detail` is the whole point (the result of a web ship).
