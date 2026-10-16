@@ -225,7 +225,63 @@ def test_an_unattached_investigation_is_reused_not_refiled(projects, herdr_log, 
     assert tk.load_ticket(build["id"])["parent"] == inv["id"]
 
 
-def test_findings_note_keeps_the_design_when_cut():
-    inv = {"id": "ID-1", "notes": [{"text": "x" * 3990}, {"text": "the design: y"}]}
-    assert "the design: y" in dp.findings_note(inv)
-    assert len(dp.findings_note(inv)) <= tk.NOTE_MAX
+def _parts(sizes, design_last=True):
+    notes = [{"text": ("line %d\n" % i) * (n // 8)} for i, n in enumerate(sizes)]
+    if design_last:
+        notes.append({"text": "the design: y"})
+    return dp.findings_note({"id": "ID-1", "notes": notes})
+
+
+def test_findings_note_1kb_is_one_part():
+    parts = _parts([1000])
+    assert len(parts) == 1 and parts[0].startswith("Findings from investigation ID-1: part 1/1\n")
+
+
+def test_findings_note_3kb_and_9kb_split_without_loss():
+    for size, want in ((3000, 1), (9000, 3)):
+        parts = _parts([size, size // 3, size // 3])
+        assert all(len(p) <= tk.NOTE_MAX for p in parts)
+        assert len(parts) >= want
+        n = len(parts)
+        for i, p in enumerate(parts, 1):
+            assert p.startswith(f"Findings from investigation ID-1: part {i}/{n}\n")
+        assert "the design: y" in parts[0]
+        body = "\n".join(parts)
+        assert body.count("line 0") == size // 8 and body.count("line 1") == size // 24
+
+
+def test_findings_note_splits_one_overlong_note_at_line_ends():
+    parts = dp.findings_note({"id": "ID-1", "notes": [{"text": "\n".join(f"row {i:04d}" for i in range(1500))}]})
+    assert len(parts) > 1 and all(len(p) <= tk.NOTE_MAX for p in parts)
+    rows = [r for p in parts for r in p.split("\n")[1:] if r]
+    assert rows == [f"row {i:04d}" for i in range(1500)]
+
+
+def test_findings_parts_appended_once_and_midway_failure_completed(projects, herdr_log, monkeypatch):
+    real_repo(projects)
+    build = mk(branch="task/guard", body=RISKY)
+    assert dispatch_main(["--once"]) == 0
+    (inv,) = only("investigate")
+    tk.add_note(inv["id"], "x" * 3500)
+    tk.add_note(inv["id"], "y" * 3500)
+    finish(inv["id"], "the design: steps")
+    real = tk.add_note
+    calls = []
+
+    def flaky(tid, text, *a, **k):
+        if tid == build["id"]:
+            calls.append(1)
+            if len(calls) == 2:
+                raise tk.TicketError("disk full")
+        return real(tid, text, *a, **k)
+    monkeypatch.setattr(tk, "add_note", flaky)
+    lines, held = dp.ensure_investigations(tk.list_tickets())
+    assert held == {build["id"]}
+    assert len(tk.load_ticket(build["id"])["notes"]) == 1
+    monkeypatch.setattr(tk, "add_note", real)
+    lines, held = dp.ensure_investigations(tk.list_tickets())
+    got = tk.load_ticket(build["id"])["notes"]
+    assert held == set() and len(got) >= 2
+    assert [n["text"].split("\n")[0].rsplit(" ", 1)[1] for n in got] == [f"{i}/{len(got)}" for i in range(1, len(got) + 1)]
+    assert dp.ensure_investigations(tk.list_tickets()) == ([], set())
+    assert len(tk.load_ticket(build["id"])["notes"]) == len(got)
