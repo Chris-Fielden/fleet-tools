@@ -72,3 +72,11 @@ said and whether you agree.
 `ask-claude.sh` and the Claude review both need network access. If they fail
 with a network error, tell the human: network access for Codex is set in
 `.codex/config.toml`.
+
+## Never stop to wait for an answer
+
+No one is watching while you work. When a choice is
+unclear, pick the safer option, write a ticket note
+saying what you chose and why, and continue. If no
+option is safe, write a ticket note saying what is
+blocked and end your turn.
