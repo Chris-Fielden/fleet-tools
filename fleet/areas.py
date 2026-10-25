@@ -250,10 +250,13 @@ def sweep(tickets: list[dict], running, now: datetime | None = None,
     now = now or datetime.now(timezone.utc)
     with _table_lock():
         locks = _read()
-        keep = live(locks, tickets, now)
+        renewed = _stamp(now + timedelta(hours=lease_hours))
+        in_review = {t["id"] for t in tickets if t["status"] == "review"}   # waits for the human: no agent, lock stays
+        keep = live({tid: ({**e, "lease_until": renewed} if tid in in_review else e) for tid, e in locks.items()},
+                    tickets, now)
         for tid in keep:
             if running is not None and tid.lower() in running:
-                keep[tid] = {**keep[tid], "lease_until": _stamp(now + timedelta(hours=lease_hours))}
+                keep[tid] = {**keep[tid], "lease_until": renewed}
         dropped = sorted(set(locks) - set(keep))
         if dropped or keep != locks:
             _write(keep)

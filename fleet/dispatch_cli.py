@@ -229,7 +229,16 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     # queue is doing, and never counts against the daily launch limit.
     running = running_agents(tickets, warn)
     try:   # drop expired or orphaned area locks; renew those of tickets whose agent is running
-        for tid in areas.sweep(tickets, running, clock.now(), settings["area_lease_hours"]):
+        # (asked of herdr whenever a claimed ticket holds areas, whatever the on-call queue says)
+        alive = None
+        if any(t["status"] == "claimed" and t.get("areas") for t in tickets):
+            try:
+                alive = frozenset(a.get("name") for a in lc.list_agents() if a.get("agent_status") not in ("idle", "done"))
+            except lc.LaunchError as exc:
+                warn(f"area locks not renewed: cannot ask herdr which agents are running ({exc})")
+        else:
+            alive = frozenset()
+        for tid in areas.sweep(tickets, alive, clock.now(), settings["area_lease_hours"]):
             dp.log("AREA_RELEASED", f"{tid} lease ended or ticket no longer active")
     except OSError as exc:
         warn(f"area locks: {exc}")

@@ -341,6 +341,28 @@ def test_running_agent_renews_and_a_dead_one_expires(projects, monkeypatch):
     assert areas._read() == {}
 
 
+def test_review_ticket_keeps_its_lock(projects, monkeypatch):
+    make_repo(projects)
+    t = mk(branch="task/first", areas=["fleet/a.py"])
+    claim(t)
+    areas.acquire(tk.load_ticket(t["id"]), tk.list_tickets(), NOW, lease_hours=1)
+    review = {**tk.load_ticket(t["id"]), "status": "review"}
+    assert areas.sweep([review], frozenset(), NOW + timedelta(hours=5), 1) == []
+
+
+def test_cycle_renews_locks_of_running_agents(projects, monkeypatch):
+    # the cycle must ask herdr by itself: no on-call ticket is waiting here
+    from fleet import dispatch_cli as dc
+    make_repo(projects)
+    t = mk(branch="task/first", areas=["fleet/a.py"])
+    claim(t)
+    areas.acquire(tk.load_ticket(t["id"]), tk.list_tickets(), datetime.now(timezone.utc) - timedelta(hours=5), lease_hours=6)
+    monkeypatch.setattr(dc.lc, "list_agents", lambda: [{"name": t["id"].lower(), "agent_status": "working"}])
+    dc._cycle(settings(), lambda m: None, lambda m: None)
+    lease = datetime.strptime(areas._read()[t["id"]]["lease_until"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    assert lease > datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+
+
 def test_human_release(projects, monkeypatch):
     make_repo(projects)
     t = mk(branch="task/first", areas=["fleet/a.py"])
@@ -371,7 +393,7 @@ def test_claim_area_files_a_ticket_and_names_who_is_ahead(projects, monkeypatch)
                "--body", "x").returncode == 2   # --area is required
 
 
-@pytest.mark.parametrize("bad", ["/etc/passwd", "../x", "~/x", "a\\b", " x", "", "./fleet/a.py", "fleet//a.py", "/"])
+@pytest.mark.parametrize("bad", ["/etc/passwd", "../x", "~/x", "a\\b", " x", "", "./fleet/a.py", "fleet//a.py", "/", "fleet/**.py"])
 def test_bad_areas_are_refused(projects, bad):
     out = run("new", "--type", "build", "--repo", "app", "--branch", "task/x", "--title", "T",
               "--body", "b", "--area", bad)

@@ -33,8 +33,8 @@ table is `$FLEET_HOME/area-locks.json`.
   ticket in the same repo ("waiting for the area lock of ..."); `launch` takes the lock with
   the claim (a refusal puts the ticket back to open). Tickets without areas are never held.
 - A lock is live until its lease ends (`area_lease_hours`, default 6) or its ticket leaves
-  claimed/review. Each cycle renews the locks of tickets whose agent is running and drops the
-  rest. `ticket release-area ID` (human only) frees one by hand.
+  claimed/review. Each cycle renews the locks of tickets whose agent is running (herdr is asked whenever a
+  claimed ticket holds areas) and of tickets in review (they wait for the human), and drops the rest. `ticket release-area ID` (human only) frees one by hand.
 - Globs: `**` crosses folders, `*` and `?` do not; a path with no wildcard and no extension,
   or ending in `/`, also covers everything below it. Two globs that both contain wildcards in
   the same segment are assumed to meet (too coarse serialises; too fine would miss overlap).
@@ -50,3 +50,5 @@ worktree of a repo that has tickets unless the worktree's branch belongs to a cl
 in-review ticket. Hooks see paths only, so this checks the branch, not who is editing. It is off
 by default because it also stops a human's own ticketless worktree; a store that cannot be read
 does not block. Whether Codex's patch hook enforces it the same way has not been checked.
+
+Auto-open is a convenience, not a security boundary: the areas are declared by the filing agent, and the merge gate still judges the real diff and risk level.

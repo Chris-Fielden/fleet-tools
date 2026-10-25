@@ -326,10 +326,10 @@ def check_areas(areas) -> list[str]:
         return [f"areas must be a list of 1 to {AREAS_MAX} path globs of at most {AREA_MAX} characters"]
     for a in areas:
         parts = a.split("/")
-        if (a.startswith(("/", "~")) or ".." in parts or "." in parts or "" in parts[:-1] or not a.strip("/")
+        if (any("**" in p and p != "**" for p in a.split("/")) or a.startswith(("/", "~")) or ".." in parts or "." in parts or "" in parts[:-1] or not a.strip("/")
                 or "\\" in a or "\n" in a or "\0" in a or a != a.strip()):
             return [f"area '{a}' must be a canonical path relative to the repo root "
-                    "(no '..', '.', '//', no leading '/' or '~')"]
+                    "(no '..', '.', '//', no leading '/' or '~', '**' only as a whole folder name)"]
     return []
 
 
