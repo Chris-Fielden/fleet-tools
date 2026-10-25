@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.25.7] - 2026-10-25
+
+### Changed
+
+- BD-126: Wake the agent to rebase on current main before review
+
 ## [ship-2026.10.25.6] - 2026-10-25
 
 ### Changed
