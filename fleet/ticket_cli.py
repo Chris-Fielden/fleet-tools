@@ -265,7 +265,9 @@ def _cmd_submit(args) -> int:
     ref = f"refs/heads/{t['branch']}"
     tip = dp._git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
     ahead = dp._git(repo, "rev-list", "--count", f"{main}..{ref}")
-    if tip.returncode != 0 or ahead.returncode != 0 or int(ahead.stdout.strip() or 0) == 0:
+    if tip.returncode != 0 or ahead.returncode != 0:
+        raise tk.TicketError(f"branch {t['branch']} not found in {t['repo']}")
+    if int(ahead.stdout.strip()) == 0:
         raise tk.TicketError(f"branch {t['branch']} has no commits that {main} lacks; nothing to review")
     base = dp._git(repo, "merge-base", main, ref).stdout.strip() or None
     t = _tracker().submit(args.id, tip.stdout.strip(), base)

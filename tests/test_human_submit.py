@@ -2,6 +2,7 @@
 status), and a repo that cannot take work pings a human once per cause."""
 import pytest
 
+from fleet import notify
 from fleet import ticket as tk
 from fleet.dispatch_cli import main as dispatch_main
 from fleet.ticket_cli import main as ticket_main
@@ -85,3 +86,39 @@ def test_a_repo_on_another_branch_pings_once(projects, env, ntfy, herdr_log, cap
     git(repo, "checkout", "-q", "other")
     dispatch_main(["--once"])   # ... so it pings again
     assert len(ntfy.requests) == 2
+
+
+def test_a_stale_submitted_ticket_asks_a_human_not_an_agent(rig, ntfy):
+    human_built(rig)
+    assert ticket_main(["submit", rig.id]) == 0
+    rig.verdict("PASS", "Codex")
+    rig.verdict("PASS", "Claude (opus)")
+    (rig.repo / "first.txt").write_text("main moved")
+    git(rig.repo, "add", "-A")
+    git(rig.repo, "commit", "-q", "-m", "main moves on")
+    rig.cycle()
+    rig.cycle(5)
+    assert rig.get()["status"] == "claimed" and not rig.warnings
+    assert any("needs a rebase by a human" in line for line in rig.lines)
+    needs = [r for r in ntfy.requests if "needs a human" in r["body"]["title"]]
+    assert len(needs) == 1 and "rebase" in needs[0]["body"]["message"]
+
+
+def test_a_failed_ping_is_retried_and_a_new_cause_pings_again(projects, env, ntfy, herdr_log, monkeypatch):
+    repo = make_repo(projects)
+    mk()
+    git(repo, "checkout", "-q", "-b", "other")
+    real = notify.notify_quietly
+    monkeypatch.setattr(notify, "notify_quietly", lambda *a, **k: False)
+    dispatch_main(["--once"])
+    dispatch_main(["--once"])
+    assert ntfy.requests == []
+    monkeypatch.setattr(notify, "notify_quietly", real)
+    dispatch_main(["--once"])
+    assert len(ntfy.requests) == 1
+    git(repo, "checkout", "-q", "main")
+    (repo / "README").write_text("changed")
+    dispatch_main(["--once"])
+    dispatch_main(["--once"])
+    assert len(ntfy.requests) == 2
+    assert "uncommitted changes" in ntfy.requests[1]["body"]["message"]

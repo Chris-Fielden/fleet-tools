@@ -1068,9 +1068,13 @@ def submit_ticket(ticket_id: str, tip: str, base_commit: str | None = None) -> d
         raise TicketError(f"{ticket_id} has an agent ({ticket['assignee']}); only a ticket with no assignee can be submitted")
     if base_commit is not None and ticket.get("base_commit"):
         base_commit = None   # keep the one it has
-    moved = set_status(ticket_id, "claimed", allowed_from=("open", "claimed"), base_commit=base_commit)
-    return add_note(moved["id"], f"{SUBMIT_NOTE} {tip[:8]}. No agent is on it; the review watcher moves it "
-                                 "to review when this commit has a passing verdict.")
+    if ticket["status"] not in ("open", "claimed"):
+        raise TicketError(f"{ticket_id} is {ticket['status']}; it can only be submitted from: open, claimed")
+    # The note first: the watcher ignores it until the ticket is claimed, so a failure between
+    # the two steps never leaves a claimed ticket without its marker.
+    add_note(ticket_id, f"{SUBMIT_NOTE} {tip[:8]}. No agent is on it; the review watcher moves it "
+                        "to review when its tip has a passing verdict.")
+    return set_status(ticket_id, "claimed", allowed_from=("open", "claimed"), base_commit=base_commit)
 
 
 def raise_risk(ticket_id: str, level: str) -> dict:

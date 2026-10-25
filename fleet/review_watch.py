@@ -913,6 +913,10 @@ def _wake_for_rebase(t: dict, tip: str, agent: dict | None, settings: dict, stat
     state["rebase_asked"][t["id"]] = key
     _note_once(t["id"], f"Rebase needed ({tip[:8]} onto {main[:8]})", f"Rebase needed ({tip[:8]} onto {main[:8]}): {text}", warn)
     dp.log("REBASE_ASKED", f"{t['id']} {tip[:8]} onto main {main[:8]}: {why}")
+    if human_submitted(t):   # no agent to wake or start: the human who built it rebases
+        emit(f"{t['id']}  review skipped: main {main[:8]} moved; it needs a rebase by a human")
+        _ping(t, "needs_human", f"{t['id']}:rebase:{key}", state, warn, f"rebase onto main {main[:8]} needed")
+        return "woke"
     emit(f"{t['id']}  review skipped: asking the agent to rebase onto main {main[:8]}")
     if agent is None:   # the note above is what the new agent reads
         prep.relaunch_sent_back(t, settings, emit, warn)
