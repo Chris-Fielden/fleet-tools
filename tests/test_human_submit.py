@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from fleet import dispatch as dp
 from fleet import notify
 from fleet import review_watch as rw
 from fleet import ticket as tk
@@ -177,3 +178,14 @@ def test_a_rebase_ping_that_failed_is_retried(rig, ntfy, monkeypatch):
     monkeypatch.setattr(notify, "notify_quietly", real)
     rig.cycle(10)
     assert len([r for r in ntfy.requests if "needs a human" in r["body"]["title"]]) == 1
+
+
+def test_a_submitted_human_ticket_holds_no_build_slot(projects, env, herdr_log):
+    make_repo(projects)
+    human = mk(branch="task/human-one")
+    tk.set_status(human["id"], "claimed", allowed_from=("open",))
+    other = mk(branch="task/agent-one")
+    decisions = {d.ticket["id"]: d for d in dp.decide(tk.list_tickets(), dp.load_settings())}
+    assert decisions[other["id"]].skip != "at capacity"
+    assert [t["id"] for t in dp.capacity_holders(tk.list_tickets())] == []
+    assert [t["id"] for t in dp.branch_holders(tk.list_tickets())] == [human["id"]]

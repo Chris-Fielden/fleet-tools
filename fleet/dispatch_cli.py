@@ -331,7 +331,9 @@ def _ping_repo_problems(decisions, settings, warn) -> None:
             seen = {}
     except (OSError, ValueError):
         seen = {}
-    state = {repo: why for repo, why in seen.items() if repo in problems and problems[repo][1] == why}
+    # a cause stays remembered until its repo was looked at and the cause changed or went away
+    state = {repo: why for repo, why in seen.items()
+             if repo not in first or (repo in problems and problems[repo][1] == why)}
     for repo, (t, why) in problems.items():
         if repo in state:
             continue

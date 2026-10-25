@@ -299,8 +299,10 @@ def branch_holders(tickets: list[dict]) -> list[dict]:
 def capacity_holders(tickets: list[dict]) -> list[dict]:
     """Tickets that fill the normal `max_running` capacity: the claimed ones. A ticket
     in review is waiting for the human, not for an agent, so it keeps its branch but
-    not its place; on-call ones have their own slot."""
-    return [t for t in branch_holders(tickets) if not t.get("oncall") and t["status"] == "claimed"]
+    not its place; on-call ones have their own slot. A claimed ticket with no assignee
+    (a human's, handed over with `ticket submit`) has no agent, so it holds no place either."""
+    return [t for t in branch_holders(tickets)
+            if not t.get("oncall") and t["status"] == "claimed" and t.get("assignee") is not None]
 
 
 def oncall_slot_busy(tickets: list[dict], running: frozenset | set | None) -> str | None:
