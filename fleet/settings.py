@@ -29,6 +29,15 @@ DEFAULTS = {
     "max_investigations_per_day": 3,
     "watch_interval_seconds": 120,
     "max_launches_per_day": 10,
+    # Auto-open (dispatcher): a controller-filed proposed ticket opens by rule. Repos never
+    # auto-opened, and the daily cap (the hourly cap is the agent ticket limit).
+    "auto_open_deny_repos": [],
+    "max_auto_open_per_day": 5,
+    # When true, the edit guard refuses edits in a task worktree of a repo that has tickets unless
+    # the worktree's branch belongs to a claimed or in-review ticket (see .claude/hooks/guard_edits.py).
+    "require_ticket_for_edits": False,
+    # A file-area lock lasts this many hours, renewed while its ticket's agent runs.
+    "area_lease_hours": 6,
     # The daily caps (launches, on-call) reset at midnight in this IANA timezone.
     "timezone": "America/Los_Angeles",
     # Overnight queue: at this time (HH:MM, America/Los_Angeles) the prep pass
@@ -168,6 +177,20 @@ def _merge(settings: dict, given, path: Path) -> None:
             path, given, "watch_interval_seconds", MIN_WATCH_INTERVAL, f"{MIN_WATCH_INTERVAL} or more")
     if "max_launches_per_day" in given:
         settings["max_launches_per_day"] = _whole(path, given, "max_launches_per_day", 0, "0 or more")
+    if "auto_open_deny_repos" in given:
+        repos = given["auto_open_deny_repos"]
+        if not isinstance(repos, list) or not all(isinstance(r, str) and tk.REPO_RE.fullmatch(r) for r in repos):
+            raise SettingsError(f"{path}: auto_open_deny_repos must be a list of repo names")
+        settings["auto_open_deny_repos"] = list(repos)
+    if "max_auto_open_per_day" in given:
+        settings["max_auto_open_per_day"] = _whole(path, given, "max_auto_open_per_day", 0,
+                                                   "0 or more (0 turns auto-open off)")
+    if "require_ticket_for_edits" in given:
+        if not isinstance(given["require_ticket_for_edits"], bool):
+            raise SettingsError(f"{path}: require_ticket_for_edits must be true or false")
+        settings["require_ticket_for_edits"] = given["require_ticket_for_edits"]
+    if "area_lease_hours" in given:
+        settings["area_lease_hours"] = _whole(path, given, "area_lease_hours", 1, "1 or more")
     if "timezone" in given:
         value = given["timezone"]
         try:

@@ -9,6 +9,7 @@ import sys
 
 from pathlib import Path
 
+from . import areas
 from . import dispatch as dp
 from . import dupes
 from . import kaneo
@@ -42,9 +43,27 @@ def _build_parser() -> argparse.ArgumentParser:
     new.add_argument("--commit")
     new.add_argument("--parent", type=tk.normalize_id)
     new.add_argument("--priority", choices=tk.PRIORITIES)
+    new.add_argument("--origin", type=tk.normalize_id,
+                     help="the handoff ticket this one was filed from (the dispatcher may then auto-open it)")
+    new.add_argument("--area", action="append", dest="areas", metavar="GLOB",
+                     help="a repo-relative path glob the work touches; repeat for more (file-area lock)")
     new.add_argument("--force", action="store_true",
                      help="file it although a ticket with a very similar title exists (humans only; "
                           "a branch already in use is always refused)")
+
+    claim = sub.add_parser("claim-area", help="a chat that will change a repo files a build ticket "
+                           "declaring the areas it touches, instead of editing in parallel")
+    claim.add_argument("--repo", required=True)
+    claim.add_argument("--branch", required=True)
+    claim.add_argument("--title", required=True)
+    cbody = claim.add_mutually_exclusive_group(required=True)
+    cbody.add_argument("--body")
+    cbody.add_argument("--body-file")
+    claim.add_argument("--area", action="append", dest="areas", metavar="GLOB", required=True,
+                       help="a repo-relative path glob the work touches; repeat for more")
+
+    rel = sub.add_parser("release-area", help="drop a ticket's file-area lock (humans only)")
+    rel.add_argument("id", type=tk.normalize_id)
 
     ls = sub.add_parser("list", help="list tickets, newest first (--status review: oldest first)")
     ls.add_argument("--status", choices=tk.STATUSES)
@@ -157,7 +176,7 @@ def _cmd_dupes(args) -> int:
     return 0
 
 
-def _cmd_new(args) -> int:
+def _read_body(args) -> str:
     if args.body_file is not None:
         try:
             # Body is at most BODY_MAX characters (up to 4 bytes each in UTF-8);
@@ -171,15 +190,49 @@ def _cmd_new(args) -> int:
             raise tk.TicketInvalid([f"cannot read body file {args.body_file}: {exc}"]) from None
     else:
         body = args.body
+    return body
+
+
+def _cmd_new(args) -> int:
+    body = _read_body(args)
     fields = {
         "type": args.type, "repo": args.repo, "branch": args.branch,
         "title": args.title, "body": body,
         "commit": args.commit, "parent": args.parent, "priority": args.priority,
+        "origin": args.origin, "areas": args.areas,
     }
     guard_duplicates(fields, force=args.force)
     ticket = _tracker().create(fields)
     print(ticket["id"])
     notify.notify_quietly(ticket, notify.event_for_new(ticket), _warn)
+    return 0
+
+
+def _cmd_claim_area(args) -> int:
+    """File the build ticket a chat works through, and say who it will queue behind: tickets of
+    the same repo, still unfinished, whose declared areas meet these."""
+    fields = {"type": "build", "repo": args.repo, "branch": args.branch, "title": args.title,
+              "body": _read_body(args), "areas": args.areas}
+    guard_duplicates(fields)
+    ahead = [t for t in tk.list_tickets()
+             if t["repo"] == args.repo and t["status"] in tk.ACTIVE_STATUSES and t.get("areas")
+             and areas.first_overlap(args.areas, t["areas"])]
+    ticket = _tracker().create(fields)
+    print(ticket["id"])
+    notify.notify_quietly(ticket, notify.event_for_new(ticket), _warn)
+    if ahead:
+        print(f"{ticket['id']} queues behind {', '.join(t['id'] for t in ahead)} (overlapping areas); "
+              "do not edit until it is claimed", file=sys.stderr)
+    print(f"{ticket['id']}: change the repo only through this ticket's task folder once it is claimed",
+          file=sys.stderr)
+    return 0
+
+
+def _cmd_release_area(args) -> int:
+    creator = tk.current_creator()
+    if creator != "human":
+        raise tk.TicketError(f"only a human can release an area lock (running as {creator})")
+    print(f"{args.id} area lock released" if areas.release(args.id) else f"{args.id} holds no area lock")
     return 0
 
 
@@ -473,7 +526,8 @@ def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
     handler = {"new": _cmd_new, "list": _cmd_list, "show": _cmd_show, "approve": _cmd_approve,
                "priority": _cmd_priority, "fix-titles": _cmd_fix_titles, "close": _cmd_close, "submit": _cmd_submit, "note": _cmd_note, "review-result": _cmd_review_result, "risk": _cmd_risk, "gate": _cmd_gate,
-               "dupes": _cmd_dupes, "sync": _cmd_sync}
+               "dupes": _cmd_dupes, "sync": _cmd_sync,
+               "claim-area": _cmd_claim_area, "release-area": _cmd_release_area}
     try:
         return handler[args.command](args)
     except (rk.RiskError, st.SettingsError) as exc:

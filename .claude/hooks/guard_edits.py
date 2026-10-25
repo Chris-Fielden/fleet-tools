@@ -7,13 +7,15 @@ way, this blocks edits in the main checkout (edits belong in a task
 worktree), edits to .env files, and content that looks like a real secret.
 """
 
+import glob
+import json
 import os
 import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import RULES_OFF, allow_silently, deny, read_input, repo_info  # noqa: E402
-from _common import is_under_fleet  # noqa: E402
+from _common import fleet_home_dir, is_under_fleet  # noqa: E402
 
 # Patterns that look like real credentials. Kept short on purpose: better to
 # catch the obvious cases reliably than to flag every long string.
@@ -45,6 +47,40 @@ def parse_patch(patch, cwd):
     added = "\n".join(line[1:] for line in patch.splitlines()
                       if line.startswith("+") and not line.startswith("+++"))
     return paths, added
+
+
+def worktree_ticket_problem(info):
+    """Why edits in this task worktree are refused, or None. Only when the human turned on
+    `require_ticket_for_edits` in settings.json, and only for a repo the ticket store knows
+    (it holds a ticket for it): the worktree's branch must belong to a ticket that is claimed
+    or in review. A chat that never filed one (`ticket claim-area`) is refused. Hooks see paths
+    only, so this cannot tell who is editing; it only checks the branch. Whatever cannot be read
+    is not a reason to refuse (the switch is the human's, and a broken store must not freeze all work)."""
+    home = fleet_home_dir()
+    try:
+        with open(os.path.join(home, "settings.json"), encoding="utf-8") as fh:
+            if json.load(fh).get("require_ticket_for_edits") is not True:
+                return None
+    except (OSError, ValueError, AttributeError):
+        return None
+    repo = os.path.basename(info["main_root"])
+    known = False
+    for path in glob.glob(os.path.join(home, "tickets", "*.json")):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                t = json.load(fh)
+            if t.get("repo") != repo:
+                continue
+            known = True
+            if t.get("branch") == info["branch"] and t.get("status") in ("claimed", "review"):
+                return None
+        except (OSError, ValueError, AttributeError):
+            continue
+    if not known:
+        return None
+    return (f"No active ticket owns branch {info['branch'] or '(detached)'} in {repo}. Parallel work "
+            "goes through tickets: run `ticket claim-area --repo ... --branch task/<name> --title ... "
+            "--body ... --area <path glob>` and wait until the dispatcher claims it.")
 
 
 def main():
@@ -92,6 +128,10 @@ def main():
                  "happen in a task worktree. Ask the human to run "
                  "`scripts/new-task.sh <task-name>` and start you in "
                  "`.worktrees/<task-name>`.")
+        if info is not None and info["is_worktree"]:
+            problem = worktree_ticket_problem(info)
+            if problem:
+                deny(problem)
 
     allow_silently()
 

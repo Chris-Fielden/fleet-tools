@@ -33,7 +33,11 @@ FIELDS = (
 )
 # Optional fields: may be absent from a stored ticket.
 OPTIONAL_FIELDS = ("close_note", "base_commit", "seq", "priority", "risk", "notes", "started_at",
-                   "oncall", "oncall_base", "fail_commits", "investigation", "review_commits")
+                   "oncall", "oncall_base", "fail_commits", "investigation", "review_commits",
+                   "origin", "areas", "auto_opened_at")
+# origin: the handoff ticket a controller-filed ticket came from (see dispatch.auto_open_problem).
+# areas: the repo-relative path globs the work will touch (fleet/areas.py: lock table, overlap).
+# auto_opened_at: set only by open_proposed, when the dispatcher opened a proposed ticket by rule.
 # oncall: true on the fix ticket the dispatcher files for the on-call agent.
 # oncall_base: the failed branch's tip when the ticket failed; the on-call branch
 # starts from exactly that commit, however long it waits for the on-call slot.
@@ -57,7 +61,10 @@ AGENTS = ("claude", "codex")
 CLOSE_OUTCOMES = {"done": "done", "failed": "failed", "cancelled": "cancelled"}
 # Fields a caller may supply when creating a ticket. Everything else in
 # FIELDS is set by the tool.
-CALLER_FIELDS = ("type", "repo", "branch", "title", "body", "commit", "parent", "priority")
+CALLER_FIELDS = ("type", "repo", "branch", "title", "body", "commit", "parent", "priority",
+                 "origin", "areas")
+AREAS_MAX = 20
+AREA_MAX = 200
 
 # Short ids like BD-12 (new) and legacy ids like T-20250101-001 (kept as is).
 ID_RE = re.compile(r"T-\d{8}-\d{3,}|[A-Z]{2}-[1-9]\d*")
@@ -295,6 +302,12 @@ def _check_common(f: dict, errors: list[str]) -> None:
     if f.get("priority") is not None and f["priority"] not in PRIORITIES:
         errors.append(f"priority must be one of: {', '.join(PRIORITIES)}")
 
+    origin = f.get("origin")
+    if origin is not None and (not _is_str(origin) or not ID_RE.fullmatch(origin)):
+        errors.append("origin must be a ticket id like BD-12 or T-20250101-001")
+    if f.get("areas") is not None:
+        errors += check_areas(f["areas"])
+
     title = f.get("title")
     if not _is_str(title) or not 1 <= len(title) <= 100:
         errors.append("title must be 1 to 100 characters")
@@ -304,6 +317,18 @@ def _check_common(f: dict, errors: list[str]) -> None:
     body = f.get("body")
     if not _is_str(body) or not 1 <= len(body) <= BODY_MAX:
         errors.append(f"body must be 1 to {BODY_MAX} characters")
+
+
+def check_areas(areas) -> list[str]:
+    """Problems with a declared files-touched list: 1 to AREAS_MAX repo-relative path globs."""
+    if (not isinstance(areas, list) or not 1 <= len(areas) <= AREAS_MAX
+            or not all(_is_str(a) and 1 <= len(a) <= AREA_MAX for a in areas)):
+        return [f"areas must be a list of 1 to {AREAS_MAX} path globs of at most {AREA_MAX} characters"]
+    for a in areas:
+        if (a.startswith(("/", "~")) or ".." in a.split("/") or "\\" in a or "\n" in a
+                or "\0" in a or a != a.strip()):
+            return [f"area '{a}' must be a path relative to the repo root (no '..', no leading '/' or '~')"]
+    return []
 
 
 def _check_notes(notes) -> list[str]:
@@ -407,6 +432,8 @@ def validate_stored(data, allow_unknown: bool = False) -> list[str]:
     inv = data.get("investigation")
     if "investigation" in data and not (_is_str(inv) and ID_RE.fullmatch(inv) and data["type"] == "fix"):
         errors.append("investigation must be a ticket id, on a fix ticket")
+    if "auto_opened_at" in data and not _is_time(data["auto_opened_at"]):
+        errors.append("auto_opened_at must be a UTC ISO 8601 time like 2025-01-01T00:00:00Z")
     if "started_at" in data and not _is_time(data["started_at"]):
         errors.append("started_at must be a UTC ISO 8601 time like 2025-01-01T00:00:00Z")
     if "notes" in data:
@@ -642,6 +669,11 @@ def create_ticket(fields: dict, *, needs_approval: bool = False, oncall: bool = 
                 raise TicketInvalid([f"parent ticket {parent} does not exist or is unreadable"]) from None
             if t == "build" and parent_ticket["type"] != "investigate":
                 raise TicketInvalid(["a build ticket's parent must be an investigate ticket"])
+        if fields.get("origin") is not None:
+            try:
+                _load_path(_ticket_path(fields["origin"]), fields["origin"])
+            except TicketError:
+                raise TicketInvalid([f"origin ticket {fields['origin']} does not exist or is unreadable"]) from None
         now = _now()
         new_id, seq = _assign_ids(id_prefix(fields, oncall))
         ticket = {
@@ -664,6 +696,9 @@ def create_ticket(fields: dict, *, needs_approval: bool = False, oncall: bool = 
         }
         if fields.get("priority") is not None:
             ticket["priority"] = fields["priority"]
+        for name in ("origin", "areas"):
+            if fields.get(name) is not None:
+                ticket[name] = fields[name]
         if oncall:
             ticket["oncall"] = True
             if oncall_base is not None:
@@ -690,6 +725,25 @@ def approve_ticket(ticket_id: str) -> dict:
             )
         ticket["status"] = "open"
         ticket["updated_at"] = _now()
+        _write_atomic(_ticket_path(ticket_id), ticket)
+    return ticket
+
+
+def open_proposed(ticket_id: str, reason: str) -> dict:
+    """Open a proposed ticket by the dispatcher's auto-open rule (dispatch.auto_open). Only a
+    process with no agent environment can call it, and only on a proposed ticket that names an
+    origin; an agent can never put its own ticket into the queue. The conditions themselves
+    are judged by the caller (dispatch.auto_open_problem), which also logs `reason`."""
+    creator = current_creator()
+    if creator != "human":
+        raise TicketError(f"only the dispatcher can auto-open a ticket (running as {creator})")
+    ticket_id = normalize_id(ticket_id)
+    with _locked():
+        ticket = load_ticket(ticket_id)
+        if ticket["status"] != "proposed" or not ticket.get("origin"):
+            raise TicketError(f"{ticket_id} is not a proposed ticket with an origin; it cannot be auto-opened")
+        ticket["status"] = "open"
+        ticket["auto_opened_at"] = ticket["updated_at"] = _now()
         _write_atomic(_ticket_path(ticket_id), ticket)
     return ticket
 

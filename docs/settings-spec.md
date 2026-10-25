@@ -31,6 +31,10 @@ with a plain message.
 | `id_prefixes` | `build BD, fix FX, review RV, question QN, investigate ID` | two capital letters per ticket type |
 | `emergency_prefix` | `EM` | prefix for any urgent ticket |
 | `oncall_prefix` | `OC` | prefix for the on-call fix tickets filed after a true failure |
+| `auto_open_deny_repos` | `[]` | repos whose controller-filed proposed tickets are never auto-opened (they wait for `ticket approve`) |
+| `max_auto_open_per_day` | `5` | tickets the dispatcher may auto-open a day (local day in `timezone`); 0 turns auto-open off. The hourly cap is the agent ticket limit (5 an hour); auto-open also stops at `max_launches_per_day` |
+| `require_ticket_for_edits` | `false` | when true, the edit guard refuses edits in a task worktree of a repo that has tickets unless the worktree's branch belongs to a claimed or in-review ticket (hooks see only paths, so this checks the branch, not the person) |
+| `area_lease_hours` | `6` | how long a file-area lock lasts; renewed each cycle while its ticket's agent runs |
 | `max_oncall_per_day` | `3` | on-call attempts a day (local day in `timezone`); they do not count against `max_launches_per_day` |
 | `fresh_session_tokens` | `100000` | When a claimed ticket gets a FAIL verdict and its agent's session context is over this many tokens, dispatch closes that agent's tab and starts a fresh session on the same branch (logged `FRESH_SESSION`); 0 turns it off. Only Claude sessions can be measured; a Codex session is never replaced |
 | `pause_weekly_pct` | `90` | weekly plan usage (from the status line) at which no agent of any kind is launched: normal, urgent, on-call, investigations, reconcile, prep, relaunches, fresh sessions. Checked every dispatch cycle; logs `LAUNCH_PAUSED` and sends one low ping on crossing. Lifts at the weekly reset; 0 turns it off |

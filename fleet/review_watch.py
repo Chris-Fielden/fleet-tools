@@ -47,6 +47,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import areas
 from . import dialog
 from . import dispatch as dp
 from . import fresh
@@ -1167,6 +1168,34 @@ def revive_failed(settings: dict, emit, warn) -> None:
         kaneo.mirror_quietly(new, warn)
 
 
+def _branch_diff(t: dict, settings: dict) -> list[str] | None:
+    """The files a ticket's branch changed against main, or None when git cannot say."""
+    repo = settings["projects_dir"] / t["repo"]
+    base = dp.main_branch(repo) if repo.is_dir() else None
+    if base is None or not dp.branch_exists(repo, t["branch"]):
+        return None
+    try:
+        return rk.changed_files(repo, f"{base}...{t['branch']}")
+    except rk.RiskError:
+        return None
+
+
+def _overlap_pings(tickets: list[dict], settings: dict, state: dict, warn) -> None:
+    """Ping once when the real diffs of two active branches of one repo touch the same file,
+    whatever areas their tickets declared. One ping per pair and file, on the older ticket."""
+    diffs = {}
+    for t in tickets:
+        if t["status"] in areas.HOLDING and t["type"] in dp.LAUNCH_TYPES and not t.get("oncall"):
+            files = _branch_diff(t, settings)
+            if files:
+                diffs[t["id"]] = files
+    by_id = {t["id"]: t for t in tickets}
+    for a, b, path in areas.overlaps(tickets, diffs):
+        t = by_id[a]
+        _ping(t, "needs_human", f"{a}:overlap:{b}-{path}", state, warn,
+              f"overlap: {a} and {b} both change {path}; the second to finish must rebase")
+
+
 def _flag_stuck_oncall(settings: dict, warn) -> None:
     """An open on-call ticket that can never be launched (its repo or start commit is
     gone, its branch or task folder already exists, or its launch failed
@@ -1282,6 +1311,10 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
         _ready_reminders([current[t["id"]] for t in tickets if t["id"] in current], state, now, warn)
     except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
         warn(f"ready reminders: {exc}")
+    try:
+        _overlap_pings(tk.list_tickets(), settings, state, warn)
+    except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
+        warn(f"overlap check: {exc}")
     try:
         revive_failed(settings, emit, warn)
     except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:

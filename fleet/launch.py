@@ -21,6 +21,7 @@ from . import dispatch as dp
 from . import governor
 from . import kaneo
 from . import permissions
+from . import areas
 from . import startup_block
 from . import ticket as tk
 from . import tracker as tr
@@ -442,6 +443,12 @@ def launch(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
         return 1, f"cannot read the current commit of {d.repo_path}"
     tracker = tr.get_tracker(warn, settings)
     tracker.claim(t["id"], d.agent, allowed_from=("open",), base_commit=base)
+    try:   # the area lock goes with the claim; a refusal puts the ticket back in the queue
+        areas.acquire(tk.load_ticket(t["id"]), tk.list_tickets(), lease_hours=settings["area_lease_hours"])
+    except (areas.AreaConflict, OSError) as exc:
+        tracker.set_status(t["id"], "open", allowed_from=("claimed",), assignee=None)
+        _safe_log("LAUNCH_WAIT", f"{t['id']} area lock: {exc}")
+        return 0, f"{t['id']}  not launched: waiting for an area lock ({exc})"
     folder, made, initial = None, "nothing", None
     try:
         dp.log("CLAIMED", f"{t['id']} {d.agent} {t['branch']} base {base[:12]}")
