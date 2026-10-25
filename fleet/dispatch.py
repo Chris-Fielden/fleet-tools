@@ -184,6 +184,37 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     )
 
 
+def stale_base(repo: Path, branch: str) -> tuple[str, str] | None:
+    """(main's commit id, why) when `branch` needs a rebase onto current main before it is reviewed:
+    main moved past the branch's merge base AND either the same files changed on both sides or a
+    merge would conflict. None when the branch is current, main only moved elsewhere, or git cannot
+    say. Read-only: only rev-parse, merge-base, diff and merge-tree; no checkout is touched."""
+    base = main_branch(repo)
+    if base is None:
+        return None
+    main = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{base}^{{commit}}")
+    tip = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}")
+    if main.returncode or tip.returncode:
+        return None
+    main_id, tip_id = main.stdout.strip(), tip.stdout.strip()
+    if _git(repo, "merge-base", "--is-ancestor", main_id, tip_id).returncode == 0:
+        return None   # the branch already holds everything on main
+    mb = _git(repo, "merge-base", main_id, tip_id)
+    if mb.returncode:
+        return None
+    merge = _git(repo, "merge-tree", "--write-tree", "--name-only", main_id, tip_id)
+    if merge.returncode == 1:
+        return main_id, f"merging it into {base} conflicts"
+    theirs = _git(repo, "diff", "--name-only", mb.stdout.strip(), main_id)
+    ours = _git(repo, "diff", "--name-only", mb.stdout.strip(), tip_id)
+    if theirs.returncode or ours.returncode:
+        return None
+    both = sorted(set(theirs.stdout.split()) & set(ours.stdout.split()))
+    if both:
+        return main_id, f"{base} changed files this branch also changed ({', '.join(both[:3])})"
+    return None
+
+
 def main_branch(repo: Path) -> str | None:
     for name in MAIN_BRANCHES:
         if _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}").returncode == 0:

@@ -93,7 +93,8 @@ def state_path() -> Path:
 
 def _load_state(warn) -> dict:
     state = {"sent": [], "blocked_since": {}, "stopped_since": {}, "seen": {}, "pending": [], "fresh": {},
-             "dialog_pinged": {}, "ready_since": {}, "unrecorded_seen": {}, "nudged": {}}
+             "dialog_pinged": {}, "ready_since": {}, "unrecorded_seen": {}, "nudged": {},
+             "rebase_asked": {}}
     try:
         data = json.loads(state_path().read_text(encoding="utf-8"))
         if (isinstance(data, dict) and isinstance(data.get("sent"), list)
@@ -111,6 +112,8 @@ def _load_state(warn) -> dict:
                                       if isinstance(k, str) and isinstance(v, str)},
                          nudged={k: v for k, v in (data["nudged"] if isinstance(data.get("nudged"), dict)
                                                    else {}).items() if isinstance(k, str) and isinstance(v, str)},
+                         rebase_asked={k: v for k, v in (data["rebase_asked"] if isinstance(
+                             data.get("rebase_asked"), dict) else {}).items() if isinstance(k, str) and isinstance(v, str)},
                          unrecorded_seen={k: v for k, v in (data["unrecorded_seen"] if isinstance(
                              data.get("unrecorded_seen"), dict) else {}).items()
                                           if isinstance(k, str) and type(v) is int and v > 0},
@@ -863,6 +866,49 @@ def abandon_rereviews(wait: float = 5.0) -> None:
         _REREVIEWS.clear()
 
 
+REBASE_TEXT = ("Before this can be reviewed, rebase task branch {branch} onto main {main} ({why}): resolve the "
+               "conflicts in this folder (never in the main checkout), run scripts/check.sh, commit, and "
+               "finish as usual. Never ask questions in chat: write them as a ticket note.")
+
+
+def _wake_for_rebase(t: dict, tip: str, agent: dict | None, settings: dict, state: dict, emit, warn) -> bool:
+    """The branch lags or conflicts with current main (dp.stale_base): do not review it. Put the ticket
+    back to claimed, leave a note, and wake its own agent (a new one if its tab is gone) to rebase in
+    its task folder and re-run check.sh. The rebase is a new commit id, so every old verdict stops
+    counting by itself. Asked once per (tip, main); returns True when the ticket was handled here."""
+    repo = settings["projects_dir"] / t["repo"]
+    stale = dp.stale_base(repo, t["branch"])
+    if stale is None:
+        state["rebase_asked"].pop(t["id"], None)
+        return False
+    main, why = stale
+    key = f"{tip}:{main}"
+    if state["rebase_asked"].get(t["id"]) == key:
+        return True   # asked already: wait for the new commit
+    if t["status"] == "review":
+        new = _move(t, "claimed", ("review",), warn)
+        if not new:
+            return True
+        emit(f"{t['id']}  back to In Progress (main moved: {why})")
+        dp.log("REVIEW_BACK", f"{t['id']} back to claimed: main {main[:8]} moved ({why})")
+        kaneo.mirror_quietly(new, warn)
+        t = new
+    text = REBASE_TEXT.format(branch=t["branch"], main=main[:8], why=why)
+    _note(t["id"], f"Rebase needed: {text}", warn)
+    state["rebase_asked"][t["id"]] = key
+    dp.log("REBASE_ASKED", f"{t['id']} {tip[:8]} onto main {main[:8]}: {why}")
+    emit(f"{t['id']}  review skipped: asking the agent to rebase onto main {main[:8]}")
+    if agent is None:
+        prep.relaunch_sent_back(t, settings, emit, warn)
+    else:
+        try:
+            lc.herdr("agent", "prompt", agent.get("name") or t["id"].lower(), text)
+        except lc.LaunchError as exc:
+            warn(f"{t['id']}: could not wake the agent for the rebase: {exc}")
+            state["rebase_asked"].pop(t["id"], None)   # tried again next cycle
+    return True
+
+
 def _rereview(t: dict, tip: str, agent: dict | None, settings: dict, state: dict, emit, warn) -> tuple[str, dict]:
     """Drive the re-review of a ticket whose tip is past its PASS. Returns ("wait", t) when
     nothing more is to be decided this cycle, ("passed", t) when the new tip was reviewed and
@@ -961,6 +1007,10 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
     _settle_stale_rereviews(t, tip, state, warn)
     with _REREVIEWS_LOCK:
         rereviewing = (t["id"], tip) in _REREVIEWS   # its result is taken up here once it is in
+    can_rebase = agents_known and (agent is None or stopped) and not rereviewing
+    if can_rebase and (moved_past_pass(t, tip) or earned):
+        if _wake_for_rebase(t, tip, agent, settings, state, emit, warn):
+            return   # no review of a stale base; the rebased commit is judged from the next cycle
     if agents_known and (agent is None or stopped) and (rereviewing or moved_past_pass(t, tip)):
         outcome, t = _rereview(t, tip, agent, settings, state, emit, warn)
         if outcome == "wait":
