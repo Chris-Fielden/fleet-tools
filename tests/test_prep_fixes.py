@@ -300,7 +300,7 @@ def test_a_sent_back_ticket_that_cannot_get_an_agent_says_so_once(q, herdr_log, 
     notes = [n["text"] for n in tk.load_ticket(a["id"])["notes"]]
     assert any("no agent could be started" in n for n in notes)
     pings = [p for p in sent(ntfy) if "needs a human" in p[0]]
-    assert len(pings) == 1 and pings[0][2] == "low"   # one ping, low priority
+    assert len(pings) == 1 and pings[0][2] == "high"   # one ping, high priority
 
 
 @pytest.mark.skipif(not os.environ.get("FLEET_TEST_REAL_CLAUDE"),

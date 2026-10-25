@@ -137,6 +137,8 @@ def test_research_rules_file_is_exactly_the_em22_rules(tmp_path, monkeypatch):
         "Bash(git commit * -n *)",
         "Bash(git commit * -n)",
         "Bash(git commit * --amend*)",
+        "Bash(herdr *)",
+        "Bash(herdr)",
         "AskUserQuestion",
     ]
 
@@ -183,3 +185,10 @@ def test_agents_cannot_ask_user_questions():
     assert "AskUserQuestion" in deny
     research = pm.research_permissions()["deny"]
     assert "AskUserQuestion" in research
+
+
+def test_agents_cannot_drive_herdr():
+    # EM-34 failure mode 19: no direct send-keys.
+    denies = bash_rules(pm.DENY)
+    for c in ("herdr", "herdr agent send-keys x 1"):
+        assert any(matches(d, c) for d in denies), c

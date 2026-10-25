@@ -80,7 +80,7 @@ def test_squirrels_marks_the_exact_commit_files_one_ticket_and_pings_once(sup, m
     assert f"Full Codex review of commit {tip[:7]}" in new["body"]
     assert any("ready with leftovers" in n["text"] for n in sup.get()["notes"])
     assert sup.get()["status"] == "claimed"        # only a label: nothing shipped, closed or moved
-    assert [(t, p) for t, _, p in no_dialog(ntfy)] == [(f"{sup.id} ready with leftovers, see notes", "default")]
+    assert [(t, p) for t, _, p in no_dialog(ntfy)] == [(f"{sup.id} ready with leftovers, see notes", "high")]
     for m in range(3, 6):
         sup.cycle(m)
     assert len(no_dialog(ntfy)) == 1               # once

@@ -20,7 +20,7 @@ Only on a real transition, never on a re-run or a note:
 | `review_unrecorded` | A review for the current tip is saved in `.reviews/` but is not on the ticket (`ticket review-result` failed or was never run). Sent only when the same commit and kind is still unrecorded on `unrecorded_ping_cycles` dispatcher cycles (default 3, first sight counts as 1; the first sight is logged as `ALERT`); the count is kept in `review-watch.json` and dropped once the review is recorded. |
 | `blocked`, `stalled` | No longer sent: a blocked (20 min) or stalled (45 min) agent is a true failure (see `oncall`). The names stay valid in `priorities`. |
 | `oncall` | The dispatcher closed a ticket as failed and filed an on-call ticket: "<ID> failed, on-call <OC ID> is on it". Low. |
-| `needs_human` | A failed ticket the on-call agent will not (or could not) fix, or one closed by the 15-review-round backstop: "<ID> needs a human, see notes". Low. |
+| `needs_human` | A failed ticket the on-call agent will not (or could not) fix, or one closed by the 15-review-round backstop: "<ID> needs a human, see notes". High. |
 
 The last four (`ship`, `review_unrecorded`, `oncall`, `needs_human`) come from `dispatch --watch` (see `fleet/review_watch.py`). They
 are decided from the stored ticket (verdict, notes), git, the review files, herdr
@@ -47,7 +47,7 @@ that finds anything (or cannot run), only the one-line summary is sent.
 
 ### Ready with leftovers
 
-`leftovers` (default priority, `broom`): the supervisor judged a failed review SQUIRRELS and
+`leftovers` (high priority, `broom`): the supervisor judged a failed review SQUIRRELS and
 the dispatcher marked the ticket ready with leftovers (EM-8 step F). One ping per ticket;
 it is dropped if the branch tip moves before it is sent. The message holds the id, type,
 status, title and the supervisor's one-line reason (secret-scanned, since it goes to a phone).
@@ -56,15 +56,17 @@ status, title and the supervisor's one-line reason (secret-scanned, since it goe
 
 | Event | When |
 |---|---|
-| `shipped` | A web ship merged the ticket. Default priority. |
+| `shipped` | A web ship merged the ticket. Low priority. |
 | `ship_failed` | A web ship was refused or failed, with the reason. High. |
 
 ### Priorities
 
 Each message carries its ntfy priority in the JSON body and in a `Priority`
-header. Defaults: `urgent`, `failed`, `blocked`, `review_failed`,
-`review_unrecorded` = `high`; `ready`, `ship`, `stalled`, `leftovers` = `default`;
-`proposed`, `investigated`, `oncall`, `needs_human` = `low`. (`blocked`, `stalled` and
+header. Defaults: `needs_human`, `dialog`, `settings_invalid`, `leftovers`,
+`failed`, `blocked`, `review_failed`, `ship_failed`, `dispatcher_down`,
+`usage_stop` = `high`; `ship`, `stalled`, `ship_list` = `default`; `urgent`,
+`review_unrecorded`, `ready`, `proposed`, `investigated`, `oncall`, `shipped`,
+`usage_pause` = `low`. (`blocked`, `stalled` and
 `review_failed` are no longer sent; their defaults only matter if you set them.) Override any of them in `notify.json`:
 `"priorities": {"stalled": "low", "ship": "high"}` (values: `min`, `low`,
 `default`, `high`, `max`). An unknown event or value makes the file unusable.

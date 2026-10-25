@@ -1,7 +1,7 @@
 """EM-8 step E: the 15-review-round backstop (temp FLEET_HOME, fake herdr and ntfy, real git).
 
 A ticket whose latest verdict is a FAIL after BACKSTOP_ROUNDS review rounds is closed as
-failed with the supervisor's latest note in the close note, and pinged once, low, as
+failed with the supervisor's latest note in the close note, and pinged once, high, as
 needs-human. No on-call ticket is filed. Nothing else is touched.
 """
 import json
@@ -43,7 +43,7 @@ def test_fifteen_rounds_close_it_with_the_analysis_and_one_needs_human_ping(rig,
     assert "review-round backstop: 15 review rounds" in t["close_note"]
     assert "items are in different areas" in t["close_note"]
     assert oncall_tickets() == []
-    assert [(title, prio) for title, _, prio in sent(ntfy)] == [(f"{rig.id} needs a human, see notes", "low")]
+    assert [(title, prio) for title, _, prio in sent(ntfy)] == [(f"{rig.id} needs a human, see notes", "high")]
     assert any(n["text"].startswith("Needs a human:") for n in t["notes"])
 
 

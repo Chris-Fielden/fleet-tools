@@ -92,7 +92,7 @@ def test_plain_build_ticket_is_silent(ntfy):
 def test_urgent_created(ntfy):
     make(priority="urgent")
     assert len(ntfy.requests) == 1
-    assert ntfy.requests[0]["body"]["priority"] == 4 and ntfy.requests[0]["priority"] == "high"
+    assert ntfy.requests[0]["body"]["priority"] == 2 and ntfy.requests[0]["priority"] == "low"
 
 
 def test_failed_close_notifies_but_done_does_not(ntfy):
@@ -220,3 +220,13 @@ def test_ping_log_unwritable_does_not_fail_the_ping(ntfy):
     assert notify.notify_quietly(_ticket(), "failed") is True
     ntfy.status = 500
     assert notify.notify_quietly(_ticket(), "failed", warn=lambda m: None) is False
+
+
+def test_default_priorities_follow_the_needs_human_policy():
+    p = notify.PRIORITIES
+    for event in ("needs_human", "dialog", "settings_invalid", "leftovers"):
+        assert p[event] == "high"
+    for event in ("urgent", "review_unrecorded", "usage_pause", "oncall", "investigated",
+                  "shipped", "proposed", "ready"):
+        assert p[event] == "low"
+    assert set(p) == set(notify.EVENTS)

@@ -27,6 +27,9 @@ DENY = [
     "Bash(git commit * -n *)",
     "Bash(git commit * -n)",
     "Bash(git commit * --amend*)",
+    # Agents never drive herdr panes.
+    "Bash(herdr *)",
+    "Bash(herdr)",
     # Agents never wait on a question; see CLAUDE.md section 8.
     "AskUserQuestion",
 ]
