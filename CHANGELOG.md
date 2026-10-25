@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.25.6] - 2026-10-25
+
+### Changed
+
+- BD-125: Revive failed ticket to review when the tip passes; OC uses current tip
+
 ## [ship-2026.10.25.5] - 2026-10-25
 
 ### Changed
