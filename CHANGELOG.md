@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.25.2] - 2026-10-25
+
+### Changed
+
+- BD-121: Human-only fleet answer; deny herdr
+
 ## [ship-2026.10.25.1] - 2026-10-25
 
 ### Changed
