@@ -96,6 +96,7 @@ def test_pass_logs_and_stays_quiet(setup):
     assert not ntfy.exists()
     calls = (repo / "calls.log").read_text()
     assert "check --read-data-subset=" in calls and "restore latest" in calls
+    assert "--tag fleet-backup --host fleet" in calls
     assert (tmp / "live" / "marker").read_text() == "untouched"
     assert sorted(p.name for p in (tmp / "live").iterdir()) == ["marker", "tickets"]
     assert not any(p.name.startswith("tmp.") for p in tmp.iterdir())  # temp folder removed
@@ -105,6 +106,16 @@ def test_restore_nested_under_staging_path(setup):
     e, repo, tmp, _ = setup
     (repo / "nested").write_text("")
     assert run(e).returncode == 0
+
+
+def test_temp_setup_failure_is_recorded_and_notified(setup):
+    e, repo, tmp, ntfy = setup
+    e["TMPDIR"] = str(tmp / "missing-tmp")
+    r = run(e)
+    assert r.returncode == 1
+    assert last_log(tmp).split()[1] == "FAIL"
+    assert "temporary folder" in last_log(tmp)
+    assert "FAILED" in ntfy.read_text()
 
 
 def test_corrupted_snapshot_fails_and_notifies(setup):

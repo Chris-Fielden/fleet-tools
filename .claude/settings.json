@@ -76,7 +76,10 @@
       "Bash(git commit * --no-verify*)",
       "Bash(git commit * -n *)",
       "Bash(git commit * -n)",
-      "Bash(git commit * --amend*)"
+      "Bash(git commit * --amend*)",
+      "Bash(herdr *)",
+      "Bash(herdr)",
+      "AskUserQuestion"
     ]
   }
 }

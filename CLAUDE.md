@@ -95,4 +95,15 @@ weaken its own rules.
 
 - No `rm -rf` on broad paths, no force-pushes, no `git reset --hard` outside
   your worktree.
-- If you are unsure, stop and ask. If something failed, say so plainly.
+- If you are unsure, pick the safer option (section 8). If something
+  failed, say so plainly.
+
+## 8. Never stop to wait for an answer
+
+- No one is watching while you work, so a question
+  stalls the fleet. Never wait on a reply.
+- When a choice is unclear, pick the safer option,
+  write a ticket note (`ticket note`) saying what
+  you chose and why, and continue.
+- If no option is safe, write a ticket note saying
+  what is blocked and end your turn.

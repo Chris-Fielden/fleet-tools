@@ -79,7 +79,7 @@ TICKET_HUMAN_ONLY = re.compile(_CMD_START + r"(?:fleet\s+)?ticket\s+(close|appro
 # human-only commands under their new names, plus everything that runs or
 # changes the fleet itself.
 FLEET_HUMAN_VERBS = {"ship", "approve", "alert", "idea", "dispatch", "start", "stop", "restart",
-                     "autostart", "launcher", "ops", "status-serve", "unblock"}
+                     "answer", "autostart", "launcher", "ops", "status-serve", "unblock"}
 FLEET_VERB_HUMAN_ONLY = re.compile(
     _CMD_START + r"fleet\s+(" + "|".join(sorted(FLEET_HUMAN_VERBS)) + r")(?=\s|$|[;&|)`])")
 # Any mention of the .fleet folder as a path: ~/.fleet, $HOME/.fleet,
@@ -87,7 +87,7 @@ FLEET_VERB_HUMAN_ONLY = re.compile(
 FLEET_PATH = re.compile(r"(^|[^\w.-])\.fleet(/|$|[\s'\";|&)])")
 
 
-HUMAN_ONLY_NAMES = {"idea", "alert", "dispatch", "ship"}
+HUMAN_ONLY_NAMES = {"idea", "alert", "dispatch", "ship", "herdr"}
 TICKET_HUMAN_ONLY_SUBCOMMANDS = {"close", "approve", "sync", "priority", "fix-titles"}
 # Programs that run another program: `env dispatch`, `command ship`, `sudo -u me idea`.
 WRAPPERS = {"env", "command", "exec", "nohup", "time", "setsid", "stdbuf", "sudo",
