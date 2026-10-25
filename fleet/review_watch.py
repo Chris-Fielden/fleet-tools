@@ -164,7 +164,15 @@ def has_summary_after_review(t: dict) -> bool:
     # in a note; that stands in for the agent's summary of the new tip.
     return any(n["at"] >= v["at"] and not n["text"].startswith(LEFTOVERS_PREFIX)
                and (n["by"] == t.get("assignee") or (n["by"] == "human" and n["text"].startswith(prep.PASS_NOTE_PREFIX)))
-               for n in t.get("notes", []))
+               for n in t.get("notes", [])) or human_submitted(t)
+
+
+def human_submitted(t: dict) -> bool:
+    """A human-built ticket with no agent that a human handed over with `ticket submit`: that
+    note stands in for the agent's summary, whenever it was saved. The verdict must still be
+    a pass for the exact tip."""
+    return (t.get("created_by") == "human" and t.get("assignee") is None and t["status"] in ("claimed", "review")
+            and any(n["by"] == "human" and n["text"].startswith(tk.SUBMIT_NOTE) for n in t.get("notes", [])))
 
 
 def passed_for_tip(t: dict, tip: str) -> bool:
@@ -1003,7 +1011,7 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
     if tip is None:
         return
     agent_state = agent.get("agent_status") if agent else None
-    stopped = agent_state in ("idle", "done")
+    stopped = agent_state in ("idle", "done") or (agent is None and human_submitted(t))   # no agent was ever on it
     earned = passed_for_tip(t, tip) and has_summary_after_review(t)
 
     _settle_stale_rereviews(t, tip, state, warn)
@@ -1238,7 +1246,7 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
     recovering |= locked | set(skip) | governor.held_ids()   # stopped by the usage governor: not failed
     tickets = sorted((t for t in tk.list_tickets()
                       if t["status"] in ("claimed", "review") and t["type"] in dp.LAUNCH_TYPES
-                      and t.get("assignee") in tk.AGENTS and t["id"] not in recovering), key=tk.oldest_first_key)
+                      and (t.get("assignee") in tk.AGENTS or human_submitted(t)) and t["id"] not in recovering), key=tk.oldest_first_key)
     try:
         agents = {a.get("name"): a for a in lc.list_agents() if a.get("name")} if tickets else {}
         known = True

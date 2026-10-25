@@ -9,6 +9,7 @@ import sys
 
 from pathlib import Path
 
+from . import dispatch as dp
 from . import dupes
 from . import kaneo
 from . import notify
@@ -69,6 +70,9 @@ def _build_parser() -> argparse.ArgumentParser:
     for name in tk.CLOSE_OUTCOMES:
         outcome.add_argument(f"--{name}", dest="outcome", action="store_const", const=name)
     close.add_argument("--note")
+
+    submit = sub.add_parser("submit", help="hand a human-built ticket with commits and no agent to review (humans only)")
+    submit.add_argument("id", type=tk.normalize_id)
 
     note = sub.add_parser("note", help="add a note to a ticket (findings, remarks)")
     note.add_argument("id", type=tk.normalize_id)
@@ -246,6 +250,26 @@ def _cmd_close(args) -> int:
     t = _tracker().close(args.id, args.outcome, args.note)
     print(f"{t['id']} closed (now {t['status']})")
     notify.notify_quietly(t, "failed" if t["status"] == "failed" else None, _warn)
+    return 0
+
+
+def _cmd_submit(args) -> int:
+    creator = tk.current_creator()
+    if creator != "human":
+        raise tk.TicketError(f"only a human can submit a ticket for review (running as {creator})")
+    t = _tracker().show(args.id)
+    repo = st.load_settings()["projects_dir"] / t["repo"]
+    main = dp.main_branch(repo)
+    if main is None:
+        raise tk.TicketError(f"{t['repo']} has no main or master branch")
+    ref = f"refs/heads/{t['branch']}"
+    tip = dp._git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+    ahead = dp._git(repo, "rev-list", "--count", f"{main}..{ref}")
+    if tip.returncode != 0 or ahead.returncode != 0 or int(ahead.stdout.strip() or 0) == 0:
+        raise tk.TicketError(f"branch {t['branch']} has no commits that {main} lacks; nothing to review")
+    base = dp._git(repo, "merge-base", main, ref).stdout.strip() or None
+    t = _tracker().submit(args.id, tip.stdout.strip(), base)
+    print(f"{t['id']} submitted (now {t['status']}); once its tip has a passing review it moves to review")
     return 0
 
 
@@ -446,7 +470,7 @@ def _cmd_sync(args) -> int:
 def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
     handler = {"new": _cmd_new, "list": _cmd_list, "show": _cmd_show, "approve": _cmd_approve,
-               "priority": _cmd_priority, "fix-titles": _cmd_fix_titles, "close": _cmd_close, "note": _cmd_note, "review-result": _cmd_review_result, "risk": _cmd_risk, "gate": _cmd_gate,
+               "priority": _cmd_priority, "fix-titles": _cmd_fix_titles, "close": _cmd_close, "submit": _cmd_submit, "note": _cmd_note, "review-result": _cmd_review_result, "risk": _cmd_risk, "gate": _cmd_gate,
                "dupes": _cmd_dupes, "sync": _cmd_sync}
     try:
         return handler[args.command](args)
