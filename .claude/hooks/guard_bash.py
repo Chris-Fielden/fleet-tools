@@ -12,6 +12,10 @@ find another route to your own files. The real wall is running agents as a
 separate Linux user that cannot read ~/.fleet at all (planned for the tower).
 When a command is too unusual to analyse safely, these rules refuse it.
 
+Launching Cursor's agent (agent, cursor-agent, cursor agent) is refused, at
+the start of a command and behind wrappers, shells and subshells. Launchers
+that are not wrappers (npx, find -exec, su -c, watch) are not followed.
+
 Known limits (by design; the separate-user setup is the fix for these):
 - Code the hook can't see: a script written and then run in a later step,
   `source`/`.` of a file, shell functions and aliases, and programs started
@@ -65,6 +69,7 @@ HUMAN_ONLY_SCRIPTS = re.compile(r"(finish-task|release-tag)\.sh")
 UNSAFE_AGENT_FLAGS = re.compile(
     r"--dangerously-skip-permissions|--dangerously-bypass-approvals-and-sandbox"
     r"|--dangerously-bypass-hook-trust|danger-full-access|(^|\s)--yolo(\s|$)"
+    r"|--sandbox[=\s]+disabled|--approve-mcps"
 )
 WORKTREE_CLEANUP = re.compile(r"\bgit\s+(worktree\s+(remove|prune)|branch\s+-D)\b")
 ENV_WRITE = re.compile(r"(>|>>|tee\s+(-a\s+)?)\s*\S*\.env(\.\S+)?(\s|$)")
@@ -87,12 +92,31 @@ FLEET_VERB_HUMAN_ONLY = re.compile(
 FLEET_PATH = re.compile(r"(^|[^\w.-])\.fleet(/|$|[\s'\";|&)])")
 
 
+# Cursor's agent CLI. Agents may not launch it; `cursor .` (the editor) is not it.
+CURSOR_PROGRAMS = {"agent", "cursor-agent"}
 HUMAN_ONLY_NAMES = {"idea", "alert", "dispatch", "ship", "herdr"}
 TICKET_HUMAN_ONLY_SUBCOMMANDS = {"close", "approve", "sync", "priority", "fix-titles"}
 # Programs that run another program: `env dispatch`, `command ship`, `sudo -u me idea`.
 WRAPPERS = {"env", "command", "exec", "nohup", "time", "setsid", "stdbuf", "sudo",
             "doas", "nice", "ionice", "timeout", "xargs", "builtin", "chronic", "unbuffer"}
-WRAPPER_OPTS_WITH_VALUE = {"-u", "-g", "-n", "-c", "-s", "-k", "-S", "-C", "-I", "-L", "-P"}
+# Options that take a separate value, per wrapper (-n is a value for nice but
+# a flag for sudo, so one shared set would swallow the real program).
+# Long options known to take no value; any other bare long option is refused.
+WRAPPER_FLAG_LONG_OPTS = {"--ignore-environment", "--null", "--debug", "--no-run-if-empty",
+                          "--verbose", "--portability", "--preserve-env", "--login",
+                          "--non-interactive", "--background", "--fork", "--wait"}
+WRAPPER_VALUE_OPTS = {
+    "env": {"-u", "-C", "--unset", "--chdir"},
+    "sudo": {"-u", "-g", "-h", "-p", "-r", "-t", "-U", "-T", "-R", "-D", "-C",
+             "--user", "--group", "--chdir"},
+    "doas": {"-u", "-C"},
+    "nice": {"-n", "--adjustment"},
+    "ionice": {"-c", "-n", "-p", "-P"},
+    "xargs": {"-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s", "-J"},
+    "stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"},
+    "time": {"-f", "-o"},
+    "exec": {"-a"},
+}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
 PYTHONS = re.compile(r"^python(\d+(\.\d+)?)?$")
 # Programs that walk a whole folder tree. Pointed at your home folder (or
@@ -185,17 +209,84 @@ def _unwrap(words, chdirs=None):
             i += 1
             if name == "timeout":
                 while i < len(words) and words[i].startswith("-"):
+                    # -s SIGNAL, -k DURATION, --signal SIGNAL, --kill-after DURATION,
+                    # also bundled (-vs TERM) or attached (-sTERM, --signal=TERM)
+                    opt = words[i]
+                    if opt == "--":
+                        break
+                    if opt.startswith("--"):
+                        if opt in ("--signal", "--kill-after"):
+                            i += 2
+                        elif "=" in opt or opt in ("--foreground", "--preserve-status", "--verbose"):
+                            i += 1
+                        else:
+                            return ("-odd", [])  # abbreviated or unknown long option
+                    else:
+                        j = next((k for k, c in enumerate(opt[1:], 1) if c in "sk"), None)
+                        i += 2 if j == len(opt) - 1 else 1
+                if i < len(words) and words[i] == "--":
                     i += 1
                 i += 1  # the duration
                 continue
             while i < len(words) and (words[i].startswith("-") or re.match(r"^\w+=", words[i])):
                 opt = words[i]
+                if opt == "--":  # end of the wrapper's options
+                    i += 1
+                    break
+                bundled_s = re.match(r"^-[i0v]*S(.*)$", opt)  # -S, -Sval, -iS, -iSval
+                if name == "env" and (bundled_s or opt == "--split-string"
+                                      or opt.startswith("--split-string=")):
+                    # env -S 'agent -p x': the value is a whole command line.
+                    rest = words[i + 1:]
+                    if "=" in opt and opt.startswith("--"):
+                        value = opt.split("=", 1)[1]
+                    elif bundled_s and bundled_s.group(1):
+                        value = bundled_s.group(1)
+                    else:
+                        value, rest = (rest[0], rest[1:]) if rest else ("", [])
+                    # env -S treats \_ (and \t, \n, ...) as a separator.
+                    value = re.sub(r"\\[_tnvfr]", " ", value)
+                    if "\\" in value:  # \c, \", \$ ...: not modelled, so refuse
+                        return ("-odd", [])
+                    try:
+                        parts = shlex.split(value)
+                    except ValueError:
+                        parts = [value]
+                    if any(p.startswith("#") for p in parts):  # env drops comments
+                        return ("-odd", [])
+                    # Quote every word so argument boundaries survive the re-parse,
+                    # and keep `env` in front so its own options (-i, -u) still parse.
+                    return ("-c", [shlex.join(["env"] + parts + rest)])
+                # env accepts abbreviated long options (--uns, --split) and other
+                # options with values (-a); only the spellings understood here are
+                # allowed, anything else is refused rather than guessed at.
+                if name == "env" and not re.match(
+                        r"^(\w+=.*|-[i0v]+|-[i0v]*[uC].*|--(ignore-environment|null|debug)"
+                        r"|--(unset|chdir)(=.*)?|-)$", opt):
+                    return ("-odd", [])
+                # A long option we have no entry for might take a separate value
+                # (xargs --max-args 1, time --format %E), which would hide the
+                # real program. Refuse rather than guess.
+                if (opt.startswith("--") and opt != "--" and "=" not in opt
+                        and opt not in WRAPPER_VALUE_OPTS.get(name, ())
+                        and opt not in CHDIR_OPTS.get(name, ())
+                        and opt not in WRAPPER_FLAG_LONG_OPTS):
+                    return ("-odd", [])
                 for flag in CHDIR_OPTS.get(name, ()):
                     if opt == flag and i + 1 < len(words):
                         chdirs.append(words[i + 1])
                     elif opt.startswith(flag + "=") or (len(flag) == 2 and opt.startswith(flag) and len(opt) > 2):
                         chdirs.append(opt.split("=", 1)[1] if "=" in opt else opt[2:])
-                i += 2 if opt in WRAPPER_OPTS_WITH_VALUE or opt in CHDIR_OPTS.get(name, ()) else 1
+                value_opts = set(WRAPPER_VALUE_OPTS.get(name, ())) | set(CHDIR_OPTS.get(name, ()))
+                takes_value = opt in value_opts
+                if re.match(r"^-[A-Za-z0-9]{2,}$", opt):
+                    # A bundle like -rn or -nu: the first value-taking letter ends
+                    # it, and takes the next word unless its value is attached.
+                    for k, c in enumerate(opt[1:], 1):
+                        if "-" + c in value_opts:
+                            takes_value = k == len(opt) - 1
+                            break
+                i += 2 if takes_value else 1
             continue
         if name in SHELLS or PYTHONS.match(name):
             rest = words[i + 1:]
@@ -239,7 +330,7 @@ def _is_ancestor_of_fleet(path):
 
 MAX_PLACES = 16  # more possible folders than this and we stop guessing
 MAX_DEPTH = 6
-FLEET_WORDS = re.compile(r"\b(idea|alert|dispatch|ship|ticket|fleet)\b|\.fleet")
+FLEET_WORDS = re.compile(r"\b(idea|alert|dispatch|ship|ticket|fleet|agent|cursor-agent)\b|\.fleet")
 _SUB = re.compile("\x01(\\d+)\x01")
 
 
@@ -382,6 +473,8 @@ def scan_command(command, places, depth=0, cwd_known=True):
                     return ("fleet", None)
                 if not cwd_known and is_under_fleet(e, "/"):
                     return ("fleet", None)
+        if name == "-odd":
+            return ("odd", None)
         if name == "-c":
             reason = scan_command(args[0] if args else "", here, depth + 1, here_known)
             if reason:
@@ -395,6 +488,14 @@ def scan_command(command, places, depth=0, cwd_known=True):
                 name, args, prefix = "ticket", args[1:], "fleet "
         if name in HUMAN_ONLY_NAMES:
             return ("human", name)
+        # Only the program position is looked at, so `ssh-agent -s` or
+        # `grep agent` pass. -f/--force (also bundled, as in -pf) is already
+        # covered: the program itself is refused.
+        base = os.path.basename(name or "")
+        if base in CURSOR_PROGRAMS:
+            return ("cursor", base)
+        if base == "cursor" and "agent" in args:
+            return ("cursor", "cursor agent")
         if name == "ticket" and args and args[0] in TICKET_HUMAN_ONLY_SUBCOMMANDS:
             return ("human", f"{prefix}ticket {args[0]}")
         if name == "ticket" and args and args[0] == "risk" and any(
@@ -596,6 +697,9 @@ def main():
         deny("Don't touch the fleet's private folder (~/.fleet) directly: it holds "
              "the real tickets and the Kaneo key. Use `ticket show`, `ticket list` "
              "or `ticket new` instead. In tests, set FLEET_HOME to a temporary folder.")
+    if found and found[0] == "cursor":
+        deny(f"Agents may not launch Cursor (`{found[1]}`). Only the human or fleet "
+             "scripts start it.")
     if found and found[0] == "odd":
         deny("That command is too unusual for the safety rules to check (unbalanced "
              "quotes or very deep nesting). Write it more simply.")
