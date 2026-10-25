@@ -261,7 +261,7 @@ def sweep(tickets: list[dict], running, now: datetime | None = None,
 
 
 def overlaps(tickets: list[dict], diffs: dict[str, list[str]]) -> list[tuple[str, str, str]]:
-    """(id, other id, file) for each pair of branch holders of one repo whose real diffs share a
+    """(id, other id, file) for each shared file of each pair of branch holders of one repo whose real diffs share a
     file. `diffs` maps ticket id to the files its branch changed against main."""
     holders = sorted((t for t in tickets if t["status"] in HOLDING and t["id"] in diffs),
                      key=lambda t: t["id"])
@@ -270,7 +270,6 @@ def overlaps(tickets: list[dict], diffs: dict[str, list[str]]) -> list[tuple[str
         for b in holders[i + 1:]:
             if a["repo"] != b["repo"]:
                 continue
-            both = sorted(set(diffs[a["id"]]) & set(diffs[b["id"]]))
-            if both:
-                out.append((a["id"], b["id"], both[0]))
+            for path in sorted(set(diffs[a["id"]]) & set(diffs[b["id"]])):
+                out.append((a["id"], b["id"], path))
     return out

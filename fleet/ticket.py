@@ -325,9 +325,11 @@ def check_areas(areas) -> list[str]:
             or not all(_is_str(a) and 1 <= len(a) <= AREA_MAX for a in areas)):
         return [f"areas must be a list of 1 to {AREAS_MAX} path globs of at most {AREA_MAX} characters"]
     for a in areas:
-        if (a.startswith(("/", "~")) or ".." in a.split("/") or "\\" in a or "\n" in a
-                or "\0" in a or a != a.strip()):
-            return [f"area '{a}' must be a path relative to the repo root (no '..', no leading '/' or '~')"]
+        parts = a.split("/")
+        if (a.startswith(("/", "~")) or ".." in parts or "." in parts or "" in parts[:-1] or not a.strip("/")
+                or "\\" in a or "\n" in a or "\0" in a or a != a.strip()):
+            return [f"area '{a}' must be a canonical path relative to the repo root "
+                    "(no '..', '.', '//', no leading '/' or '~')"]
     return []
 
 
@@ -732,7 +734,7 @@ def approve_ticket(ticket_id: str) -> dict:
 def open_proposed(ticket_id: str, reason: str) -> dict:
     """Open a proposed ticket by the dispatcher's auto-open rule (dispatch.auto_open). Only a
     process with no agent environment can call it, and only on a proposed ticket that names an
-    origin; an agent can never put its own ticket into the queue. The conditions themselves
+    origin (or, for an investigate ticket, a parent); an agent can never put its own ticket into the queue. The conditions themselves
     are judged by the caller (dispatch.auto_open_problem), which also logs `reason`."""
     creator = current_creator()
     if creator != "human":
@@ -740,7 +742,8 @@ def open_proposed(ticket_id: str, reason: str) -> dict:
     ticket_id = normalize_id(ticket_id)
     with _locked():
         ticket = load_ticket(ticket_id)
-        if ticket["status"] != "proposed" or not ticket.get("origin"):
+        if ticket["status"] != "proposed" or not (
+                ticket.get("origin") or (ticket["type"] == "investigate" and ticket.get("parent"))):
             raise TicketError(f"{ticket_id} is not a proposed ticket with an origin; it cannot be auto-opened")
         ticket["status"] = "open"
         ticket["auto_opened_at"] = ticket["updated_at"] = _now()

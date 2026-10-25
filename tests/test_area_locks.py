@@ -104,6 +104,13 @@ def test_investigate_opens_only_under_a_handoff_parent(projects, monkeypatch):
     assert tk.load_ticket(other["id"])["status"] == "proposed"
 
 
+def test_parent_only_investigate_opens(projects, monkeypatch):
+    h = handoff(monkeypatch)
+    inv = controller_ticket(monkeypatch, h, 1, type="investigate", parent=h["id"], areas=None, origin=None, body="look")
+    assert "origin" not in inv
+    assert opened(None) == [inv["id"]]
+
+
 def test_criteria_are_needed(projects, monkeypatch):
     h = handoff(monkeypatch)
     t = controller_ticket(monkeypatch, h, body="Add a helper, no criteria listed.")
@@ -283,6 +290,8 @@ def test_real_diffs_overlap():
     diffs = {"BD-1": ["x.py", "y.py"], "BD-2": ["y.py"], "BD-3": ["y.py"], "BD-4": ["y.py"]}
     assert areas.overlaps([a, b, c, d], diffs) == [("BD-1", "BD-2", "y.py")]
     assert areas.overlaps([a, b], {"BD-1": ["x.py"], "BD-2": ["z.py"]}) == []
+    both = areas.overlaps([a, b], {"BD-1": ["x.py", "y.py"], "BD-2": ["y.py", "x.py"]})
+    assert both == [("BD-1", "BD-2", "x.py"), ("BD-1", "BD-2", "y.py")]
 
 
 def test_overlap_ping_once(projects, monkeypatch):
@@ -362,7 +371,7 @@ def test_claim_area_files_a_ticket_and_names_who_is_ahead(projects, monkeypatch)
                "--body", "x").returncode == 2   # --area is required
 
 
-@pytest.mark.parametrize("bad", ["/etc/passwd", "../x", "~/x", "a\\b", " x", ""])
+@pytest.mark.parametrize("bad", ["/etc/passwd", "../x", "~/x", "a\\b", " x", "", "./fleet/a.py", "fleet//a.py", "/"])
 def test_bad_areas_are_refused(projects, bad):
     out = run("new", "--type", "build", "--repo", "app", "--branch", "task/x", "--title", "T",
               "--body", "b", "--area", bad)

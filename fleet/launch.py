@@ -1045,6 +1045,11 @@ def relaunch(t: dict, settings: dict, warn, prompt: str | None = None, why: str 
         return 0, f"{t['id']}  relaunch deferred: {paused}"
     if t["id"] in startup_block.blocked_ids():   # one failed start is enough: a human acts first
         return 0, f"{t['id']}  relaunch held: startup blocked, waiting for a human (fleet unblock {t['id']})"
+    try:   # its lease may have lapsed meanwhile: take the lock again, or wait if another ticket holds the area
+        areas.acquire(t, tk.list_tickets(), lease_hours=settings["area_lease_hours"])
+    except (areas.AreaConflict, OSError) as exc:
+        _safe_log("RELAUNCH_WAIT", f"{t['id']} area lock: {exc}")
+        return 0, f"{t['id']}  relaunch held: waiting for an area lock ({exc})"
     repo = settings["projects_dir"] / t["repo"]
     name = t["branch"].removeprefix("task/")
     d = dp.Decision(ticket=t, name=name, repo_path=repo, agent=t["assignee"],
