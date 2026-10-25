@@ -205,11 +205,11 @@ def stale_base(repo: Path, branch: str) -> tuple[str, str] | None:
     merge = _git(repo, "merge-tree", "--write-tree", "--name-only", main_id, tip_id)
     if merge.returncode == 1:
         return main_id, f"merging it into {base} conflicts"
-    theirs = _git(repo, "diff", "--name-only", mb.stdout.strip(), main_id)
-    ours = _git(repo, "diff", "--name-only", mb.stdout.strip(), tip_id)
+    theirs = _git(repo, "diff", "--name-only", "-z", mb.stdout.strip(), main_id)
+    ours = _git(repo, "diff", "--name-only", "-z", mb.stdout.strip(), tip_id)
     if theirs.returncode or ours.returncode:
         return None
-    both = sorted(set(theirs.stdout.split()) & set(ours.stdout.split()))
+    both = sorted(set(theirs.stdout.split("\0")) & set(ours.stdout.split("\0")) - {""})
     if both:
         return main_id, f"{base} changed files this branch also changed ({', '.join(both[:3])})"
     return None

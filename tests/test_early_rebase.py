@@ -6,10 +6,10 @@ import pytest
 
 from fleet import dispatch as dp
 from fleet import review_watch as rw
-from test_dispatch import git, herdr_log, projects  # noqa: F401
+from test_dispatch import calls, git, herdr_log, projects  # noqa: F401
 from test_moved_branch import _clean_rereviews, reviewed, scripted  # noqa: F401
 from test_review_watch import Rig, no_dialog, ntfy, rig  # noqa: F401
-from test_dispatch import calls
+
 
 
 def prompts(log):
@@ -112,3 +112,25 @@ def test_main_checkout_is_untouched(scripted, herdr_log):
     scripted.cycle(1)
     assert before == (git(scripted.repo, "status", "--porcelain"), git(scripted.repo, "rev-parse", "HEAD"),
                       git(scripted.repo, "stash", "list"))
+
+
+def test_clean_merge_with_shared_file_is_stale_by_overlap(scripted):
+    main_commit(scripted, "shared file", "1\n2\n3\n4\n5\n6\n7\n8\n9\n")   # a name with a space
+    git(scripted.wt, "merge", "-q", "main")
+    (scripted.wt / "shared file.txt").write_text("one\n2\n3\n4\n5\n6\n7\n8\n9\n")
+    git(scripted.wt, "add", "-A")
+    git(scripted.wt, "commit", "-q", "-m", "edit top")
+    main_commit(scripted, "shared file", "1\n2\n3\n4\n5\n6\n7\n8\nnine\n")
+    got = dp.stale_base(scripted.repo, "task/demo")
+    assert got and "changed files" in got[1] and "shared file.txt" in got[1]
+
+
+def test_agent_that_stops_without_rebasing_still_fails_by_the_stall_rules(scripted, herdr_log):
+    ready(scripted)
+    main_commit(scripted, "first", "from main")
+    scripted.cycle(1)
+    assert scripted.get()["status"] == "claimed" and len(prompts(herdr_log)) == 1
+    scripted.set_agent("idle")
+    scripted.cycle(2)
+    scripted.cycle(60)    # an hour with no new commit: the normal stall rule closes it
+    assert scripted.get()["status"] != "claimed"
