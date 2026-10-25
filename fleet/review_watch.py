@@ -164,7 +164,15 @@ def has_summary_after_review(t: dict) -> bool:
     # in a note; that stands in for the agent's summary of the new tip.
     return any(n["at"] >= v["at"] and not n["text"].startswith(LEFTOVERS_PREFIX)
                and (n["by"] == t.get("assignee") or (n["by"] == "human" and n["text"].startswith(prep.PASS_NOTE_PREFIX)))
-               for n in t.get("notes", []))
+               for n in t.get("notes", [])) or human_submitted(t)
+
+
+def human_submitted(t: dict) -> bool:
+    """A human-built ticket with no agent that a human handed over with `ticket submit`: that
+    note stands in for the agent's summary, whenever it was saved. The verdict must still be
+    a pass for the exact tip."""
+    return (t.get("created_by") == "human" and t.get("assignee") is None and t["status"] in ("claimed", "review")
+            and any(n["by"] == "human" and n["text"].startswith(tk.SUBMIT_NOTE) for n in t.get("notes", [])))
 
 
 def passed_for_tip(t: dict, tip: str) -> bool:
@@ -886,6 +894,8 @@ def _wake_for_rebase(t: dict, tip: str, agent: dict | None, settings: dict, stat
     main, why = stale
     key = f"{tip}:{main}"
     if state["rebase_asked"].get(t["id"]) == key:
+        if human_submitted(t):   # a ping that could not be sent is tried again
+            _ping(t, "needs_human", f"{t['id']}:rebase:{key}", state, warn, f"rebase onto main {main[:8]} needed")
         return "asked"
     if t["status"] == "review":
         new = _move(t, "claimed", ("review",), warn)
@@ -905,6 +915,10 @@ def _wake_for_rebase(t: dict, tip: str, agent: dict | None, settings: dict, stat
     state["rebase_asked"][t["id"]] = key
     _note_once(t["id"], f"Rebase needed ({tip[:8]} onto {main[:8]})", f"Rebase needed ({tip[:8]} onto {main[:8]}): {text}", warn)
     dp.log("REBASE_ASKED", f"{t['id']} {tip[:8]} onto main {main[:8]}: {why}")
+    if human_submitted(t):   # no agent to wake or start: the human who built it rebases
+        emit(f"{t['id']}  review skipped: main {main[:8]} moved; it needs a rebase by a human")
+        _ping(t, "needs_human", f"{t['id']}:rebase:{key}", state, warn, f"rebase onto main {main[:8]} needed")
+        return "woke"
     emit(f"{t['id']}  review skipped: asking the agent to rebase onto main {main[:8]}")
     if agent is None:   # the note above is what the new agent reads
         prep.relaunch_sent_back(t, settings, emit, warn)
@@ -950,7 +964,7 @@ def _rereview(t: dict, tip: str, agent: dict | None, settings: dict, state: dict
         return "passed", fresh
     v = fresh.get("verdict")
     if v is not None and v["result"] == "FAIL" and v["commit"] == tip:
-        if agent is None and not entry.get("relaunched"):   # nobody is on it: the normal FAIL loop needs an agent
+        if agent is None and not entry.get("relaunched") and not human_submitted(fresh):   # nobody is on it: the normal FAIL loop needs an agent
             entry["relaunched"] = True
             prep.relaunch_sent_back(fresh, settings, emit, warn)
             return "wait", fresh
@@ -1003,7 +1017,7 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
     if tip is None:
         return
     agent_state = agent.get("agent_status") if agent else None
-    stopped = agent_state in ("idle", "done")
+    stopped = agent_state in ("idle", "done") or (agent is None and human_submitted(t))   # no agent was ever on it
     earned = passed_for_tip(t, tip) and has_summary_after_review(t)
 
     _settle_stale_rereviews(t, tip, state, warn)
@@ -1051,6 +1065,8 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             dp.log("REVIEW_BACK", f"{t['id']} back to claimed: {why}")
             kaneo.mirror_quietly(new, warn)
             t = new   # claimed again: the alert checks below apply in full
+            if human_submitted(t):
+                return   # a human's: it waits claimed for the human's next commit and its review
             if agents_known and agent is None:   # its tab was closed in review: nobody is on it
                 prep.relaunch_sent_back(t, settings, emit, warn)
                 return   # the new agent starts fresh: judge it from the next cycle
@@ -1073,6 +1089,8 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             _end_spells(t["id"], state)
             _unrecorded_pings(new, repo, tip, state, now, emit, warn, settings["unrecorded_ping_cycles"])
         return
+    if human_submitted(t):
+        return   # no agent to restart, fail or send on-call to: a human is working it
     if fresh.refresh_if_large(t, agent, tip, settings, state, emit, warn):
         return   # a new session starts from here: judge it from the next cycle
     _unrecorded_pings(t, repo, tip, state, now, emit, warn, settings["unrecorded_ping_cycles"])
@@ -1202,7 +1220,7 @@ def _run_supervisor(sup: dict, settings: dict, now: datetime, busy: set, warn) -
         candidates = []
         for t in tk.list_tickets():
             v = t.get("verdict")
-            if t["status"] != "claimed" or v is None or v["result"] != "FAIL" or t["id"] in busy:
+            if t["status"] != "claimed" or v is None or v["result"] != "FAIL" or t["id"] in busy or human_submitted(t):
                 continue
             repo = settings["projects_dir"] / t["repo"]
             if repo.is_dir() and _tip(repo, t["branch"]) == v["commit"]:
@@ -1238,7 +1256,7 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
     recovering |= locked | set(skip) | governor.held_ids()   # stopped by the usage governor: not failed
     tickets = sorted((t for t in tk.list_tickets()
                       if t["status"] in ("claimed", "review") and t["type"] in dp.LAUNCH_TYPES
-                      and t.get("assignee") in tk.AGENTS and t["id"] not in recovering), key=tk.oldest_first_key)
+                      and (t.get("assignee") in tk.AGENTS or human_submitted(t)) and t["id"] not in recovering), key=tk.oldest_first_key)
     try:
         agents = {a.get("name"): a for a in lc.list_agents() if a.get("name")} if tickets else {}
         known = True

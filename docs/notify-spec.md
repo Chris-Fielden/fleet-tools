@@ -66,7 +66,7 @@ header. Defaults: `needs_human`, `dialog`, `settings_invalid`, `leftovers`,
 `failed`, `blocked`, `review_failed`, `ship_failed`, `dispatcher_down`,
 `usage_stop` = `high`; `ship`, `stalled`, `ship_list` = `default`; `urgent`,
 `review_unrecorded`, `ready`, `proposed`, `investigated`, `oncall`, `shipped`,
-`usage_pause` = `low`. (`blocked`, `stalled` and
+`usage_pause`, `repo_problem` (a repo cannot take work, once per cause) = `low`. (`blocked`, `stalled` and
 `review_failed` are no longer sent; their defaults only matter if you set them.) Override any of them in `notify.json`:
 `"priorities": {"stalled": "low", "ship": "high"}` (values: `min`, `low`,
 `default`, `high`, `max`). An unknown event or value makes the file unusable.

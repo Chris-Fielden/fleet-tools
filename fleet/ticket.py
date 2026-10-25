@@ -1043,6 +1043,40 @@ def close_ticket(ticket_id: str, outcome: str, note: str | None = None) -> dict:
     return set_status(ticket_id, CLOSE_OUTCOMES[outcome], allowed_from=allowed, close_note=note)
 
 
+SUBMIT_NOTE = "Submitted for review by a human:"   # starts the note `submit` saves; it stands in for an agent's summary
+
+
+def submit_ticket(ticket_id: str, tip: str, base_commit: str | None = None) -> dict:
+    """Hand a human-built ticket to the review pipeline. Humans only (a human's process, like
+    review itself): the ticket was created by a human, is an open or claimed build with no
+    assignee, and the caller has checked that its branch holds commits that main lacks. It
+    becomes claimed with no assignee and a note; the review watcher then moves it to review
+    once the exact tip has a passing verdict. An agent can never submit, and nobody sets the
+    review status by hand."""
+    creator = current_creator()
+    if creator != "human":
+        raise TicketError(f"only a human can submit a ticket for review (running as {creator})")
+    ticket_id = normalize_id(ticket_id)
+    if not ID_RE.fullmatch(ticket_id):
+        raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
+    if not COMMIT_RE.fullmatch(tip):
+        raise TicketInvalid(["tip must be a git commit id"])
+    ticket = load_ticket(ticket_id)
+    if ticket["created_by"] != "human" or ticket["type"] != "build":
+        raise TicketError(f"{ticket_id} is not a human-built ticket (created by {ticket['created_by']}, type {ticket['type']})")
+    if ticket["assignee"] is not None:
+        raise TicketError(f"{ticket_id} has an agent ({ticket['assignee']}); only a ticket with no assignee can be submitted")
+    if base_commit is not None and ticket.get("base_commit"):
+        base_commit = None   # keep the one it has
+    if ticket["status"] not in ("open", "claimed"):
+        raise TicketError(f"{ticket_id} is {ticket['status']}; it can only be submitted from: open, claimed")
+    # The note first: the watcher ignores it until the ticket is claimed, so a failure between
+    # the two steps never leaves a claimed ticket without its marker.
+    add_note(ticket_id, f"{SUBMIT_NOTE} {tip[:8]}. No agent is on it; the review watcher moves it "
+                        "to review when its tip has a passing verdict.")
+    return set_status(ticket_id, "claimed", allowed_from=("open", "claimed"), base_commit=base_commit)
+
+
 def raise_risk(ticket_id: str, level: str) -> dict:
     """Raise a ticket's stored risk level. Humans only, and only upwards:
     nobody can lower a level."""

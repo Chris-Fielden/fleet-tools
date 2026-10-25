@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -257,6 +258,7 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
             break
     decisions = dp.decide([t for t in tickets if t["id"] not in held], settings)
     _ping_unmet(decisions, emit, warn)
+    _ping_repo_problems(decisions, settings, warn)
     for d in decisions:
         if d.eligible:
             if reserve is not None and not reserve():
@@ -301,6 +303,50 @@ def _ping_unmet(decisions, emit, warn) -> None:
             continue
         emit(f"{t['id']}  {d.skip}")
         notify.notify_quietly(t, "needs_human", warn, detail=d.skip[:300])
+
+
+def repo_problems_path():
+    return tk.fleet_home() / "repo-problems.json"
+
+
+def _ping_repo_problems(decisions, settings, warn) -> None:
+    """One low ping per repo and cause when open work cannot start because the repo cannot take
+    it (the main checkout is on another branch, has changes, ...). Nothing is switched or
+    fixed: that checkout is the human's. The cause is remembered until it changes or clears,
+    and a ping that could not be sent is tried again next cycle."""
+    projects_dir = settings["projects_dir"]
+    first: dict = {}
+    for d in decisions:
+        if d.repo_path is not None:
+            first.setdefault(d.ticket["repo"], d)
+    problems = {}
+    for repo, d in first.items():
+        why = dp.repo_problem(d.repo_path, projects_dir)
+        if why and d.skip == why:
+            problems[repo] = (d.ticket, why)
+    path = repo_problems_path()
+    try:
+        seen = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(seen, dict):
+            seen = {}
+    except (OSError, ValueError):
+        seen = {}
+    # a cause stays remembered until its repo was looked at and the cause changed or went away
+    state = {repo: why for repo, why in seen.items()
+             if repo not in first or (repo in problems and problems[repo][1] == why)}
+    for repo, (t, why) in problems.items():
+        if repo in state:
+            continue
+        dp.log("NEEDS_HUMAN", f"{repo}: {why}")
+        short = why.replace(str(projects_dir / repo), repo)   # the ping is cut short: name the repo, not its path
+        if notify.notify_quietly(t, "repo_problem", warn, detail=f"needs_human: {short}"):
+            state[repo] = why
+    if state != seen:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(state), encoding="utf-8")
+        except OSError as exc:
+            warn(f"repo problems not saved: {exc}")
 
 
 LIMIT_REACHED = "daily launch limit reached, max_launches_per_day is spent"

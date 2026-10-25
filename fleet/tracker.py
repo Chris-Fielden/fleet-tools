@@ -81,6 +81,10 @@ class Tracker(ABC):
         """done, failed or cancelled (humans only)."""
 
     @abstractmethod
+    def submit(self, ticket_id: str, tip: str, base_commit: str | None = None) -> dict:
+        """Hand a human-built ticket with no agent to the review pipeline (humans only)."""
+
+    @abstractmethod
     def check(self) -> list[tuple[str, str, str]]:
         """Health rows for `fleet doctor`: (state, what, detail), state being
         ok, warn or fail. Never includes a secret."""
@@ -137,6 +141,9 @@ class LocalTracker(Tracker):
 
     def close(self, ticket_id, outcome, note=None):
         return self._mirrored(tk.close_ticket(ticket_id, outcome, note))
+
+    def submit(self, ticket_id, tip, base_commit=None):
+        return self._mirrored(tk.submit_ticket(ticket_id, tip, base_commit))
 
     def check(self):
         rows = []
