@@ -33,8 +33,8 @@ def test_read_pane_refuses_odd_ids_and_survives_a_missing_herdr(monkeypatch):
     assert dg.read_pane("w1:p1") == "" and dg.read_pane("--flag") == "" and dg.read_pane(None) == ""
 
 
-def test_dialog_event_is_known_low_and_not_deprecated():
-    assert "dialog" in notify.EVENTS and notify.PRIORITIES["dialog"] == "low"
+def test_dialog_event_is_known_high_and_not_deprecated():
+    assert "dialog" in notify.EVENTS and notify.PRIORITIES["dialog"] == "high"
     assert "dialog" not in notify.DEPRECATED_EVENTS
 
 
@@ -86,7 +86,7 @@ def test_blocked_agent_logs_the_dialog_once_and_pings_once(rig, ntfy, herdr_log,
     assert len(lines) == 1 and f"{rig.id} tab=w1:t3 {label}:" in lines[0]
     assert len(ntfy.requests) == 1
     title, message, header = sent(ntfy)[0]
-    assert title == f"Agent dialog: {rig.id} ({label})" and header == "low"
+    assert title == f"Agent dialog: {rig.id} ({label})" and header == "high"
     assert "w1:t3" in message and "\n" not in message
     assert rig.get()["status"] == "claimed"
     assert_read_only(herdr_log)

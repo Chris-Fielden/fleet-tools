@@ -281,7 +281,7 @@ def test_a_failed_on_call_ticket_launches_nothing_more_and_sends_one_needs_a_hum
     assert oc_after["status"] == "failed" and "Diagnosis" in oc_after["notes"][-1]["text"]
     assert tk.load_ticket(rig.id)["notes"][-1]["text"].startswith(f"Diagnosis: on-call {oc['id']} could not fix {rig.id}.")
     assert [(t[0], t[2]) for t in sent(ntfy)] == [
-        (f"{rig.id} failed, on-call OC-1 is on it", "low"), (f"{rig.id} needs a human, see notes", "low")]
+        (f"{rig.id} failed, on-call OC-1 is on it", "low"), (f"{rig.id} needs a human, see notes", "high")]
     assert len(oncall_tickets()) == 1 and agent_starts(herdr_log) == ["oc-1"]
     assert dp.decide_oncall(tk.list_tickets(), rig.settings, set()) == []
 
@@ -300,7 +300,7 @@ def test_a_fourth_on_call_need_in_one_day_launches_nothing(rig, ntfy, herdr_log)
     assert rig.get()["status"] == "failed"
     assert len(oncall_tickets()) == 3 and agent_starts(herdr_log) == []
     assert "limit" in rig.get()["notes"][-1]["text"]
-    assert [(t[0], t[2]) for t in no_dialog(ntfy)] == [(f"{rig.id} needs a human, see notes", "low")]
+    assert [(t[0], t[2]) for t in no_dialog(ntfy)] == [(f"{rig.id} needs a human, see notes", "high")]
 
 
 def test_the_on_call_cap_resets_at_local_midnight(rig):

@@ -51,13 +51,13 @@ _HEADLINE = {"ready": "Review ready", "urgent": "Urgent ticket", "failed": "Tick
 # ntfy's own names for its five priorities.
 PRIORITY_NUMBERS = {"min": 1, "low": 2, "default": 3, "high": 4, "max": 5}
 # Per event; override any of them under "priorities" in notify.json.
-PRIORITIES = {"ready": "default", "urgent": "high", "failed": "high", "proposed": "low",
+PRIORITIES = {"ready": "low", "urgent": "low", "failed": "high", "proposed": "low",
               "investigated": "low", "ship": "default", "blocked": "high",
-              "review_failed": "high", "review_unrecorded": "high", "stalled": "default",
-              "oncall": "low", "needs_human": "low", "shipped": "default", "ship_failed": "high",
+              "review_failed": "high", "review_unrecorded": "low", "stalled": "default",
+              "oncall": "low", "needs_human": "high", "shipped": "low", "ship_failed": "high",
               "dispatcher_down": "high", "ship_list": "default",
-              "settings_invalid": "low", "usage_pause": "low", "usage_stop": "high",
-              "dialog": "low", "leftovers": "default", "ready_reminder": "low",
+              "settings_invalid": "high", "usage_pause": "low", "usage_stop": "high",
+              "dialog": "high", "leftovers": "high", "ready_reminder": "low",
               "reconcile_stuck": "low"}
 _TAGS = {"ready": ["mag"], "urgent": ["rotating_light"], "failed": ["x"], "proposed": ["bulb"],
          "investigated": ["mag_right"], "ship": ["white_check_mark"], "blocked": ["hand"],
