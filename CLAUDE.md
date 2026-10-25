@@ -98,6 +98,9 @@ weaken its own rules.
 - If you are unsure, pick the safer option (section 8). If something
   failed, say so plainly.
 
+Do not launch Cursor (`agent`, `cursor-agent`, `cursor agent`) or use its
+bypass flags; only the human or fleet scripts start it.
+
 ## 8. Never stop to wait for an answer
 
 - No one is watching while you work, so a question
