@@ -220,6 +220,27 @@ def level_for_branch(tickets: list[dict], branch: str, rules: dict | None = None
 VERDICT_RE = re.compile(r"^[\s*#>_`-]*VERDICT[\s*_`]*:[\s*_`]*(PASS|FAIL)\b", re.I)
 STRONG_CLAUDE_RE = re.compile(r"opus|fable", re.I)
 
+# Every reviewer that can vote, with the company behind it. `counted` is False for an
+# ADVISORY voter: its review is saved and shown but never decides a verdict or the merge
+# gate. Cursor stays advisory until the BD-120 probe proves which model it really ran on
+# (otherwise one company could vote twice through Cursor).
+VOTERS = {
+    "codex": {"company": "openai", "counted": True},
+    "claude": {"company": "anthropic", "counted": True},
+    "cursor": {"company": "cursor", "counted": False},
+}
+
+
+def counted(kind: str) -> bool:
+    """Does a review of this kind count towards a verdict and the merge gate?"""
+    return bool(VOTERS.get(kind, {}).get("counted"))
+
+
+def voter_kind(reviewer: str) -> str | None:
+    """The voter a reviewer string such as 'Codex gpt-5' or 'cursor composer' belongs to."""
+    first = (reviewer or "").strip().split(" ")[0].lower()
+    return first if first in VOTERS else None
+
 
 def parse_review(text: str) -> dict:
     """review.sh writes header lines (Reviewer:, Commit:), a blank line, then
@@ -241,7 +262,7 @@ def parse_review(text: str) -> dict:
             break
     reviewer = head.get("reviewer", "")
     low = reviewer.lower()
-    kind = "codex" if low.startswith("codex") else "claude" if low.startswith("claude") else None
+    kind = next((k for k in VOTERS if low.startswith(k)), None)
     return {"kind": kind, "reviewer": reviewer, "commit": head.get("commit"), "verdict": verdict}
 
 
@@ -298,6 +319,7 @@ def check_reviews(reviews: dict, level: str, accept_codex_fail_commit: str | Non
     human's merge with leftovers): a Codex FAIL, and nothing else, when the level is below high,
     a Claude review is present and PASSES, and both reviews are of exactly that commit.
     Anything else is judged as without it."""
+    reviews = {k: v for k, v in reviews.items() if counted(k)}   # advisory votes never gate
     problems = []
     if not reviews:
         problems.append("no review of this exact commit; run scripts/review.sh")
@@ -308,7 +330,7 @@ def check_reviews(reviews: dict, level: str, accept_codex_fail_commit: str | Non
                 and codex and codex["verdict"] == "FAIL" and codex.get("commit") == accept_codex_fail_commit):
             tolerated = "codex"
     for kind, info in reviews.items():
-        if kind == tolerated:
+        if kind == tolerated or not counted(kind):
             continue
         if info["verdict"] != "PASS":
             problems.append(f"the latest {kind} review of this commit is "
