@@ -1,12 +1,15 @@
 """BD-127: a human-built ticket reaches review through `ticket submit` (never a hand-set
 status), and a repo that cannot take work pings a human once per cause."""
+import json
+
 import pytest
 
 from fleet import notify
+from fleet import review_watch as rw
 from fleet import ticket as tk
 from fleet.dispatch_cli import main as dispatch_main
 from fleet.ticket_cli import main as ticket_main
-from test_dispatch import git, make_repo, mk, projects  # noqa: F401
+from test_dispatch import calls, git, make_repo, mk, projects  # noqa: F401
 from test_review_watch import ntfy, no_dialog, rig  # noqa: F401
 from test_dispatch import herdr_log  # noqa: F401
 
@@ -122,3 +125,21 @@ def test_a_failed_ping_is_retried_and_a_new_cause_pings_again(projects, env, ntf
     dispatch_main(["--once"])
     assert len(ntfy.requests) == 2
     assert "uncommitted changes" in ntfy.requests[1]["body"]["message"]
+
+
+def test_a_new_commit_sends_a_submitted_ticket_back_without_starting_an_agent(rig, ntfy, herdr_log):
+    human_built(rig)
+    assert ticket_main(["submit", rig.id]) == 0
+    rig.verdict("PASS", "Codex")
+    rig.verdict("PASS", "Claude (opus)")
+    rig.cycle()
+    assert rig.get()["status"] == "review"
+    rig.commit("more")
+    rig.cycle(1)
+    rw.wait_rereviews()   # the re-review cannot run in this rig
+    rig.cycle(2)
+    rig.cycle(40)
+    assert rig.get()["status"] == "claimed"
+    assert not rig.warnings
+    assert not [c for c in calls(herdr_log) if "start" in json.dumps(c)]
+    assert rw.pending_recoveries(print) == []

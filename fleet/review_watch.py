@@ -962,7 +962,7 @@ def _rereview(t: dict, tip: str, agent: dict | None, settings: dict, state: dict
         return "passed", fresh
     v = fresh.get("verdict")
     if v is not None and v["result"] == "FAIL" and v["commit"] == tip:
-        if agent is None and not entry.get("relaunched"):   # nobody is on it: the normal FAIL loop needs an agent
+        if agent is None and not entry.get("relaunched") and not human_submitted(fresh):   # nobody is on it: the normal FAIL loop needs an agent
             entry["relaunched"] = True
             prep.relaunch_sent_back(fresh, settings, emit, warn)
             return "wait", fresh
@@ -1063,6 +1063,8 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             dp.log("REVIEW_BACK", f"{t['id']} back to claimed: {why}")
             kaneo.mirror_quietly(new, warn)
             t = new   # claimed again: the alert checks below apply in full
+            if human_submitted(t):
+                return   # a human's: it waits claimed for the human's next commit and its review
             if agents_known and agent is None:   # its tab was closed in review: nobody is on it
                 prep.relaunch_sent_back(t, settings, emit, warn)
                 return   # the new agent starts fresh: judge it from the next cycle
@@ -1085,6 +1087,8 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             _end_spells(t["id"], state)
             _unrecorded_pings(new, repo, tip, state, now, emit, warn, settings["unrecorded_ping_cycles"])
         return
+    if human_submitted(t):
+        return   # no agent to restart, fail or send on-call to: a human is working it
     if fresh.refresh_if_large(t, agent, tip, settings, state, emit, warn):
         return   # a new session starts from here: judge it from the next cycle
     _unrecorded_pings(t, repo, tip, state, now, emit, warn, settings["unrecorded_ping_cycles"])
