@@ -77,6 +77,7 @@ def bash(command, cwd, **kw):
     "bin/ticket sync --dry-run",
     "fleet ship BD-4",
     "fleet approve BD-2",
+    "fleet answer BD-2 1",
     "fleet ticket approve BD-2",
     "fleet ticket close BD-1 --done",
     "fleet ticket sync",

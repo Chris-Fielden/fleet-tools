@@ -79,7 +79,7 @@ TICKET_HUMAN_ONLY = re.compile(_CMD_START + r"(?:fleet\s+)?ticket\s+(close|appro
 # human-only commands under their new names, plus everything that runs or
 # changes the fleet itself.
 FLEET_HUMAN_VERBS = {"ship", "approve", "alert", "idea", "dispatch", "start", "stop", "restart",
-                     "autostart", "launcher", "ops", "status-serve", "unblock"}
+                     "answer", "autostart", "launcher", "ops", "status-serve", "unblock"}
 FLEET_VERB_HUMAN_ONLY = re.compile(
     _CMD_START + r"fleet\s+(" + "|".join(sorted(FLEET_HUMAN_VERBS)) + r")(?=\s|$|[;&|)`])")
 # Any mention of the .fleet folder as a path: ~/.fleet, $HOME/.fleet,

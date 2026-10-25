@@ -77,6 +77,8 @@
       "Bash(git commit * -n *)",
       "Bash(git commit * -n)",
       "Bash(git commit * --amend*)",
+      "Bash(herdr *)",
+      "Bash(herdr)",
       "AskUserQuestion"
     ]
   }
