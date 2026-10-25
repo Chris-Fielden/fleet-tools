@@ -369,7 +369,7 @@ def fail_rounds(t: dict, ignored: frozenset = frozenset()) -> int:
     classified those rounds PROGRESS)."""
     v = t["verdict"]
     commits = set(t.get("fail_commits", []))
-    if v is not None and v["result"] == "FAIL":
+    if v is not None and v["result"] == "FAIL" and rk.majority_failed(v["reviews"]):
         commits.add(v["commit"])
     return len(commits - ignored)
 
@@ -1026,6 +1026,69 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
         write_recovery(t, reason, tip, final)   # first: everything else is driven from the record
 
 
+REVIVE_NOTE = ("revived: the failed branch's tip passed the vote ({vote}) at the review level it needs, "
+               "and it is not in main.")
+
+
+def _revivable(t: dict, repo: Path) -> str | None:
+    """The tip of a ticket the dispatcher failed that can be revived, else None. All must hold:
+    it failed through the dispatcher (its close note starts "Failed: "; a human's close is final),
+    its branch tip carries an exact-commit verdict that passes the vote (two distinct companies,
+    no FAIL) and the gate of its real risk level, and the tip is not already delivered to main
+    (by its own merge or through another ticket's)."""
+    if t["status"] != "failed" or t["type"] not in dp.LAUNCH_TYPES or not t.get("branch") \
+            or not (t.get("close_note") or "").startswith("Failed: "):
+        return None
+    tip = _tip(repo, t["branch"])
+    v = t.get("verdict")
+    if tip is None or v is None or v["commit"] != tip or v["result"] != "PASS":
+        return None
+    if not rk.vote_passes(v["reviews"]) or not kaneo.ready_to_ship(t):
+        return None
+    main = dp.main_branch(repo)
+    if main is None or dp._git(repo, "merge-base", "--is-ancestor", tip, main).returncode == 0:
+        return None   # already in main
+    if dp.is_merged(repo, t["branch"], t.get("base_commit")) or dp.delivered_by_partner(repo, t, tk.list_tickets()):
+        return None
+    return tip
+
+
+def revive_failed(settings: dict, emit, warn) -> None:
+    """Failed -> claimed (dispatcher only) for a failed ticket whose branch tip now has a new
+    exact-commit verdict that meets the gate and is not delivered elsewhere. Its superseded
+    on-call ticket is cancelled when it has not started; one already running keeps the parent
+    failed (two agents on one branch tip is the worse outcome). The normal review flow then
+    moves the revived ticket on to In Review."""
+    tickets = tk.list_tickets()
+    for t in sorted((t for t in tickets if t["status"] == "failed"), key=tk.oldest_first_key):
+        repo = settings["projects_dir"] / t["repo"]
+        if repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir():
+            continue
+        try:
+            tip = _revivable(t, repo)
+            if tip is None:
+                continue
+            ocs = [o for o in tickets if o.get("oncall") and o.get("parent") == t["id"]]
+            if any(o["status"] in ("claimed", "review", "done") for o in ocs):
+                continue   # its on-call agent is on it or has delivered: not ours to take back
+            for o in ocs:
+                if o["status"] == "open":
+                    cancelled = tk.set_status(o["id"], "cancelled", allowed_from=("open",),
+                                              close_note=f"superseded: {t['id']} was revived at {tip[:8]}")
+                    kaneo.mirror_quietly(cancelled, warn)
+            new = tk.revive_ticket(t["id"])
+        except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
+            dp.log("REVIVE_SKIP", f"{t['id']} {exc}")
+            warn(f"{t['id']}: could not revive: {exc}")
+            continue
+        vote = ", ".join(f"{r['reviewer']}: {r['result']}" for r in new["verdict"]["reviews"].values())
+        tk.add_note(t["id"], f"{prep.PASS_NOTE_PREFIX} {tip[:8]}: " + REVIVE_NOTE.format(vote=vote)
+                    + " " + REREVIEW_NOTE)
+        emit(f"{t['id']}  revived: its tip {tip[:8]} passed the vote")
+        dp.log("REVIVED", f"{t['id']} {tip[:8]} back to claimed")
+        kaneo.mirror_quietly(new, warn)
+
+
 def _flag_stuck_oncall(settings: dict, warn) -> None:
     """An open on-call ticket that can never be launched (its repo or start commit is
     gone, its branch or task folder already exists, or its launch failed
@@ -1141,6 +1204,10 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
         _ready_reminders([current[t["id"]] for t in tickets if t["id"] in current], state, now, warn)
     except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
         warn(f"ready reminders: {exc}")
+    try:
+        revive_failed(settings, emit, warn)
+    except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:
+        warn(f"revive check: {exc}")
     try:
         _flag_stuck_oncall(settings, warn)
     except (tk.TicketError, tk.TicketInvalid, OSError, subprocess.TimeoutExpired) as exc:

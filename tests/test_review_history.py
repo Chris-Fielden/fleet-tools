@@ -25,7 +25,10 @@ def test_one_round_per_commit_whoever_reviews_and_whatever_the_result(rig):
     assert rounds(rig) == [A] and tk.review_rounds(rig.get()) == 1
     tk.record_verdict("task/demo", "app", "PASS", B, "Codex")
     assert rounds(rig) == [A, B]
-    assert rig.get()["fail_commits"] == [A]   # fail_commits unchanged: only FAILs
+    assert rig.get().get("fail_commits", []) == []   # A split vote (one FAIL, one PASS) is no FAIL round
+    tk.record_verdict("task/demo", "app", "FAIL", C, "Codex")
+    tk.record_verdict("task/demo", "app", "FAIL", C, "Claude")
+    assert rig.get()["fail_commits"] == [C]   # only commits the majority failed
 
 
 def test_cap_keeps_the_newest_and_an_over_cap_ticket_loads(rig):

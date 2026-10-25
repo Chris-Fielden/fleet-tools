@@ -346,6 +346,24 @@ attempt was already made, nothing more is launched: the ticket is closed as
 failed with a diagnosis note and one low ping, "<ID> needs a human, see notes".
 (`ticket close --failed` by a human still pings `failed` at once.)
 
+### Reviving a failed ticket
+
+Each watch cycle moves a `failed` build or fix ticket back to `claimed` (a transition only
+the dispatcher can make) when ALL hold: the dispatcher failed it (close note starts
+"Failed: "; a ticket a human closed stays closed); its branch tip carries a verdict of that
+exact commit that PASSES the vote (at least 2 distinct counted companies PASS, no counted
+FAIL; advisory voters such as Cursor never count) and the merge gate of its real risk level
+(so never below the high-risk rule); and the tip is not already in main, by its own merge
+or through another ticket's. Verdicts keep being recorded on a failed ticket's branch for
+this. The ticket gets a note, its close note is cleared and the normal flow moves it to In
+Review. Its superseded on-call ticket is cancelled if still `open`; if that ticket is
+claimed, in review or done, the parent stays failed.
+
+A FAIL round (`fail_commits`, the going-in-circles count) is recorded only while the
+majority of voting companies failed the commit; a later PASS that makes it a split vote
+takes the round back. A queued on-call ticket launches from the failed branch's current tip
+when that descends from `oncall_base`, else from `oncall_base`.
+
 ### A claimed ticket whose agent is gone
 
 At the start of each `--once` or `--watch` cycle, a `claimed` build or fix

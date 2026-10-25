@@ -657,6 +657,12 @@ def decide_oncall(tickets: list[dict], settings: dict, running: frozenset | set 
             if base is None or _git(repo, "cat-file", "-e", f"{base}^{{commit}}").returncode != 0:
                 d.skip = f"commit to start from not found in {t['repo']} (failed branch {parent['branch']})"
             else:
+                # The failed branch's current tip when it descends from the saved commit (the
+                # work that went on after the failure is kept); else the saved commit.
+                tip = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{parent['branch']}^{{commit}}")
+                cur = tip.stdout.strip() if tip.returncode == 0 else None
+                if cur and cur != base and _git(repo, "merge-base", "--is-ancestor", base, cur).returncode == 0:
+                    base = cur
                 d.base = base
         if d.skip is None:
             if busy:
