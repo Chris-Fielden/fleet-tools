@@ -47,6 +47,11 @@ def approx_covered(allow, command):
     return bool(parts) and all(any(matches(r, p) for r in rules(allow)) for p in parts)
 
 
+def bash_rules(rule_list):
+    # Tool-name denies (AskUserQuestion) have no Bash pattern.
+    return [r for r in rules(rule_list) if r is not None]
+
+
 def test_settings_equal_the_single_source():
     assert SETTINGS["permissions"] == {"allow": pm.ALLOW, "deny": pm.DENY}
 
@@ -60,7 +65,7 @@ def test_every_rule_is_narrow_bash():
         assert not r.startswith(("Agent", "Monitor"))
     assert set(pm.RESEARCH_ALLOW) <= set(pm.ALLOW)
     assert "Bash(git push *)" in SETTINGS["permissions"]["deny"]
-    denies = rules(SETTINGS["permissions"]["deny"])
+    denies = bash_rules(SETTINGS["permissions"]["deny"])
     for command in ('git commit -m "x" --no-verify', 'git commit -m "x" --no-verify -a',
                     'git commit -m "x" --amend', 'git commit -m "x" --amend --no-edit',
                     'git commit -m "x" -n', 'git commit -m "x" -n -a'):
@@ -132,6 +137,9 @@ def test_research_rules_file_is_exactly_the_em22_rules(tmp_path, monkeypatch):
         "Bash(git commit * -n *)",
         "Bash(git commit * -n)",
         "Bash(git commit * --amend*)",
+        "Bash(herdr *)",
+        "Bash(herdr)",
+        "AskUserQuestion",
     ]
 
 
@@ -146,11 +154,11 @@ BYPASS_COMMANDS = [
 def test_bypass_flags_match_the_allow_rule_and_a_deny_rule(command):
     # Both match, so it is the deny rule that stops them.
     assert any(matches(a, command) for a in rules(pm.ALLOW)), command
-    assert any(matches(d, command) for d in rules(pm.DENY)), command
+    assert any(matches(d, command) for d in bash_rules(pm.DENY)), command
 
 
 def test_plain_commit_is_not_denied():
-    assert not any(matches(d, 'git commit -m "x"') for d in rules(pm.DENY))
+    assert not any(matches(d, 'git commit -m "x"') for d in bash_rules(pm.DENY))
     assert any(matches(a, 'git commit -m "x"') for a in rules(pm.ALLOW))
 
 
@@ -168,3 +176,19 @@ def test_allow_lists_are_unchanged_by_the_deny_work():
         "Bash(scripts/review.sh)", "Bash(ticket note *)", "Bash(ticket show *)",
     ]
     assert pm.RESEARCH_ALLOW == ["Bash(ticket note *)", "Bash(ticket show *)"]
+
+
+def test_agents_cannot_ask_user_questions():
+    # Agents never wait at a dialog (CLAUDE.md section 8).
+    deny = SETTINGS["permissions"]["deny"]
+    assert "AskUserQuestion" in pm.DENY
+    assert "AskUserQuestion" in deny
+    research = pm.research_permissions()["deny"]
+    assert "AskUserQuestion" in research
+
+
+def test_agents_cannot_drive_herdr():
+    # EM-34 failure mode 19: no direct send-keys.
+    denies = bash_rules(pm.DENY)
+    for c in ("herdr", "herdr agent send-keys x 1"):
+        assert any(matches(d, c) for d in denies), c
