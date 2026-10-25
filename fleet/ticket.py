@@ -795,6 +795,26 @@ def set_status(ticket_id: str, status: str, *, allowed_from, assignee=_KEEP,
     return ticket
 
 
+def revive_ticket(ticket_id: str) -> dict:
+    """Move a failed ticket back to claimed. Dispatcher only (a human's process, like review);
+    the caller has already checked that its tip passes the vote and is not delivered. Its
+    close note is cleared; its assignee is as it was."""
+    ticket_id = normalize_id(ticket_id)
+    if current_creator() != "human":
+        raise TicketError(f"only the dispatcher (a human's process) can revive a failed ticket "
+                          f"(running as {current_creator()})")
+    with _locked():
+        ticket = load_ticket(ticket_id)
+        if ticket["status"] != "failed":
+            raise TicketError(f"{ticket_id} is {ticket['status']}; only a failed ticket can be revived")
+        ticket["status"] = "claimed"
+        ticket.pop("close_note", None)
+        ticket["updated_at"] = _now()
+        _write_atomic(_ticket_path(ticket_id), ticket)
+        _record_transition(ticket, ticket["updated_at"])
+    return ticket
+
+
 def attach_investigation(ticket_id: str, investigation_id: str) -> dict:
     """Make `investigation_id` the investigation a build or fix ticket waits for: a build
     ticket's parent, a fix ticket's `investigation` field. Dispatcher only, and only
@@ -946,7 +966,7 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
     next to a counted verdict of the same commit but never changes its result, never
     starts a verdict and never adds to the fail/review rounds. Proposed tickets are
     skipped on purpose: nothing reviews a ticket that has not been approved, so a
-    stray review of its branch is dropped rather than stored. Returns the tickets changed."""
+    stray review of its branch is dropped rather than stored. A failed ticket still takes the verdicts of its branch: that is how a new passing tip can revive it. Returns the tickets changed."""
     errors = []
     if not BRANCH_RE.fullmatch(branch or ""):
         errors.append("branch must look like task/some-name")
@@ -964,7 +984,7 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
     changed = []
     with _locked():
         for t in list_tickets():
-            if t["branch"] != branch or t["repo"] != repo or t["status"] not in ("open", "claimed", "review"):
+            if t["branch"] != branch or t["repo"] != repo or t["status"] not in ("open", "claimed", "review", "failed"):
                 continue
             old = t["verdict"]
             same = bool(old) and old["commit"] == commit
@@ -976,8 +996,13 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
             failed = any(r["result"] == "FAIL" for k, r in reviews.items() if rk.counted(k))
             t["verdict"] = {"result": "FAIL" if failed else "PASS",
                             "commit": commit, "reviewer": reviewer, "at": now, "reviews": reviews}
-            if failed and commit not in t.get("fail_commits", []):
-                t["fail_commits"] = (t.get("fail_commits", []) + [commit])[-FAIL_COMMITS_MAX:]
+            # A round counts only while the majority of voting companies failed the commit; a
+            # later PASS that makes it a split vote takes the round back.
+            if rk.majority_failed(reviews):
+                if commit not in t.get("fail_commits", []):
+                    t["fail_commits"] = (t.get("fail_commits", []) + [commit])[-FAIL_COMMITS_MAX:]
+            elif commit in t.get("fail_commits", []):
+                t["fail_commits"] = [c for c in t["fail_commits"] if c != commit]
             if commit not in t.get("review_commits", []):
                 t["review_commits"] = (t.get("review_commits", []) + [commit])[-REVIEW_COMMITS_KEPT:]
             t["updated_at"] = now

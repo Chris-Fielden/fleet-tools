@@ -236,6 +236,39 @@ def counted(kind: str) -> bool:
     return bool(VOTERS.get(kind, {}).get("counted"))
 
 
+VOTE_PASSES_NEEDED = 2   # distinct companies that must PASS (of the 3 voters)
+
+
+def vote_tally(reviews: dict) -> dict:
+    """The counted votes of a stored verdict's `reviews` ({kind: {result, ...}}) by company.
+    One company is one vote, however many of its kinds reviewed; its FAIL wins. Advisory
+    voters are not in it. Returns {"passed": n, "failed": n}."""
+    by_company: dict[str, str] = {}
+    for kind, r in reviews.items():
+        if not counted(kind):
+            continue
+        company = VOTERS[kind]["company"]
+        if by_company.get(company) != "FAIL":
+            by_company[company] = r["result"]
+    values = list(by_company.values())
+    return {"passed": values.count("PASS"), "failed": values.count("FAIL")}
+
+
+def majority_failed(reviews: dict) -> bool:
+    """More distinct companies failed the commit than passed it. Only then does it count as a
+    FAIL round (a split vote, or one reviewer's FAIL outvoted, is not going in circles)."""
+    tally = vote_tally(reviews)
+    return tally["failed"] > tally["passed"]
+
+
+def vote_passes(reviews: dict) -> bool:
+    """No counted FAIL and at least VOTE_PASSES_NEEDED distinct companies PASS. This is the
+    vote only: the risk level's own review rules (check_reviews) still apply on top, so a
+    vote can never be weaker than the high-risk rule."""
+    tally = vote_tally(reviews)
+    return tally["failed"] == 0 and tally["passed"] >= VOTE_PASSES_NEEDED
+
+
 def voter_kind(reviewer: str) -> str | None:
     """The voter a reviewer string such as 'Codex gpt-5' or 'cursor composer' belongs to."""
     first = (reviewer or "").strip().split(" ")[0].lower()

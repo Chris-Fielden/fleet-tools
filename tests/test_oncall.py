@@ -567,19 +567,28 @@ def test_an_open_on_call_ticket_with_a_leftover_task_folder_is_escalated(rig, nt
                                           f"{rig.id} needs a human, see notes"]
 
 
-def test_the_on_call_branch_starts_from_the_commit_that_failed_even_if_the_old_branch_moves_on(rig, ntfy, herdr_log):
+def test_the_on_call_branch_starts_from_the_failed_branchs_current_tip_when_it_descends(rig, ntfy, herdr_log):
     failed_at = rig.tip()
     stop_after_fail(rig)
     rig.cycle(0)
     rig.cycle(6)                       # failed; the on-call ticket waits, not yet launched
     (oc,) = oncall_tickets()
     assert oc["oncall_base"] == failed_at and oc["status"] == "open"
-    rig.commit("the old agent kept going")
-    assert rig.tip() != failed_at
-    assert dp.decide_oncall(tk.list_tickets(), rig.settings, set())[0].base == failed_at
+    moved_to = rig.commit("the old agent kept going")
+    assert dp.decide_oncall(tk.list_tickets(), rig.settings, set())[0].base == moved_to
     world(rig, {"name": rig.id.lower(), "agent_status": "idle"})
     go(rig, 3, 2)
-    assert git(rig.repo, "rev-parse", oc["branch"]).strip() == failed_at
+    assert git(rig.repo, "rev-parse", oc["branch"]).strip() == moved_to
+
+
+def test_the_on_call_branch_keeps_the_failed_commit_when_the_branch_was_rewritten(rig, ntfy, herdr_log):
+    failed_at = rig.tip()
+    stop_after_fail(rig)
+    rig.cycle(0)
+    rig.cycle(6)
+    git(rig.wt, "reset", "-q", "--hard", "HEAD~1")        # no longer descends from the failed commit
+    rig.commit("rewritten")
+    assert dp.decide_oncall(tk.list_tickets(), rig.settings, set())[0].base == failed_at
 
 
 def test_a_blocker_that_keeps_an_on_call_ticket_from_launching_is_escalated(rig, ntfy, capsys, monkeypatch):
