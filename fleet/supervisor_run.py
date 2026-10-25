@@ -533,7 +533,7 @@ def continue_loops(state: dict, settings: dict, failing_ids, waiting_ids, emit, 
         repo = settings["projects_dir"] / t["repo"]
         folder = repo / ".worktrees" / t["branch"].removeprefix("task/")
         if (repo.resolve().parent != settings["projects_dir"].resolve() or not repo.is_dir()
-                or not _still_valid(t, p, repo)):
+                or t.get("assignee") not in tk.AGENTS or not _still_valid(t, p, repo)):
             state["pending"].pop(tid)
             changed = True
             dp.log("SUPERVISOR_CANCELLED", f"{tid} {p['commit'][:8]} the ticket or branch moved on; restart dropped")

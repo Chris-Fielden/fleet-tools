@@ -894,6 +894,8 @@ def _wake_for_rebase(t: dict, tip: str, agent: dict | None, settings: dict, stat
     main, why = stale
     key = f"{tip}:{main}"
     if state["rebase_asked"].get(t["id"]) == key:
+        if human_submitted(t):   # a ping that could not be sent is tried again
+            _ping(t, "needs_human", f"{t['id']}:rebase:{key}", state, warn, f"rebase onto main {main[:8]} needed")
         return "asked"
     if t["status"] == "review":
         new = _move(t, "claimed", ("review",), warn)
@@ -1218,7 +1220,7 @@ def _run_supervisor(sup: dict, settings: dict, now: datetime, busy: set, warn) -
         candidates = []
         for t in tk.list_tickets():
             v = t.get("verdict")
-            if t["status"] != "claimed" or v is None or v["result"] != "FAIL" or t["id"] in busy:
+            if t["status"] != "claimed" or v is None or v["result"] != "FAIL" or t["id"] in busy or human_submitted(t):
                 continue
             repo = settings["projects_dir"] / t["repo"]
             if repo.is_dir() and _tip(repo, t["branch"]) == v["commit"]:

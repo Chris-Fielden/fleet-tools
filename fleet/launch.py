@@ -1029,6 +1029,8 @@ def relaunch(t: dict, settings: dict, warn, prompt: str | None = None, why: str 
     """Start a new agent for a claimed ticket in its existing task folder, with
     the standard prompt or the given one. The ticket stays claimed whether or
     not this works. `why` is added to the RELAUNCHED log line."""
+    if t.get("assignee") not in tk.AGENTS:   # a human-built ticket: no agent was ever on it, and none is started
+        return 1, f"{t['id']}  relaunch refused: it has no agent assigned"
     paused = governor.refusal(settings)
     if paused:   # the ticket stays claimed; it is held and gets its agent after the reset
         governor.defer(t["id"])

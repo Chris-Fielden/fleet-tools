@@ -168,7 +168,9 @@ ticket gate --base BASE --branch BRANCH --worktree DIR [--dir REPO] [--field ris
 - `submit` (humans only) hands a human-built build ticket (open or claimed, no assignee)
   whose branch has commits that main lacks to the review pipeline: it becomes claimed with no
   assignee and a note, and the review watcher moves it to `review` once the exact tip has a
-  passing verdict. Agents are refused, and `review` is still set only by the dispatcher.
+  passing verdict (the submit note stays valid for later commits, which are re-reviewed; no agent
+  is ever started, failed or sent on-call for it, and a stale base pings a human). Agents are
+  refused, and `review` is still set only by the dispatcher.
 - `note` appends a note (max 4000 characters, gitleaks-checked, at most 50
   per ticket) recording who wrote it. Anyone may add one.
 - Exit codes: 0 on success, 2 for invalid input (every problem listed, one

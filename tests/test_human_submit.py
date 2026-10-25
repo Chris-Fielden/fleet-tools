@@ -143,3 +143,37 @@ def test_a_new_commit_sends_a_submitted_ticket_back_without_starting_an_agent(ri
     assert not rig.warnings
     assert not [c for c in calls(herdr_log) if "start" in json.dumps(c)]
     assert rw.pending_recoveries(print) == []
+
+
+def test_no_agent_is_ever_started_for_a_ticket_without_one(rig, ntfy, herdr_log, monkeypatch):
+    from fleet import launch as lc
+    from fleet import supervisor_run as sr
+    human_built(rig)
+    assert ticket_main(["submit", rig.id]) == 0
+    seen = []
+    monkeypatch.setattr(sr, "start_next", lambda candidates, *a, **k: seen.append([t["id"] for t in candidates]))
+    rig.verdict("FAIL", "Codex")
+    rig.cycle()
+    rig.cycle(30)
+    assert seen and all(ids == [] for ids in seen)
+    code, message = lc.relaunch(rig.get(), rig.settings, print)
+    assert code == 1 and "no agent assigned" in message
+    assert not [c for c in calls(herdr_log) if "start" in json.dumps(c)]
+
+
+def test_a_rebase_ping_that_failed_is_retried(rig, ntfy, monkeypatch):
+    human_built(rig)
+    assert ticket_main(["submit", rig.id]) == 0
+    rig.verdict("PASS", "Codex")
+    rig.verdict("PASS", "Claude (opus)")
+    (rig.repo / "first.txt").write_text("main moved")
+    git(rig.repo, "add", "-A")
+    git(rig.repo, "commit", "-q", "-m", "main moves on")
+    real = notify.notify_quietly
+    monkeypatch.setattr(notify, "notify_quietly", lambda *a, **k: False)
+    rig.cycle()
+    rig.cycle(5)
+    assert ntfy.requests == []
+    monkeypatch.setattr(notify, "notify_quietly", real)
+    rig.cycle(10)
+    assert len([r for r in ntfy.requests if "needs a human" in r["body"]["title"]]) == 1
