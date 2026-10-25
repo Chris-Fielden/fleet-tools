@@ -1009,7 +1009,9 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
     _settle_stale_rereviews(t, tip, state, warn)
     with _REREVIEWS_LOCK:
         rereviewing = (t["id"], tip) in _REREVIEWS   # its result is taken up here once it is in
-    can_rebase = agents_known and (agent is None or stopped) and not rereviewing
+    with _REREVIEWS_LOCK:
+        running = (t["id"], tip) in _REREVIEWS and not _REREVIEWS[(t["id"], tip)]["done"]
+    can_rebase = agents_known and (agent is None or stopped) and not running
     asked = False
     if can_rebase and (moved_past_pass(t, tip) or earned):
         woke = _wake_for_rebase(t, tip, agent, settings, state, emit, warn)
@@ -1284,6 +1286,7 @@ def check(settings: dict, now: datetime, emit, warn, skip=frozenset()) -> None:
         state[name] = {k: v for k, v in state[name].items() if k in live}
     state["unrecorded_seen"] = {k: n for k, n in state["unrecorded_seen"].items()
                                 if k.split(":", 1)[0] in live}
+    state["rebase_asked"] = {k: v for k, v in state["rebase_asked"].items() if k in live}
     # Keys of the failure pings stay: their ticket is closed, and the key is the record that it was sent.
     kept = [k for k in state["sent"] if k.split(":", 1)[0] in live]
     kept_failures = [k for k in state["sent"]

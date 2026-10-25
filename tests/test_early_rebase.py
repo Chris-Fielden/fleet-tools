@@ -134,3 +134,18 @@ def test_agent_that_stops_without_rebasing_still_fails_by_the_stall_rules(script
     scripted.cycle(2)
     scripted.cycle(60)    # an hour with no new commit: the normal stall rule closes it
     assert scripted.get()["status"] != "claimed"
+
+
+def test_main_moving_after_a_completed_re_review_still_sends_it_back(scripted, herdr_log, env):
+    scripted.passes()
+    scripted.summary()
+    scripted.set_agent("idle")
+    scripted.cycle()
+    new = scripted.commit("after the pass")
+    scripted.cycle(1)
+    rw.wait_rereviews()
+    scripted.cycle(2)
+    assert scripted.get()["status"] == "review" and reviewed(env) == [new]
+    main_commit(scripted, "first", "from main")
+    scripted.cycle(3)
+    assert scripted.get()["status"] == "claimed" and len(prompts(herdr_log)) == 1
