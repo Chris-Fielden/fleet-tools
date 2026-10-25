@@ -91,12 +91,12 @@ elif [[ -z "${RESTIC_PASSWORD:-}" ]]; then
   fail "no password set (FLEET_BACKUP_PASSWORD_FILE or RESTIC_PASSWORD)"
 fi
 
-work=$(mktemp -d)
+work=$(mktemp -d) || fail "cannot create a temporary folder"
 trap 'rm -rf "$work"' EXIT
-chmod 700 "$work"
+chmod 700 "$work" || fail "cannot secure the temporary folder"
 out="$work/out"
 dest="$work/restore"
-mkdir "$dest"
+mkdir "$dest" || fail "cannot create the restore folder"
 
 "$restic_bin" check --read-data-subset="$subset" >"$out" 2>&1 || fail "restic check failed"
 "$restic_bin" restore latest --tag fleet-backup --host fleet --target "$dest" >"$out" 2>&1 \
