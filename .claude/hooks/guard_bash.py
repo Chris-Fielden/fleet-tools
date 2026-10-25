@@ -87,7 +87,7 @@ FLEET_VERB_HUMAN_ONLY = re.compile(
 FLEET_PATH = re.compile(r"(^|[^\w.-])\.fleet(/|$|[\s'\";|&)])")
 
 
-HUMAN_ONLY_NAMES = {"idea", "alert", "dispatch", "ship"}
+HUMAN_ONLY_NAMES = {"idea", "alert", "dispatch", "ship", "herdr"}
 TICKET_HUMAN_ONLY_SUBCOMMANDS = {"close", "approve", "sync", "priority", "fix-titles"}
 # Programs that run another program: `env dispatch`, `command ship`, `sudo -u me idea`.
 WRAPPERS = {"env", "command", "exec", "nohup", "time", "setsid", "stdbuf", "sudo",
