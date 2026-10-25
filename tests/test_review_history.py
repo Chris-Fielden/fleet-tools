@@ -140,3 +140,13 @@ def test_symlinked_reviews_dir_is_ignored(repo, tmp_path):
     wt.mkdir()
     (wt / ".reviews").symlink_to(tmp_path / ".reviews")
     assert rh.review_history(repo, wt, "HEAD", "HEAD") == []
+
+
+def test_cursor_vote_is_advisory_in_record_verdict(rig):
+    tk.record_verdict("task/demo", "app", "FAIL", A, "Cursor composer")   # cannot start a verdict
+    assert rig.get()["verdict"] is None and rounds(rig) in (None, [])
+    tk.record_verdict("task/demo", "app", "PASS", A, "Codex")
+    tk.record_verdict("task/demo", "app", "FAIL", A, "Cursor composer")
+    v = rig.get()["verdict"]
+    assert v["result"] == "PASS" and v["reviews"]["cursor"]["result"] == "FAIL"
+    assert rig.get().get("fail_commits", []) == [] and rounds(rig) == [A]

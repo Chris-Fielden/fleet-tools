@@ -939,3 +939,28 @@ def test_finished_tickets_on_the_branch_are_not_warned_about(task, repo):
     pass_review(task)
     r = finish(repo, "n\n", "--ticket", first)
     assert "WARNING" not in r.stdout
+
+
+# --- BD-124: voters are data-driven; cursor is advisory ----------------------
+
+def test_cursor_review_parses_but_never_gates(tmp_path):
+    assert rk.parse_review(review_text("Cursor composer"))["kind"] == "cursor"
+    assert rk.voter_kind("Cursor composer") == "cursor" and rk.voter_kind("gpt") is None
+    assert {v["company"] for v in rk.VOTERS.values()} == {"openai", "anthropic", "cursor"}
+    d = tmp_path / "rv"
+    put(d, "1.md", review_text("Codex"))
+    put(d, "2.md", review_text("Claude (opus)"))
+    put(d, "3.md", review_text("Cursor composer", verdict="FAIL"))
+    got = rk.latest_reviews(d, SHA)
+    assert "cursor" in got
+    assert rk.check_reviews(got, "high") == []
+    # a cursor PASS cannot stand in for a missing counted reviewer
+    put(d, "4.md", review_text("Cursor composer"), age=0)
+    only = {"cursor": got["cursor"]}
+    assert rk.check_reviews(only, "low")
+    assert not rk.counted("cursor") and rk.counted("codex") and rk.counted("claude")
+
+
+def test_agents_and_creators_exclude_cursor():
+    assert "cursor" in tk.REVIEW_KINDS
+    assert "cursor" not in tk.AGENTS and "cursor" not in tk.CREATORS

@@ -47,7 +47,7 @@ CLOSE_NOTE_MAX = 500
 REVIEW_COMMITS_KEPT = 100   # review_commits keeps the newest this many
 FAIL_COMMITS_MAX = 50   # fail_commits keeps the newest this many (the going-in-circles threshold is far lower)
 NOTE_MAX = 4000
-REVIEW_KINDS = ("codex", "claude")
+REVIEW_KINDS = tuple(rk.VOTERS)   # codex, claude, cursor; AGENTS and CREATORS stay without cursor
 VERDICT_RESULTS = ("PASS", "FAIL")
 REVIEWER_MAX = 80
 NOTES_LIMIT = 50  # notes per ticket
@@ -341,8 +341,8 @@ def _check_verdict(v) -> list[str]:
                   and r["result"] in VERDICT_RESULTS and _is_str(r["reviewer"])
                   and 1 <= len(r["reviewer"]) <= REVIEWER_MAX
                   for k, r in v["reviews"].items())
-          and v["result"] == ("FAIL" if any(r["result"] == "FAIL" for r in v["reviews"].values())
-                              else "PASS"))
+          and v["result"] == ("FAIL" if any(r["result"] == "FAIL" for k, r in v["reviews"].items()
+                                            if rk.counted(k)) else "PASS"))
     if not ok:
         return ["verdict must be null or {result: PASS or FAIL, commit: a full commit id, "
                 "reviewer, at: a UTC time, reviews: {codex or claude: {result, reviewer}}}"]
@@ -941,8 +941,12 @@ def verdict_line(v: dict | None) -> str:
 def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: str) -> list[dict]:
     """Record a review's result on the open, claimed or in-review tickets of a branch.
     Information only: the merge gate reads the saved review itself. Reviews of
-    the same commit by the two reviewers are combined (FAIL wins); a review of
-    a different commit replaces the old verdict. Returns the tickets changed."""
+    the same commit by the counted reviewers are combined (FAIL wins); a review of
+    a different commit replaces the old verdict. An advisory voter (cursor) is saved
+    next to a counted verdict of the same commit but never changes its result, never
+    starts a verdict and never adds to the fail/review rounds. Proposed tickets are
+    skipped on purpose: nothing reviews a ticket that has not been approved, so a
+    stray review of its branch is dropped rather than stored. Returns the tickets changed."""
     errors = []
     if not BRANCH_RE.fullmatch(branch or ""):
         errors.append("branch must look like task/some-name")
@@ -954,7 +958,7 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
         errors.append("commit must be a full 40-character commit id")
     kind = (reviewer or "").split(" ")[0].lower()
     if not _is_str(reviewer) or not 1 <= len(reviewer) <= REVIEWER_MAX or kind not in REVIEW_KINDS:
-        errors.append(f"reviewer must start with codex or claude and be 1 to {REVIEWER_MAX} characters")
+        errors.append(f"reviewer must start with {', '.join(REVIEW_KINDS)} and be 1 to {REVIEWER_MAX} characters")
     if errors:
         raise TicketInvalid(errors)
     changed = []
@@ -963,10 +967,13 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
             if t["branch"] != branch or t["repo"] != repo or t["status"] not in ("open", "claimed", "review"):
                 continue
             old = t["verdict"]
-            reviews = dict(old["reviews"]) if old and old["commit"] == commit else {}
+            same = bool(old) and old["commit"] == commit
+            if not rk.counted(kind) and not same:
+                continue   # advisory votes ride along with a counted verdict, never start one
+            reviews = dict(old["reviews"]) if same else {}
             reviews[kind] = {"result": result, "reviewer": reviewer}
             now = _now()
-            failed = any(r["result"] == "FAIL" for r in reviews.values())
+            failed = any(r["result"] == "FAIL" for k, r in reviews.items() if rk.counted(k))
             t["verdict"] = {"result": "FAIL" if failed else "PASS",
                             "commit": commit, "reviewer": reviewer, "at": now, "reviews": reviews}
             if failed and commit not in t.get("fail_commits", []):
