@@ -625,7 +625,10 @@ def auto_open_problem(t: dict, by_id: dict, rules: dict | None, settings: dict, 
     not an on-call ticket (the dispatcher files those open); (b) a leftovers ticket waits until
     its parent is no longer in progress, because its branch starts from main; (c) its repo is
     not on auto_open_deny_repos; (d) the hourly and daily caps and the launch limit have room.
-    `rules` and `by_id` are kept for callers; the risk rules no longer hold a ticket back."""
+    `rules` and `by_id` are kept for callers; the risk rules no longer hold a ticket back.
+    This is the ONE place that decides whether a proposed ticket may start: auto_open() opens
+    it here, and a proposed investigation launches (decide_investigations, launch_research)
+    only when this clears it too."""
     if t["status"] != "proposed" or t["type"] not in AUTO_OPEN_TYPES or t.get("oncall"):
         return "not a proposed ticket the rule can open"
     if t["branch"] == tk.leftovers_branch(t.get("parent") or "") and by_id.get(t.get("parent")) is not None \
@@ -636,6 +639,8 @@ def auto_open_problem(t: dict, by_id: dict, rules: dict | None, settings: dict, 
         return wait
     if t["repo"] in settings["auto_open_deny_repos"]:
         return f"repo {t['repo']} is on auto_open_deny_repos"
+    if t["type"] == "investigate" and not settings["auto_investigate"]:
+        return "auto_investigate is off; approve it to investigate"
     hour = sum(1 for at in opened if (now - at).total_seconds() < tk.AGENT_TICKET_WINDOW)
     if hour >= tk.AGENT_TICKET_LIMIT:
         return f"hourly cap reached ({hour} auto-opened in the last hour)"
@@ -726,6 +731,8 @@ def decide_investigations(tickets: list[dict], settings: dict, now: datetime | N
     picked = False
     by_id = {t["id"]: t for t in tickets}
     stuck = startup_block.research_hold()   # one stuck start holds every research launch
+    now = now or datetime.now(timezone.utc)
+    opened = [at for at in (_stamp_time(t.get("auto_opened_at")) for t in tickets) if at]
     for t in waiting:
         d = Decision(ticket=t, name=t["id"].lower(), agent=agent,
                      model=settings["models"].get(agent), research=True)
@@ -733,13 +740,10 @@ def decide_investigations(tickets: list[dict], settings: dict, now: datetime | N
             d.skip = f"{BLOCKED_SKIP} ({stuck}; fleet unblock {stuck})"
         elif folder_problem:
             d.skip = folder_problem
-        elif waits_problem(t, by_id):
+        elif t["status"] == "proposed" and auto_open_problem(t, by_id, None, settings, now, opened):
+            d.skip = auto_open_problem(t, by_id, None, settings, now, opened)
+        elif t["status"] == "open" and waits_problem(t, by_id):
             d.skip = waits_problem(t, by_id)
-        elif t["status"] == "proposed" and (t["repo"] in settings["auto_open_deny_repos"]
-                                            or settings["max_auto_open_per_day"] <= 0):
-            d.skip = "intake limits: a proposed investigation starts only where auto-open would open it"
-        elif t["status"] == "proposed" and not settings["auto_investigate"]:
-            d.skip = "auto_investigate is off; approve it to investigate"
         elif used >= settings["max_investigations_per_day"]:
             d.skip = f"daily limit reached ({used} of {settings['max_investigations_per_day']} investigations started today)"
         elif picked:

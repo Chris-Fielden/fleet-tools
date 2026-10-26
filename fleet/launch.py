@@ -695,6 +695,15 @@ def launch_research(d: dp.Decision, settings: dict, warn) -> tuple[int, str]:
     held = startup_block.research_hold()
     if held:   # the backstop; the dispatcher already skips these before reserving a launch
         return 0, f"{t['id']}  not launched: startup blocked ({held}), waiting for a human"
+    if before == "proposed":   # same policy as auto_open: nothing else decides whether a proposed ticket starts
+        tickets = tk.list_tickets()
+        why = dp.auto_open_problem(tk.load_ticket(t["id"]), {x["id"]: x for x in tickets}, None, settings,
+                                   datetime.now(timezone.utc),
+                                   [at for at in (dp._stamp_time(x.get("auto_opened_at")) for x in tickets) if at])
+        if why:
+            return 0, f"{t['id']}  not launched: {why}"
+        tk.open_proposed(t["id"], "investigation launch")   # counts against the caps like any auto-open
+        before = "open"
     # started_at is saved with the claim, so a start can never go uncounted;
     # a failed launch clears it again.
     tracker = tr.get_tracker(warn, settings)

@@ -546,10 +546,50 @@ def test_a_handoff_fix_of_a_failed_ticket_is_not_held_waiting(rig, monkeypatch):
     assert fix["id"] in [t["id"] for t in dp.auto_open(tk.list_tickets(), s, NOW)]
 
 
-def test_a_proposed_investigation_obeys_the_intake_limits(rig):
-    inv = tk.create_ticket({"type": "investigate", "repo": "app", "branch": "task/inv-l", "title": "Look", "body": "b"})
-    for over in ({"max_auto_open_per_day": 0}, {"auto_open_deny_repos": ["app"]}):
-        ds = dp.decide_investigations([inv], dict(rig.settings, auto_investigate=True, **over))
-        assert ds[0].skip and "intake limits" in ds[0].skip
-    ds = dp.decide_investigations([inv], dict(rig.settings, auto_investigate=True))
-    assert ds[0].skip is None
+def _policy_case(rig, case):
+    """A proposed ticket (a build, and an investigation of the same shape) plus the settings
+    that must hold it back. Returns (settings, extra tickets)."""
+    s = dict(rig.settings, auto_investigate=True, max_auto_open_per_day=10, max_launches_per_day=10)
+    extra = []
+    if case == "waiting dependency":
+        dep = tk.create_ticket({"type": "build", "repo": "app", "branch": "task/dep-p", "title": "Dep", "body": "b"})
+        return s, [dep], f"Waits for: {dep['id']}"
+    if case == "denied repo":
+        return dict(s, auto_open_deny_repos=["app"]), extra, "b"
+    if case == "daily cap 0":
+        return dict(s, max_auto_open_per_day=0), extra, "b"
+    if case == "daily cap exhausted":
+        s = dict(s, max_auto_open_per_day=1)
+    if case in ("daily cap exhausted", "hourly cap exhausted"):
+        n = 1 if case.startswith("daily") else tk.AGENT_TICKET_LIMIT
+        for k in range(n):
+            o = tk.create_ticket({"type": "build", "repo": "app", "branch": f"task/o-{k}", "title": "O", "body": "b"}, needs_approval=True)
+            tk.open_proposed(o["id"], "test")
+            extra.append(o)
+    return s, extra, "b"
+
+
+@pytest.mark.parametrize("case", ["waiting dependency", "denied repo", "daily cap 0",
+                                  "daily cap exhausted", "hourly cap exhausted"])
+def test_ordinary_and_investigation_paths_share_one_open_policy(rig, case):
+    s, extra, body = _policy_case(rig, case)
+    now = datetime.now(timezone.utc)
+    build = tk.create_ticket({"type": "build", "repo": "app", "branch": "task/pol-b", "title": "B", "body": body}, needs_approval=True)
+    inv = tk.create_ticket({"type": "investigate", "repo": "app", "branch": "task/pol-i", "title": "I", "body": body}, needs_approval=True)
+    tickets = tk.list_tickets()
+    assert build["id"] not in [t["id"] for t in dp.auto_open(tickets, s, now)]
+    by_id = {t["id"]: t for t in tickets}
+    opened = [at for at in (dp._stamp_time(t.get("auto_opened_at")) for t in tickets) if at]
+    why = dp.auto_open_problem(build, by_id, None, s, now, opened)
+    assert why, case
+    (d,) = [d for d in dp.decide_investigations(tickets, s, now) if d.ticket["id"] == inv["id"]]
+    assert d.skip == dp.auto_open_problem(inv, by_id, None, s, now, opened) and not d.eligible
+
+
+def test_launch_research_refuses_a_proposed_ticket_the_policy_holds(rig):
+    inv = tk.create_ticket({"type": "investigate", "repo": "app", "branch": "task/inv-r", "title": "I", "body": "b"}, needs_approval=True)
+    from fleet import launch as lc
+    s = dict(rig.settings, auto_open_deny_repos=["app"])
+    d = dp.Decision(ticket=inv, name="x", agent="claude", model=None, research=True)
+    code, message = lc.launch_research(d, s, lambda m: None)
+    assert code == 0 and "not launched" in message and tk.load_ticket(inv["id"])["status"] == "proposed"
