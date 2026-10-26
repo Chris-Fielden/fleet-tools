@@ -90,6 +90,14 @@ def tool_allowed(payload, root: str) -> bool:
     return bool(paths) or name == "read"
 
 
+def payload_tool_name(raw: str) -> str:
+    try:
+        name = json.loads(raw).get("tool_name")
+    except (ValueError, AttributeError):
+        return ""
+    return re.sub(r"[^a-z]", "", name.lower())[:20] if isinstance(name, str) else ""
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 4 or argv[1] not in ("json", "shell", "tool", "read"):
         print(__doc__, file=sys.stderr)
@@ -117,6 +125,9 @@ def main(argv: list[str]) -> int:
             return 0
         try:
             _event(state_dir, "tool-denied")
+            tool = payload_tool_name(raw)   # per-tool evidence for the probe: one lower-case word
+            if tool:
+                _event(state_dir, "tool-denied-" + tool)
         except OSError:
             pass
         print(json.dumps({"permission": "deny", "user_message": "read-only fleet review",

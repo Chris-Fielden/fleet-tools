@@ -163,6 +163,7 @@ def test_all_probes_pass_and_result_file_is_written(rig):
     ({"skill_leak": True}, "e"),                   # name and token in the reply
     ({"skill_leak": "token"}, "e"),                # the token alone
     ({"skill_leak": "name"}, "e"),                 # the undisclosed name alone
+    ({"skill_leak": True, "pad": 2000}, "e"),      # the leak comes after the first 3000 characters
     ({"f_leak": True}, "f"),                       # a search tool returned the outside canary
     ({"ignore_hooks": True}, "f"),
 ])

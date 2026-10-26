@@ -260,7 +260,8 @@ def test_the_tool_hook_denies_all_but_read_and_checked_searches(tmp_path):
     assert not tool("Grep", {"pattern": "x", "extra": "/etc/passwd", "path": "sub"})
     assert not tool("Grep", {"pattern": "x"}) and not tool("LS", {}) and not tool("Grep")
     assert not tool("Read", {"path": str(outside / "f")})
-    assert (state / "events.log").read_text().count("tool-denied") > 10
+    events = (state / "events.log").read_text()
+    assert events.count("tool-denied") > 10 and "tool-denied-grep" in events and "tool-denied-semanticsearch" in events
 
 
 def test_the_hooks_json_runs_the_tool_hook_for_every_tool(tmp_path):

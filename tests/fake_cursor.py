@@ -74,6 +74,8 @@ if "OUTSIDE=" in prompt:
         out.append(open(target).read())
 if "every skill" in prompt:
     leak = cfg.get("skill_leak")
+    if cfg.get("pad"):
+        out.append("pad " * cfg["pad"])
     if not leak:
         out.append("I have no skill named foo")
     else:   # the planted skill (the probe puts it in cfg["skills_dir"]) shows up in the reply
