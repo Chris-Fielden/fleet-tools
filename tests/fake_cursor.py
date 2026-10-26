@@ -59,18 +59,22 @@ def hook(event, payload):
 payload_model = cfg.get("hook_model", model)
 out = []
 if "touch shell-marker" in prompt:
-    if hook("beforeShellExecution", {{"command": "touch shell-marker", "model": payload_model}}) and mode != "ask":
+    # like the real CLI the catch-all preToolUse hook comes first, and a denial there stops the call
+    if (hook("preToolUse", {{"tool_name": "Shell", "tool_input": {{"command": "touch shell-marker"}}, "model": payload_model}})
+            and hook("beforeShellExecution", {{"command": "touch shell-marker", "model": payload_model}}) and mode != "ask"):
         open("shell-marker", "w").close()
 if "create a file named" in prompt.lower():
     name = prompt.lower().split("create a file named ")[1].split()[0]
     if hook("preToolUse", {{"tool_name": "Write", "model": payload_model}}) and (mode != "ask" or cfg.get("ask_writes")):
         open(name.rstrip(".,"), "w").write("x")
 if "note.txt" in prompt:
-    if hook("beforeReadFile", {{"file_path": "note.txt", "model": payload_model, "email": "someone@example.com"}}):
+    if (hook("preToolUse", {{"tool_name": "Read", "tool_input": {{"path": "note.txt"}}, "model": payload_model}})
+            and hook("beforeReadFile", {{"file_path": "note.txt", "model": payload_model, "email": "someone@example.com"}})):
         out.append(open("note.txt").read())
 if "OUTSIDE=" in prompt:
     target = prompt.split("OUTSIDE=")[1].split()[0]
-    if hook("beforeReadFile", {{"file_path": target, "model": payload_model}}):
+    if (hook("preToolUse", {{"tool_name": "Read", "tool_input": {{"path": target}}, "model": payload_model}})
+            and hook("beforeReadFile", {{"file_path": target, "model": payload_model}})):
         out.append(open(target).read())
 if "every skill" in prompt:
     leak = cfg.get("skill_leak")
