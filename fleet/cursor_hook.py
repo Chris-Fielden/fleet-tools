@@ -14,6 +14,7 @@ keeps one cleaned model name in STATE_DIR/model.txt and one word per event in ST
 import json
 import os
 import re
+import shlex
 import sys
 
 MODEL_OK = re.compile(r"[^A-Za-z0-9._:-]")
@@ -23,7 +24,7 @@ def hooks_json(state_dir: str, root: str) -> dict:
     me = os.path.abspath(__file__)
 
     def cmd(kind: str) -> str:
-        return f"{sys.executable} -I {me} {kind} {state_dir} {root}"
+        return shlex.join([sys.executable, "-I", me, kind, state_dir, root])
 
     return {"version": 1, "hooks": {
         "beforeShellExecution": [{"command": cmd("shell"), "failClosed": True}],
@@ -70,8 +71,12 @@ def main(argv: list[str]) -> int:
         model = payload.get("model")
         path = payload.get("file_path") or payload.get("path")
         if isinstance(model, str) and model:
-            with open(os.path.join(state_dir, "model.txt"), "w", encoding="utf-8") as fh:
-                fh.write(MODEL_OK.sub("", model)[:80] + "\n")
+            name = MODEL_OK.sub("", model)[:80]
+            mfile = os.path.join(state_dir, "model.txt")
+            seen = open(mfile, encoding="utf-8").read().split() if os.path.exists(mfile) else []
+            if name and name not in seen:   # every distinct model, so a switch mid-run is visible
+                with open(mfile, "a", encoding="utf-8") as fh:
+                    fh.write(name + "\n")
     except (ValueError, AttributeError, OSError):
         pass   # no model recorded: the review is not counted
     if not inside(path, root):   # no path we can check is no read: fail closed

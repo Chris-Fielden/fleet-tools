@@ -287,6 +287,12 @@ def voter_kind(reviewer: str) -> str | None:
     return m.group(0) if m and m.group(0) in VOTERS else None
 
 
+def all_composer(models: str) -> bool:
+    """Every model the review hook saw (comma separated) is a Cursor (composer) model."""
+    names = [m.strip().lower() for m in models.split(",") if m.strip()]
+    return bool(names) and all(m.startswith("composer") for m in names)
+
+
 def _proof_dir() -> Path:
     return Path(os.environ.get("FLEET_HOME") or Path.home() / ".fleet") / "cursor-proof"
 
@@ -335,7 +341,7 @@ def parse_review(text: str) -> dict:
     kind = voter_kind(reviewer)
     ok = True
     if kind == "cursor":   # counts only if the fleet process said so, a Cursor model was seen AND the fleet store has its proof
-        ok = (head.get("counted", "").lower() == "yes" and head.get("model", "").lower().startswith("composer")
+        ok = (head.get("counted", "").lower() == "yes" and all_composer(head.get("model", ""))
               and cursor_proven(text, head.get("commit")))
     return {"kind": kind, "reviewer": reviewer, "commit": head.get("commit"), "verdict": verdict,
             "counted": ok}
@@ -383,6 +389,9 @@ def latest_reviews(reviews_dir: Path, full_sha: str) -> dict:
             continue
         if info["commit"] == full_sha and info["kind"]:
             info["file"] = str(p)
+            have = out.get(info["kind"])
+            if have is not None and counted(have["kind"], have) and not counted(info["kind"], info):
+                continue   # an unproven (planted or stale) review can never hide a proven one
             out[info["kind"]] = info
     return out
 

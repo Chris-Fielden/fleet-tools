@@ -81,7 +81,7 @@ def counts(version: str | None, model_seen: str | None) -> tuple[bool, str]:
     """Does a Cursor review made with this CLI version and this seen model count? (yes, reason)."""
     if not model_seen:
         return False, "the review hook did not record which model ran"
-    if not model_seen.lower().startswith("composer"):
+    if not rk.all_composer(model_seen):
         return False, f"the model that ran ({model_seen}) is not a Cursor model"
     if not version:
         return False, "the installed Cursor CLI version could not be read"
@@ -251,7 +251,7 @@ def run_review(repo: Path, wt: Path, branch: str, tip: str) -> dict:
             out.update(status="no-verdict", reason="the Cursor output had no VERDICT line: no review")
             return out
         try:
-            seen = (state / "model.txt").read_text(encoding="utf-8").strip() or None
+            seen = ",".join((state / "model.txt").read_text(encoding="utf-8").split()) or None
         except OSError:
             seen = None
     counted, why = counts(out["version"], seen)
