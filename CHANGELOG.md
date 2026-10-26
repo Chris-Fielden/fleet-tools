@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.26.3] - 2026-10-26
+
+### Changed
+
+- BD-136: Cursor reviewer with counted vote
+
 ## [ship-2026.10.26.2] - 2026-10-26
 
 ### Changed
