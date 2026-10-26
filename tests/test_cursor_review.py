@@ -140,7 +140,7 @@ def test_passing_probe_and_composer_counts_as_company_cursor(rig):
     info = parsed(res["file"])
     assert info["counted"] is True and rk.counted("cursor", info)
     assert rk.VOTERS["cursor"]["company"] == "cursor"
-    reviews = {"codex": {"result": "PASS"}, "cursor": {"result": info["verdict"]}}
+    reviews = {"codex": {"result": "PASS"}, "cursor": {"result": info["verdict"], "counted": True}}
     assert rk.vote_passes(reviews) and rk.vote_tally(reviews) == {"passed": 2, "failed": 0}
 
 
@@ -202,16 +202,36 @@ def test_no_key_or_email_in_any_file(rig, tmp_path):
             assert KEY.encode() not in data and EMAIL.encode() not in data, p
 
 
+def hook_run(mode, state, root, payload):
+    return subprocess.run(["python3", "-I", str(cr.HOOK), mode, str(state), str(root)], input=json.dumps(payload),
+                          capture_output=True, text=True)
+
+
+def test_the_read_hook_allows_only_files_inside_the_copy(tmp_path):
+    state, root, outside = tmp_path / "state", tmp_path / "copy", tmp_path / "outside.txt"
+    state.mkdir()
+    root.mkdir()
+    outside.write_text("secret")
+    (root / "ok.txt").write_text("x")
+    (root / "link").symlink_to(outside)
+    for path, allowed in [("ok.txt", True), (str(root / "ok.txt"), True), (str(outside), False),
+                          ("../outside.txt", False), ("link", False), ("/etc/passwd", False), (None, False)]:
+        r = hook_run("read", state, root, {"model": "composer-2.5", "file_path": path})
+        assert (r.returncode == 0) is allowed, path
+        assert ("allow" in r.stdout) is allowed
+    assert (state / "model.txt").read_text().strip() == "composer-2.5"
+
+
 def test_the_hook_keeps_the_model_only(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
     hook = Path(cr.HOOK)
     payload = json.dumps({"model": "composer-2.5", "email": EMAIL, "file_path": "x"})
-    ok = subprocess.run(["python3", "-I", str(hook), "read", str(state)], input=payload,
+    ok = subprocess.run(["python3", "-I", str(hook), "read", str(state), str(tmp_path)], input=payload,
                         capture_output=True, text=True)
     assert ok.returncode == 0 and "allow" in ok.stdout and EMAIL not in ok.stdout
     for mode in ("shell", "write"):
-        bad = subprocess.run(["python3", "-I", str(hook), mode, str(state)], input=payload,
+        bad = subprocess.run(["python3", "-I", str(hook), mode, str(state), str(tmp_path)], input=payload,
                              capture_output=True, text=True)
         assert bad.returncode == 2 and "deny" in bad.stdout
     assert (state / "model.txt").read_text().strip() == "composer-2.5"
@@ -242,7 +262,7 @@ def test_watcher_records_a_counted_vote(rig):
     _consider(r)
     _consider(r)
     v = tk.load_ticket(r.ticket["id"])["verdict"]
-    assert v["reviews"]["cursor"] == {"result": "PASS", "reviewer": "Cursor (composer-2.5)"}
+    assert v["reviews"]["cursor"] == {"result": "PASS", "reviewer": "Cursor (composer-2.5)", "counted": True}
     assert r.pings == [] and len([c for c in r.calls() if "--trust" in c["args"]]) == 1
     assert rk.vote_tally(v["reviews"]) == {"passed": 2, "failed": 0}
 
@@ -272,10 +292,11 @@ def test_watcher_does_nothing_when_off_or_already_reviewed(rig):
 def test_a_verdict_with_no_counted_vote_is_invalid(rig):
     r = _watch_rig(rig)
     t = tk.load_ticket(r.ticket["id"])
-    t["verdict"]["reviews"] = {"cursor": {"result": "PASS", "reviewer": "Cursor (composer-2.5)"}}
     t["verdict"]["reviewer"] = "Cursor (composer-2.5)"
-    # a cursor-only verdict has a counted vote now; an empty one never validates
-    assert tk.validate_stored(t) == []
+    t["verdict"]["reviews"] = {"cursor": {"result": "PASS", "reviewer": "Cursor (composer-2.5)", "counted": True}}
+    assert tk.validate_stored(t) == []                       # a counted cursor vote is a vote
+    t["verdict"]["reviews"] = {"cursor": {"result": "PASS", "reviewer": "Cursor (composer-2.5)"}}
+    assert tk.validate_stored(t)                             # an unproven one is not
     t["verdict"]["reviews"] = {}
     assert tk.validate_stored(t)
     assert "codex, claude, cursor" in tk.validate_stored(t)[0]
@@ -287,3 +308,43 @@ def test_voter_kind_is_the_one_helper():
     assert rk.parse_review("Reviewer: Cursor (composer-2.5)\nCommit: " + "a" * 40 + "\n\nVERDICT: PASS\n")["kind"] == "cursor"
     with pytest.raises(tk.TicketInvalid):
         tk.record_verdict("task/demo", "app", "PASS", "a" * 40, "Gemini")
+
+
+def test_a_planted_symlink_is_not_followed_when_saving(rig, tmp_path):
+    r = rig()
+    r.probe()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("precious")
+    reviews = r.wt / ".reviews"
+    reviews.mkdir()
+    name = cr.review_path(r.wt, "task/demo", r.tip).name
+    (reviews / (name + ".partial")).symlink_to(victim)
+    (reviews / name).symlink_to(victim)
+    res = r.run()
+    assert res["status"] == "saved" and victim.read_text() == "precious"
+    assert not (reviews / name).is_symlink() and "VERDICT" in (reviews / name).read_text()
+    # a .reviews folder that is itself a link is refused
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    import shutil
+    shutil.rmtree(reviews)
+    reviews.symlink_to(other)
+    assert r.run()["status"] == "failed" and list(other.iterdir()) == []
+
+
+def test_a_failed_diff_or_an_oversized_one_is_not_counted(rig, monkeypatch):
+    r = rig()
+    r.probe()
+    monkeypatch.setattr(cr, "DIFF_MAX", 5)
+    res = r.run()
+    assert res["status"] == "saved" and res["counted"] is False and "too large" in res["reason"]
+    assert "Counted: no" in Path(res["file"]).read_text()
+
+
+def test_legacy_advisory_cursor_vote_still_loads_and_stays_advisory(rig):
+    r = _watch_rig(rig)
+    t = tk.load_ticket(r.ticket["id"])
+    t["verdict"]["reviews"]["cursor"] = {"result": "FAIL", "reviewer": "Cursor composer"}   # as stored before BD-136
+    assert tk.validate_stored(t) == []
+    assert t["verdict"]["result"] == "PASS" and not rk.majority_failed(t["verdict"]["reviews"])
+    assert rk.vote_tally(t["verdict"]["reviews"]) == {"passed": 1, "failed": 0}

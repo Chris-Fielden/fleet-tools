@@ -64,6 +64,10 @@ if "create a file named" in prompt.lower():
 if "note.txt" in prompt:
     if hook("beforeReadFile", {{"file_path": "note.txt", "model": payload_model, "email": "someone@example.com"}}):
         out.append(open("note.txt").read())
+if "OUTSIDE=" in prompt:
+    target = prompt.split("OUTSIDE=")[1].split()[0]
+    if hook("beforeReadFile", {{"file_path": target, "model": payload_model}}):
+        out.append(open(target).read())
 if "every skill" in prompt:
     out.append("no skills" if not cfg.get("skill_leak") else "skill leak: " + prompt.split("named ")[1].split()[0])
 if prompt.startswith("You are a code reviewer"):

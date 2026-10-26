@@ -387,13 +387,13 @@ def _check_verdict(v) -> list[str]:
           and re.fullmatch(r"[0-9a-f]{40}", v["commit"]) and _is_str(v["reviewer"])
           and 1 <= len(v["reviewer"]) <= REVIEWER_MAX and _is_time(v["at"])
           and isinstance(v["reviews"], dict) and v["reviews"]
-          and all(k in REVIEW_KINDS and isinstance(r, dict) and set(r) == {"result", "reviewer"}
+          and all(k in REVIEW_KINDS and isinstance(r, dict) and set(r) in ({"result", "reviewer"}, {"result", "reviewer", "counted"})
                   and r["result"] in VERDICT_RESULTS and _is_str(r["reviewer"])
                   and 1 <= len(r["reviewer"]) <= REVIEWER_MAX
                   for k, r in v["reviews"].items())
-          and any(rk.counted(k) for k in v["reviews"])
+          and any(rk.counted(k, r) for k, r in v["reviews"].items())
           and v["result"] == ("FAIL" if any(r["result"] == "FAIL" for k, r in v["reviews"].items()
-                                            if rk.counted(k)) else "PASS"))
+                                            if rk.counted(k, r)) else "PASS"))
     if not ok:
         return ["verdict must be null or {result: PASS or FAIL, commit: a full commit id, "
                 "reviewer, at: a UTC time, reviews: {" + ", ".join(REVIEW_KINDS) + ": {result, reviewer}} with at least one counted vote}"]
@@ -1159,8 +1159,10 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
             same = bool(old) and old["commit"] == commit
             reviews = dict(old["reviews"]) if same else {}
             reviews[kind] = {"result": result, "reviewer": reviewer}
+            if kind == "cursor":
+                reviews[kind]["counted"] = True   # the proof flag; absent = an advisory vote from before BD-136
             now = _now()
-            failed = any(r["result"] == "FAIL" for k, r in reviews.items() if rk.counted(k))
+            failed = any(r["result"] == "FAIL" for k, r in reviews.items() if rk.counted(k, r))
             t["verdict"] = {"result": "FAIL" if failed else "PASS",
                             "commit": commit, "reviewer": reviewer, "at": now, "reviews": reviews}
             # A round counts only while the majority of voting companies failed the commit; a

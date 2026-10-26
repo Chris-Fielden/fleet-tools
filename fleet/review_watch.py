@@ -402,6 +402,8 @@ def _unrecorded_pings(t: dict, repo: Path, tip: str, state: dict, now: datetime,
     wt = repo / ".worktrees" / t["branch"].removeprefix("task/")
     seen, unrecorded = state["unrecorded_seen"], set()
     for kind, info in sorted(rk.latest_reviews(wt / ".reviews", tip).items()):
+        if not rk.counted(kind, info):
+            continue   # an uncounted Cursor review is never recorded on the ticket, by design
         recorded = (v is not None and v["commit"] == tip and kind in v["reviews"]
                     and v["reviews"][kind]["result"] == info["verdict"])
         try:

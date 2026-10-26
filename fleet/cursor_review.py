@@ -175,11 +175,34 @@ def review_path(wt: Path, branch: str, tip: str) -> Path:
     return wt / ".reviews" / f"{branch.replace('/', '-')}-{tip[:7]}-cursor.md"
 
 
+def _save(path: Path, text: str) -> None:
+    """Write the review under .reviews without following anything an agent put there: the folder
+    must be a real folder, the temporary file is created exclusively with a random name (never a
+    predictable name an agent could have made a symlink), and the final rename replaces the name
+    itself, never the target of a link."""
+    folder = path.parent
+    if folder.is_symlink():
+        raise OSError(f"{folder} is a symlink")
+    folder.mkdir(exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".partial", dir=folder)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def run_review(repo: Path, wt: Path, branch: str, tip: str) -> dict:
     """Review the exact commit `tip` and save the review under wt/.reviews. Returns
     {"status": "no-key"|"failed"|"no-verdict"|"saved", "counted": bool, "reason": str,
      "verdict": "PASS"|"FAIL"|None, "file": str|None, "version": str|None}. Nothing here logs or
     stores the key or hook payloads."""
+    truncated = False
     out = {"status": "failed", "counted": False, "reason": "", "verdict": None, "file": None,
            "version": None}
     try:
@@ -196,12 +219,18 @@ def run_review(repo: Path, wt: Path, branch: str, tip: str) -> dict:
             d.mkdir()
         try:
             _extract_commit(repo, tip, copy)
-            diff = subprocess.run(["git", "-C", str(repo), "diff", f"{_base_branch(repo)}...{tip}"],
-                                  capture_output=True, text=True, timeout=300).stdout[:DIFF_MAX]
+            d = subprocess.run(["git", "-C", str(repo), "diff", f"{_base_branch(repo)}...{tip}"],
+                               capture_output=True, text=True, timeout=300)
+            if d.returncode != 0:
+                raise OSError("git diff failed")
+            diff = d.stdout
+            if len(diff) > DIFF_MAX:   # the reviewer cannot see all of it: it may be recorded, never counted
+                truncated = True
+                diff = diff[:DIFF_MAX] + "\n[diff truncated: too large]\n"
             (copy / ".fleet-review").mkdir()
             (copy / ".fleet-review" / "changes.diff").write_text(diff, encoding="utf-8")
             (copy / ".cursor").mkdir()
-            hooks = subprocess.run([sys.executable, "-I", str(HOOK), "json", str(state)],
+            hooks = subprocess.run([sys.executable, "-I", str(HOOK), "json", str(state), str(copy)],
                                    capture_output=True, text=True, check=True).stdout
             (copy / ".cursor" / "hooks.json").write_text(hooks, encoding="utf-8")
             out["version"] = cli_version(home)
@@ -226,14 +255,17 @@ def run_review(repo: Path, wt: Path, branch: str, tip: str) -> dict:
         except OSError:
             seen = None
     counted, why = counts(out["version"], seen)
+    if truncated:
+        counted, why = False, "the diff was too large to show the reviewer in full"
     text = _scrub(body, key).strip()
     header = (f"Reviewer: {REVIEWER}\nCommit: {tip}\nModel: {seen or 'none'}\n"
               f"Counted: {'yes' if counted else 'no'}\nReason: {why}\n\n")
     path = review_path(wt, branch, tip)
-    path.parent.mkdir(exist_ok=True)
-    part = path.with_name(path.name + ".partial")
-    part.write_text(header + text + "\n", encoding="utf-8")
-    os.replace(part, path)   # only now can the merge gate see it
+    try:
+        _save(path, header + text + "\n")   # only now can the merge gate see it
+    except OSError as exc:
+        out["reason"] = f"the Cursor review could not be saved ({exc})"
+        return out
     out.update(status="saved", counted=counted, reason=why, verdict=verdict, file=str(path))
     return out
 

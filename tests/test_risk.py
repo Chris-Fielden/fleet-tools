@@ -974,7 +974,8 @@ def test_cursor_review_gates_only_when_counted(tmp_path):
     only = {"codex": rk.parse_review(review_text("Codex")), "cursor": rk.parse_review(cursor_text())}
     only["codex"]["file"] = only["cursor"]["file"] = "x"
     assert any("Claude" in p for p in rk.check_reviews(only, "high"))
-    assert rk.counted("cursor") and rk.counted("codex") and rk.counted("claude")
+    assert rk.counted("cursor", {"counted": True}) and rk.counted("codex") and rk.counted("claude")
+    assert not rk.counted("cursor") and not rk.counted("cursor", {"result": "PASS"})   # no proof flag: advisory
     assert not rk.counted("cursor", {"counted": False}) and not rk.counted("nobody")
 
 

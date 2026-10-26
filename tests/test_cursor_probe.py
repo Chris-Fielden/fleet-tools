@@ -155,7 +155,7 @@ def test_all_probes_pass_and_result_file_is_written(rig):
 
 
 @pytest.mark.parametrize("cfg,probe", [
-    ({"ignore_hooks": True}, "a"),                 # shell and write got through
+    ({"ignore_hooks": True}, "a"),                 # shell, write and an outside read got through
     ({"hook_model": "claude-4-sonnet"}, "b"),      # not a Cursor model
     ({"ask_writes": True}, "c"),                   # ask mode wrote a file
     ({"exit": 1}, "e"),                            # no auth in the empty HOME

@@ -236,10 +236,14 @@ ALWAYS_REVIEW = ("codex", "claude")   # reviewers every commit gets; Cursor revi
 
 def counted(kind: str, info: dict | None = None) -> bool:
     """Does a review of this kind count towards a verdict and the merge gate? `info` is a parsed
-    review (parse_review): one that says it is not counted never is."""
+    review (parse_review) or a stored verdict entry. A Cursor review counts only when it says so
+    explicitly (`counted` True): a stored Cursor vote from before BD-136 has no such flag and was
+    advisory, so it stays advisory."""
     if not VOTERS.get(kind, {}).get("counted"):
         return False
-    return bool(info.get("counted", True)) if info else True
+    if kind == "cursor":
+        return bool(info) and info.get("counted") is True
+    return True
 
 
 VOTE_PASSES_NEEDED = 2   # distinct companies that must PASS (of the 3 voters)
@@ -251,7 +255,7 @@ def vote_tally(reviews: dict) -> dict:
     voters are not in it. Returns {"passed": n, "failed": n}."""
     by_company: dict[str, str] = {}
     for kind, r in reviews.items():
-        if not counted(kind):
+        if not counted(kind, r):
             continue
         company = VOTERS[kind]["company"]
         if by_company.get(company) != "FAIL":
@@ -373,7 +377,7 @@ def check_reviews(reviews: dict, level: str, accept_codex_fail_commit: str | Non
                 and codex and codex["verdict"] == "FAIL" and codex.get("commit") == accept_codex_fail_commit):
             tolerated = "codex"
     for kind, info in reviews.items():
-        if kind == tolerated or not counted(kind):
+        if kind == tolerated or not counted(kind, info):
             continue
         if info["verdict"] != "PASS":
             problems.append(f"the latest {kind} review of this commit is "
