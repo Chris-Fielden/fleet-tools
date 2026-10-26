@@ -86,10 +86,10 @@ def parse_rules(data) -> dict:
                 or not (glob or contains):
             raise RiskError(f"{RULES_NAME}: rule {i + 1} needs exactly one of 'glob' or 'contains'")
         if glob is not None:
-            rules.append({"level": r["level"], "text": glob, "match": _glob_re(glob).fullmatch})
+            rules.append({"level": r["level"], "text": glob, "glob": glob, "match": _glob_re(glob).fullmatch})
         else:
             needle = contains.lower()
-            rules.append({"level": r["level"], "text": f"contains '{contains}'",
+            rules.append({"level": r["level"], "text": f"contains '{contains}'", "contains": needle,
                           "match": lambda p, n=needle: n in p.lower()})
     start = data.get("ticket_start", {})
     if not isinstance(start, dict):

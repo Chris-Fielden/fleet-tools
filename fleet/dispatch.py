@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import areas
 from . import risk as rk
 from . import startup_block
 from . import ticket as tk
@@ -522,6 +523,11 @@ def _judge(t: dict, tickets: dict, claimed: list[dict], settings: dict, holders:
     if dep:
         d.skip = f"{UNMET_SKIP} {dep} has no commits beyond main yet; waiting for a human"
         return d
+    # 4c. File-area lock: another ticket of this repo holds areas that meet this one's
+    area_wait = areas.blocked_reason(t, list(tickets.values()))
+    if area_wait:
+        d.skip = area_wait
+        return d
     # 5. Who works it
     if t["type"] == "build":
         agent = settings["builder"]
@@ -567,6 +573,117 @@ def decide(tickets: list[dict], settings: dict) -> list[Decision]:
             picked = True
         decisions.append(d)
     return decisions
+
+
+# --- auto-open: the dispatcher opens a controller-filed proposed ticket by rule ---------
+
+CRITERION_HEAD_RE = re.compile(r"^\W*acceptance(?: (?:criteria|tests?))?\W*$", re.I)
+CRITERION_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(\S.{9,})$")
+AUTO_OPEN_TYPES = ("build", "fix", "investigate")
+
+
+def acceptance_criteria(body: str) -> list[str]:
+    """The criteria listed under an 'Acceptance' heading line: bullet or numbered lines of at
+    least 10 characters, up to the next blank-then-heading or the end."""
+    out, inside = [], False
+    for line in body.splitlines():
+        if CRITERION_HEAD_RE.match(line.rstrip(":").strip() or "-"):
+            inside = True
+        elif inside:
+            m = CRITERION_RE.match(line)
+            if m:
+                out.append(m.group(1).strip())
+            elif line.strip() and not line.startswith((" ", "\t")):
+                inside = False
+    return out
+
+
+def is_handoff(t: dict | None) -> bool:
+    """A handoff is an investigate ticket a human filed or approved (it was never auto-opened
+    itself, so auto-opened work cannot vouch for more auto-opened work)."""
+    return (t is not None and t["type"] == "investigate" and t["created_by"] == "human"
+            and t["status"] in ("open", "claimed", "review", "done") and "auto_opened_at" not in t)
+
+
+def _stamp_time(text: str | None) -> datetime | None:
+    try:
+        return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def auto_open_problem(t: dict, by_id: dict, rules: dict | None, settings: dict, now: datetime,
+                      opened: list[datetime]) -> str | None:
+    """Why this proposed ticket must stay proposed (a human runs `ticket approve`), or None when
+    the rule opens it. `opened` holds the times of every auto-open so far (for the caps).
+    Rule: (a) an agent filed it from a human handoff, with acceptance criteria in the body;
+    (b) it is not high risk and its declared areas and body name no high-rule file;
+    (c) its repo is not on auto_open_deny_repos; (d) the hourly and daily caps have room."""
+    if t["status"] != "proposed" or t["type"] not in AUTO_OPEN_TYPES or t.get("oncall"):
+        return "not a proposed build, fix or investigate ticket"
+    if t["created_by"] not in tk.AGENTS:
+        return "not filed by the controller"
+    origin = t.get("origin") or (t["parent"] if t["type"] == "investigate" else None)
+    if not is_handoff(by_id.get(origin)):
+        return "no human handoff behind it (origin missing or not a handoff)"
+    if t["type"] == "investigate" and t["parent"] != origin:
+        return "an investigate ticket must be filed with the handoff as its parent"
+    if rules is None:
+        return "the risk rules could not be read"
+    if t["type"] != "investigate":
+        if not acceptance_criteria(t["body"]):
+            return "no acceptance criteria in the body"
+        if not t.get("areas"):
+            return "no declared areas, so its file set is unknown"
+        if rk.rank(t.get("risk") or "medium") >= rk.rank("high"):
+            return "risk is high"
+        hot = areas.high_areas(t["areas"], rules) or rk.high_paths(t["body"], rules)
+        if hot:
+            return f"touches a high-risk file ({hot[0]})"
+    if t["repo"] in settings["auto_open_deny_repos"]:
+        return f"repo {t['repo']} is on auto_open_deny_repos"
+    hour = sum(1 for at in opened if (now - at).total_seconds() < tk.AGENT_TICKET_WINDOW)
+    if hour >= tk.AGENT_TICKET_LIMIT:
+        return f"hourly cap reached ({hour} auto-opened in the last hour)"
+    tz = settings["timezone"]
+    day = sum(1 for at in opened if local_day(at, tz) == local_day(now, tz))
+    if day >= settings["max_auto_open_per_day"]:
+        return f"daily cap reached ({day} auto-opened today)"
+    try:
+        launched = launches_today(local_day(now, tz))
+    except OSError as exc:
+        return f"launch count unreadable ({exc})"
+    if launched >= settings["max_launches_per_day"]:
+        return f"daily launch limit reached ({launched} launches today)"
+    return None
+
+
+def auto_open(tickets: list[dict], settings: dict, now: datetime | None = None,
+              warn=lambda m: None) -> list[dict]:
+    """The dispatcher's auto-open pass: open each proposed ticket that auto_open_problem clears,
+    oldest first, and log it. Returns the tickets opened. Never raises: a failure leaves the
+    ticket proposed (fail closed). Only this process (never an agent command) opens them."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        rules = rk.load_rules()
+    except rk.RiskError as exc:
+        warn(f"auto-open: {exc}")
+        rules = None
+    by_id = {t["id"]: t for t in tickets}
+    opened = [at for at in (_stamp_time(t.get("auto_opened_at")) for t in tickets) if at]
+    done = []
+    for t in sorted((t for t in tickets if t["status"] == "proposed"), key=tk.oldest_first_key):
+        if auto_open_problem(t, by_id, rules, settings, now, opened) is not None:
+            continue
+        try:
+            new = tk.open_proposed(t["id"], "auto-open rule")
+        except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+            warn(f"auto-open: {t['id']}: {exc}")
+            continue
+        log("AUTO_OPEN", f"{t['id']} {t['type']} origin {new.get('origin') or new['parent']}")
+        opened.append(now)
+        done.append(new)
+    return done
 
 
 def started_today(tickets: list[dict], now: datetime | None = None) -> int:

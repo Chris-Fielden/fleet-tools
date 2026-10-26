@@ -56,6 +56,7 @@ def repo_info(path):
       is_worktree  True for a linked worktree (.worktrees/<task>), False for
                    the main checkout
       branch       current branch name ("" if detached)
+      main_root    top folder of the main checkout this one belongs to
     """
     folder = nearest_existing_dir(path)
     root = git(["rev-parse", "--show-toplevel"], folder)
@@ -69,6 +70,7 @@ def repo_info(path):
         # In a linked worktree, the private git dir differs from the shared one.
         "is_worktree": bool(git_dir and common_dir and git_dir != common_dir),
         "branch": branch,
+        "main_root": os.path.dirname(common_dir) if common_dir and os.path.basename(common_dir) == ".git" else root,
     }
 
 
@@ -102,6 +104,11 @@ def real_home():
 
 def fleet_dir():
     return os.path.realpath(os.path.join(real_home(), ".fleet"))
+
+
+def fleet_home_dir():
+    """The fleet's folder as the ticket command sees it: $FLEET_HOME, else the private folder."""
+    return os.environ.get("FLEET_HOME") or fleet_dir()
 
 
 def is_under_fleet(path, cwd=None):

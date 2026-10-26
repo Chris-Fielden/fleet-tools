@@ -9,6 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import areas
 from . import dispatch as dp
 from . import dupes
 from . import governor
@@ -176,6 +177,9 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     if checks is not None:   # --watch only; before anything mirrors, or a mirror would undo the drag
         _pull_board_priorities(emit, warn)
     _reconcile(settings, emit, warn)
+    for t in dp.auto_open(tk.list_tickets(), settings, clock.now(), warn):
+        emit(f"{t['id']}  auto-opened (filed from handoff {t.get('origin') or t['parent']})")
+        kaneo.mirror_quietly(t, warn)
     if retry_tabs is not None:
         done = {t["id"] for t in tk.list_tickets() if t["status"] == "done"}
         kept = [i for i in retry_tabs.poll() if i in done]
@@ -224,6 +228,20 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     # The on-call agent has its own slot: it starts at once, whatever the normal
     # queue is doing, and never counts against the daily launch limit.
     running = running_agents(tickets, warn)
+    try:   # drop expired or orphaned area locks; renew those of tickets whose agent is running
+        # (asked of herdr whenever a claimed ticket holds areas, whatever the on-call queue says)
+        alive = None
+        if any(t["status"] == "claimed" and t.get("areas") for t in tickets):
+            try:
+                alive = frozenset(a.get("name") for a in lc.list_agents() if a.get("agent_status") not in ("idle", "done"))
+            except lc.LaunchError as exc:
+                warn(f"area locks not renewed: cannot ask herdr which agents are running ({exc})")
+        else:
+            alive = frozenset()
+        for tid in areas.sweep(tickets, alive, clock.now(), settings["area_lease_hours"]):
+            dp.log("AREA_RELEASED", f"{tid} lease ended or ticket no longer active")
+    except OSError as exc:
+        warn(f"area locks: {exc}")
     for d in dp.decide_oncall(tickets, settings, running):
         if d.skip and not d.skip.startswith(dp.QUEUE_SKIPS):
             emit(f"{d.ticket['id']}  on-call not launched: {d.skip}")   # a blocker, not just a queue
