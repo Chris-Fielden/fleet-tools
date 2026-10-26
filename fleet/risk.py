@@ -7,6 +7,7 @@ up: the higher of stored and diff always wins. Standard library only.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -286,6 +287,32 @@ def voter_kind(reviewer: str) -> str | None:
     return m.group(0) if m and m.group(0) in VOTERS else None
 
 
+def _proof_dir() -> Path:
+    return Path(os.environ.get("FLEET_HOME") or Path.home() / ".fleet") / "cursor-proof"
+
+
+def _proof_path(text: str) -> Path:
+    return _proof_dir() / hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def write_cursor_proof(text: str, commit: str) -> None:
+    """The fleet process, when it saves a COUNTED Cursor review: a record in the fleet store (which
+    agents cannot read or write) bound to the exact text of the review file and its commit. A
+    review file an agent wrote or edited has no such record, so it can never count."""
+    d = _proof_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = _proof_path(text).with_suffix(".tmp")
+    tmp.write_text(json.dumps({"commit": commit}), encoding="utf-8")
+    os.replace(tmp, _proof_path(text))
+
+
+def cursor_proven(text: str, commit: str | None) -> bool:
+    try:
+        return bool(commit) and json.loads(_proof_path(text).read_text(encoding="utf-8")).get("commit") == commit
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def parse_review(text: str) -> dict:
     """review.sh writes header lines (Reviewer:, Commit:), a blank line, then
     the review. The verdict is the first VERDICT line after the header."""
@@ -307,8 +334,9 @@ def parse_review(text: str) -> dict:
     reviewer = head.get("reviewer", "")
     kind = voter_kind(reviewer)
     ok = True
-    if kind == "cursor":   # counts only if the fleet process said so AND a Cursor model was seen
-        ok = head.get("counted", "").lower() == "yes" and head.get("model", "").lower().startswith("composer")
+    if kind == "cursor":   # counts only if the fleet process said so, a Cursor model was seen AND the fleet store has its proof
+        ok = (head.get("counted", "").lower() == "yes" and head.get("model", "").lower().startswith("composer")
+              and cursor_proven(text, head.get("commit")))
     return {"kind": kind, "reviewer": reviewer, "commit": head.get("commit"), "verdict": verdict,
             "counted": ok}
 

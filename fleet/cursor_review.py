@@ -257,12 +257,15 @@ def run_review(repo: Path, wt: Path, branch: str, tip: str) -> dict:
     counted, why = counts(out["version"], seen)
     if truncated:
         counted, why = False, "the diff was too large to show the reviewer in full"
-    text = _scrub(body, key).strip()
+    text = _scrub(body, key).replace("\r", "").strip()
     header = (f"Reviewer: {REVIEWER}\nCommit: {tip}\nModel: {seen or 'none'}\n"
               f"Counted: {'yes' if counted else 'no'}\nReason: {why}\n\n")
     path = review_path(wt, branch, tip)
+    full = header + text + "\n"
     try:
-        _save(path, header + text + "\n")   # only now can the merge gate see it
+        if counted:
+            rk.write_cursor_proof(full, tip)   # first: a review file counts only with this record
+        _save(path, full)   # only now can the merge gate see it
     except OSError as exc:
         out["reason"] = f"the Cursor review could not be saved ({exc})"
         return out
@@ -299,35 +302,55 @@ def reset() -> None:
         _SETTLED.clear()
 
 
-def _outcome(t: dict, tip: str, counted: bool, verdict: str, reason: str, emit, warn, ping, note) -> None:
-    tid = t["id"]
-    if counted:
-        v = t.get("verdict")
-        if v is not None and v["commit"] == tip and v["reviews"].get("cursor", {}).get("result") == verdict:
-            return   # already on the ticket
-        try:
-            tk.record_verdict(t["branch"], t["repo"], verdict, tip, REVIEWER)
-        except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
-            warn(f"{tid}: could not record the Cursor vote ({exc})")
-            return
-        emit(f"{tid}  Cursor review of {tip[:8]}: {verdict} (counted)")
+def _leftovers(t: dict, tip: str, review_file: str | None, warn) -> None:
+    """A counted PASS review's SHOULD FIX items, kept as a ticket note like review.sh does."""
+    if not review_file:
         return
-    emit(f"{tid}  Cursor review of {tip[:8]}: {verdict} (recorded, not counted)")
-    detail = f"Cursor's {verdict} on {tip[:7]} was recorded but not counted: {reason}"
+    try:
+        items = rk.should_fix_items(Path(review_file).read_text(encoding="utf-8"))
+        if not items:
+            return
+        text = f"SHOULD FIX leftovers from the {REVIEWER} review of {tip[:7]} (PASS):\n{items}"
+        if len(text) > tk.NOTE_MAX:
+            text = text[:tk.NOTE_MAX - 15].rstrip() + "\n[...truncated]"
+        if not any(n["text"] == text for n in tk.load_ticket(t["id"]).get("notes", [])):
+            tk.add_note(t["id"], text)
+    except (tk.TicketError, tk.TicketInvalid, OSError, UnicodeDecodeError) as exc:
+        warn(f"{t['id']}: could not save the Cursor SHOULD FIX leftovers ({exc})")
+
+
+def _outcome(t: dict, tip: str, res: dict, emit, warn, ping, note) -> bool:
+    """Make the ticket agree with a saved Cursor review. True when done (a repeat changes nothing)."""
+    tid, verdict = t["id"], res["verdict"]
+    if res["counted"]:
+        v = t.get("verdict")
+        if not (v is not None and v["commit"] == tip and v["reviews"].get("cursor", {}).get("result") == verdict):
+            try:
+                tk.record_verdict(t["branch"], t["repo"], verdict, tip, REVIEWER)
+            except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+                warn(f"{tid}: could not record the Cursor vote ({exc})")
+                return False
+            emit(f"{tid}  Cursor review of {tip[:8]}: {verdict} (counted)")
+        if verdict == "PASS":
+            _leftovers(t, tip, res.get("file"), warn)
+        return True
+    detail = f"Cursor's {verdict} on {tip[:7]} was recorded but not counted: {res['reason']}"
     note(tid, f"Cursor review of {tip[:8]} not counted", detail)
-    ping(t, "needs_human", f"{tid}:cursor_uncounted:{tip}", detail)
+    ping(t, "needs_human", f"{tid}:cursor_uncounted:{tip}", detail)   # once per key
+    emit(f"{tid}  Cursor review of {tip[:8]}: {verdict} (recorded, not counted)")
+    return True
 
 
 def _settle_saved(t: dict, saved: dict, tip: str, emit, warn, ping, note) -> None:
     """A Cursor review file exists for this tip but this process did not make it (it restarted):
     make the ticket agree with it. Every step is idempotent (a recorded vote, a note marker and
     a ping key are each checked), so a repeat changes nothing."""
-    if (t["id"], tip) in _SETTLED:
+    if (t["id"], tip) in _SETTLED or saved["verdict"] not in ("PASS", "FAIL"):
         return
-    if saved["verdict"] in ("PASS", "FAIL"):
+    res = {"counted": bool(saved["counted"]), "verdict": saved["verdict"], "file": saved.get("file"),
+           "reason": "see the Reason line of the saved review"}
+    if _outcome(t, tip, res, emit, warn, ping, note):
         _SETTLED.add((t["id"], tip))
-        _outcome(t, tip, bool(saved["counted"]), saved["verdict"],
-                 "see the Reason line of the saved review", emit, warn, ping, note)
 
 
 def consider(t: dict, repo: Path, tip: str, settings: dict, emit, warn, ping, note) -> None:
@@ -364,9 +387,10 @@ def consider(t: dict, repo: Path, tip: str, settings: dict, emit, warn, ping, no
         return
     if entry["thread"].is_alive() or entry.get("handled"):
         return
-    entry["handled"] = True
     res = entry["result"]
     if res["status"] != "saved":
+        entry["handled"] = True
         warn(f"{tid}: no Cursor review of {tip[:8]}: {res['reason']}")
         return
-    _outcome(t, tip, res["counted"], res["verdict"], res["reason"], emit, warn, ping, note)
+    if _outcome(t, tip, res, emit, warn, ping, note):
+        entry["handled"] = True

@@ -1157,6 +1157,8 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
                 continue
             old = t["verdict"]
             same = bool(old) and old["commit"] == commit
+            if kind == "cursor" and not same:
+                continue   # Cursor reviews a tip that already has a verdict; it never starts one
             reviews = dict(old["reviews"]) if same else {}
             reviews[kind] = {"result": result, "reviewer": reviewer}
             if kind == "cursor":
