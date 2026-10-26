@@ -31,7 +31,25 @@ fi
 # 2. Python tests, if there are any.
 if [[ -n "$(project_files 'test_*.py' '*/test_*.py' '*_test.py' '*/*_test.py')" ]]; then
   if python3 -m pytest --version >/dev/null 2>&1; then
-    python3 -m pytest -q && pass "python tests" || fail "python tests"
+    # The suite is thousands of small tests (git, subprocesses), so one run takes ~9 minutes.
+    # Every test builds its own temporary FLEET_HOME, so test FILES are independent: run them in
+    # parallel (CHECK_JOBS, default 8), one pytest per file, and show the output of any that fail.
+    # A file pytest cannot collect or run counts as a failure like any other.
+    out_dir="$(mktemp -d)"
+    export out_dir
+    run_one() { python3 -m pytest -q -p no:cacheprovider "$1" > "$out_dir/$(echo "$1" | tr / _).txt" 2>&1 \
+                  || echo "$1" >> "$out_dir/FAILED"; }
+    export -f run_one
+    project_files 'test_*.py' '*/test_*.py' '*_test.py' '*/*_test.py' \
+      | xargs -P "${CHECK_JOBS:-8}" -I{} bash -c 'run_one {}'
+    if [[ -f "$out_dir/FAILED" ]]; then
+      while read -r f; do tail -n 40 "$out_dir/$(echo "$f" | tr / _).txt"; done < <(sort "$out_dir/FAILED")
+      fail "python tests ($(wc -l < "$out_dir/FAILED") file(s) failed)"
+    else
+      echo "  $(cat "$out_dir"/*.txt | grep -Eo '[0-9]+ passed' | awk '{n+=$1} END{print n}') tests passed"
+      pass "python tests"
+    fi
+    rm -rf "$out_dir"
   else
     fail "python tests (pytest is not installed: pip install pytest)"
   fi
