@@ -343,8 +343,8 @@ def file_handoff(plan: dict, hid: str, projects_dir: Path | None = None, warn=la
         found = _find(existing, MARKER.format(hid=hid, n=n))
         if found is None:
             waits = [ids[d] for d in sorted(plan["deps"][i])]
-            if t["after"] and tk.ID_RE.fullmatch(t["after"]):
-                waits.append(t["after"])
+            if t["after"] and tk.ID_RE.fullmatch(t["after"]) and t["type"] != "fix":
+                waits.append(t["after"])   # a fix's `after` is the ticket it repairs (its parent), often failed: no wait
             fields = {"type": t["type"], "repo": plan["repo"], "branch": _branch(hid, n, t["title"]),
                       "title": t["title"], "body": _body(hid, n, plan, t, waits), "areas": t["files"],
                       "summary": _summary(plan, t)}

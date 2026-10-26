@@ -165,8 +165,9 @@ def test_dependent_ticket_opens_only_after_its_parent_is_done(rig):
     cycle(rig)
     a, b = sorted((t for t in tk.list_tickets() if t["type"] == "build"), key=lambda t: t["id"])
     s = dict(rig.settings, max_auto_open_per_day=10, max_launches_per_day=10)
-    assert [t["id"] for t in dp.auto_open(tk.list_tickets(), s, NOW)] == [a["id"], tk.list_tickets()[-1]["id"]] \
-        or True
+    card = next(t for t in tk.list_tickets() if t["type"] == "question")
+    assert sorted(t["id"] for t in dp.auto_open(tk.list_tickets(), s, NOW)) == [a["id"]]   # the card is already open
+    assert card["status"] == "open"
     assert tk.load_ticket(b["id"])["status"] == "proposed"
     tk.set_status(a["id"], "claimed", allowed_from=("open",), assignee="claude")
     tk.set_status(a["id"], "done", allowed_from=("claimed",))
@@ -527,3 +528,19 @@ def test_proof_sections_must_be_populated_and_on_their_own_lines(projects, monke
     oneline = f"PROOF {tip}: What it does: a Demo: b Acceptance: c Leftovers: d"
     for bad in (empty, oneline):
         assert rw.proof_note(dict(t, notes=[{"at": "2026-01-01T00:00:00Z", "by": "claude", "text": bad}]), tip) is None
+
+
+def test_a_handoff_fix_of_a_failed_ticket_is_not_held_waiting(rig, monkeypatch):
+    as_human(monkeypatch)
+    bad = tk.create_ticket({"type": "build", "repo": "app", "branch": "task/was-bad", "title": "Bad", "body": "b"})
+    tk.set_status(bad["id"], "claimed", allowed_from=("open",), assignee="claude")
+    tk.set_status(bad["id"], "failed", allowed_from=("claimed",))
+    text = ("HANDOFF v1\nrepo: app\ngoal: Repair it.\nwhy: It failed.\ntickets:\n"
+            f"- title: Repair the bad one | type: fix | files: src/x.py | after: {bad['id']}\n"
+            "  accept: (1) the repair makes the original behaviour work\nrisk-note: no\n")
+    drop(text)
+    cycle(rig)
+    fix = next(t for t in tk.list_tickets() if t["type"] == "fix")
+    assert "Waits for" not in fix["body"] and fix["parent"] == bad["id"]
+    s = dict(rig.settings, max_auto_open_per_day=10, max_launches_per_day=10)
+    assert fix["id"] in [t["id"] for t in dp.auto_open(tk.list_tickets(), s, NOW)]
