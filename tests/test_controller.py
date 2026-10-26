@@ -544,3 +544,12 @@ def test_a_handoff_fix_of_a_failed_ticket_is_not_held_waiting(rig, monkeypatch):
     assert "Waits for" not in fix["body"] and fix["parent"] == bad["id"]
     s = dict(rig.settings, max_auto_open_per_day=10, max_launches_per_day=10)
     assert fix["id"] in [t["id"] for t in dp.auto_open(tk.list_tickets(), s, NOW)]
+
+
+def test_a_proposed_investigation_obeys_the_intake_limits(rig):
+    inv = tk.create_ticket({"type": "investigate", "repo": "app", "branch": "task/inv-l", "title": "Look", "body": "b"})
+    for over in ({"max_auto_open_per_day": 0}, {"auto_open_deny_repos": ["app"]}):
+        ds = dp.decide_investigations([inv], dict(rig.settings, auto_investigate=True, **over))
+        assert ds[0].skip and "intake limits" in ds[0].skip
+    ds = dp.decide_investigations([inv], dict(rig.settings, auto_investigate=True))
+    assert ds[0].skip is None

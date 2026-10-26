@@ -610,7 +610,9 @@ def waits_problem(t: dict, by_id: dict) -> str | None:
     """Why a ticket with a `Waits for:` line must not start yet (a ticket it waits for is not done), or None."""
     waits = WAITS_RE.search(t.get("body") or "")
     for dep in (waits.group(1).split(", ") if waits else []):
-        if dep in by_id and by_id[dep]["status"] != "done":
+        if dep not in by_id:
+            return f"waits for {dep} (no such ticket)"
+        if by_id[dep]["status"] != "done":
             return f"waits for {dep} ({by_id[dep]['status']})"
     return None
 
@@ -733,6 +735,9 @@ def decide_investigations(tickets: list[dict], settings: dict, now: datetime | N
             d.skip = folder_problem
         elif waits_problem(t, by_id):
             d.skip = waits_problem(t, by_id)
+        elif t["status"] == "proposed" and (t["repo"] in settings["auto_open_deny_repos"]
+                                            or settings["max_auto_open_per_day"] <= 0):
+            d.skip = "intake limits: a proposed investigation starts only where auto-open would open it"
         elif t["status"] == "proposed" and not settings["auto_investigate"]:
             d.skip = "auto_investigate is off; approve it to investigate"
         elif used >= settings["max_investigations_per_day"]:
