@@ -48,6 +48,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import areas
+from . import cursor_review
 from . import dialog
 from . import dispatch as dp
 from . import fresh
@@ -1088,6 +1089,10 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
     except (tk.TicketError, OSError) as exc:
         warn(f"{t['id']}: plain summary not adopted ({exc})")
     earned = ready_to_move(t, tip)
+    cursor_review.consider(
+        t, repo, tip, settings, emit, warn,
+        lambda tk_, ev, key, detail: _ping(tk_, ev, key, state, warn, detail),
+        lambda tid, marker, text: _note_once(tid, marker, text, warn))
 
     _settle_stale_rereviews(t, tip, state, warn)
     with _REREVIEWS_LOCK:

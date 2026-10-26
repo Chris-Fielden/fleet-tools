@@ -220,20 +220,26 @@ def level_for_branch(tickets: list[dict], branch: str, rules: dict | None = None
 VERDICT_RE = re.compile(r"^[\s*#>_`-]*VERDICT[\s*_`]*:[\s*_`]*(PASS|FAIL)\b", re.I)
 STRONG_CLAUDE_RE = re.compile(r"opus|fable", re.I)
 
-# Every reviewer that can vote, with the company behind it. `counted` is False for an
-# ADVISORY voter: its review is saved and shown but never decides a verdict or the merge
-# gate. Cursor stays advisory until the BD-120 probe proves which model it really ran on
-# (otherwise one company could vote twice through Cursor).
+# Every reviewer that can vote, with the company behind it. A Cursor review counts only when
+# its own header says "Counted: yes" (BD-136: the fleet process writes that after a passing
+# probe result for the installed CLI version and a Cursor model seen by the read hook);
+# otherwise it is saved and shown but never decides a verdict or the merge gate.
 VOTERS = {
     "codex": {"company": "openai", "counted": True},
     "claude": {"company": "anthropic", "counted": True},
-    "cursor": {"company": "cursor", "counted": False},
+    "cursor": {"company": "cursor", "counted": True},
 }
 
 
-def counted(kind: str) -> bool:
-    """Does a review of this kind count towards a verdict and the merge gate?"""
-    return bool(VOTERS.get(kind, {}).get("counted"))
+ALWAYS_REVIEW = ("codex", "claude")   # reviewers every commit gets; Cursor reviews only a passing tip
+
+
+def counted(kind: str, info: dict | None = None) -> bool:
+    """Does a review of this kind count towards a verdict and the merge gate? `info` is a parsed
+    review (parse_review): one that says it is not counted never is."""
+    if not VOTERS.get(kind, {}).get("counted"):
+        return False
+    return bool(info.get("counted", True)) if info else True
 
 
 VOTE_PASSES_NEEDED = 2   # distinct companies that must PASS (of the 3 voters)
@@ -270,9 +276,10 @@ def vote_passes(reviews: dict) -> bool:
 
 
 def voter_kind(reviewer: str) -> str | None:
-    """The voter a reviewer string such as 'Codex gpt-5' or 'cursor composer' belongs to."""
-    first = (reviewer or "").strip().split(" ")[0].lower()
-    return first if first in VOTERS else None
+    """The voter a reviewer string such as 'Codex gpt-5' or 'Cursor (composer-2.5)' belongs to.
+    The one place that decides it."""
+    m = re.match(r"[a-z]+", (reviewer or "").strip().lower())
+    return m.group(0) if m and m.group(0) in VOTERS else None
 
 
 def parse_review(text: str) -> dict:
@@ -294,9 +301,12 @@ def parse_review(text: str) -> dict:
             verdict = m.group(1).upper()
             break
     reviewer = head.get("reviewer", "")
-    low = reviewer.lower()
-    kind = next((k for k in VOTERS if low.startswith(k)), None)
-    return {"kind": kind, "reviewer": reviewer, "commit": head.get("commit"), "verdict": verdict}
+    kind = voter_kind(reviewer)
+    ok = True
+    if kind == "cursor":   # counts only if the fleet process said so AND a Cursor model was seen
+        ok = head.get("counted", "").lower() == "yes" and head.get("model", "").lower().startswith("composer")
+    return {"kind": kind, "reviewer": reviewer, "commit": head.get("commit"), "verdict": verdict,
+            "counted": ok}
 
 
 SECTION_RE = re.compile(
@@ -352,7 +362,7 @@ def check_reviews(reviews: dict, level: str, accept_codex_fail_commit: str | Non
     human's merge with leftovers): a Codex FAIL, and nothing else, when the level is below high,
     a Claude review is present and PASSES, and both reviews are of exactly that commit.
     Anything else is judged as without it."""
-    reviews = {k: v for k, v in reviews.items() if counted(k)}   # advisory votes never gate
+    reviews = {k: v for k, v in reviews.items() if counted(k, v)}   # uncounted reviews never gate
     problems = []
     if not reviews:
         problems.append("no review of this exact commit; run scripts/review.sh")

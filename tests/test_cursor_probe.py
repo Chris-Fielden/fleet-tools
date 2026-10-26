@@ -94,4 +94,99 @@ def test_probe_calls_are_safe(stub, env):
 def test_never_touches_real_home_or_fleet(stub, env):
     fleet = env / "fleet"
     run_script({**stub, "FLEET_HOME": str(fleet)})
-    assert not fleet.exists()
+    # the one thing it writes to the fleet store is the probe result file (BD-136)
+    assert [p.name for p in fleet.rglob("*")] == ["cursor-probe-result.json"]
+
+
+# --- BD-136: the review probes a-e and the result file ----------------------------------
+
+import json  # noqa: E402
+
+import fake_cursor  # noqa: E402
+
+KEY = "fake-key-aaaa-bbbb"
+
+
+@pytest.fixture
+def rig(env):
+    """A fake CLI with the key file in a fleet store whose folder is named like the real one,
+    under a temporary home (so the agent guards, which protect that name, apply to it)."""
+    home = env / "home"
+    fleet = home / ("." + "fleet")
+    (fleet / "secrets").mkdir(parents=True)
+    kf = fleet / "secrets" / "cursor-api-key"
+    kf.write_text(KEY + "\n")
+    kf.chmod(0o600)
+    bindir = env / "bin2"
+
+    class Rig:
+        pass
+    r = Rig()
+    r.bindir, r.fleet, r.keyfile, r.home = bindir, fleet, kf, home
+
+    def go(**cfg):
+        fake_cursor.install(bindir, **{"hook_model": "composer-2.5", "needs_key": True, **cfg})
+        e = {"PATH": f"{bindir}:{os.environ['PATH']}", "PROBE_OUT_DIR": str(env / "out"),
+             "FLEET_HOME": str(fleet), "HOME": str(home), "PROBE_MODEL": "mini-model"}
+        res = run_script(e)
+        out = json.loads((fleet / "cursor-probe-result.json").read_text()) \
+            if (fleet / "cursor-probe-result.json").exists() else None
+        return res, out
+    r.go = go
+    return r
+
+
+def test_all_probes_pass_and_result_file_is_written(rig):
+    res, out = rig.go()
+    assert res.returncode == 0, res.stderr
+    assert out["probes"] == {k: "pass" for k in "abcde"}, out["why"]
+    assert out["passed"] is True and out["cli_version"] == "STUB 1.2.3"
+    text = (rig.fleet / "cursor-probe-result.json").read_text()
+    assert KEY not in text and "@" not in text
+    assert oct((rig.fleet / "cursor-probe-result.json").stat().st_mode & 0o777) == "0o600"
+    # the key went only to the review-style runs, and each ran in an empty HOME
+    ran = [c for c in fake_cursor.calls(rig.bindir) if "/rv-" in (c["home"] or "") and "--trust" in c["args"]]
+    assert len(ran) == 4 and all(c["has_key"] and c["home_files"] == [] for c in ran)
+    # the older probes (P1-P12) never get the key
+    assert not [c for c in fake_cursor.calls(rig.bindir) if c["has_key"] and c not in ran]
+    assert KEY not in json.dumps(fake_cursor.calls(rig.bindir))
+    # the planted skill is removed again
+    assert list((rig.home / ".claude" / "skills").glob("fleetprobe-*")) == []
+
+
+@pytest.mark.parametrize("cfg,probe", [
+    ({"ignore_hooks": True}, "a"),                 # shell and write got through
+    ({"hook_model": "claude-4-sonnet"}, "b"),      # not a Cursor model
+    ({"ask_writes": True}, "c"),                   # ask mode wrote a file
+    ({"exit": 1}, "e"),                            # no auth in the empty HOME
+    ({"skill_leak": True}, "e"),
+])
+def test_a_failing_probe_fails_the_result(rig, cfg, probe):
+    _, out = rig.go(**cfg)
+    assert out["probes"][probe] == "fail" and out["passed"] is False, out
+
+
+def test_probe_d_needs_private_mode(rig):
+    rig.keyfile.chmod(0o644)
+    _, out = rig.go()
+    assert out["probes"]["d"] == "fail" and "readable" in out["why"]["d"] and out["passed"] is False
+
+
+def test_probe_d_needs_a_protected_folder(rig, env):
+    other = env / "elsewhere"
+    other.mkdir()
+    (other / "k").write_text(KEY)
+    (other / "k").chmod(0o600)
+    fake_cursor.install(rig.bindir, hook_model="composer-2.5", needs_key=True)
+    store = other / "store"
+    res = run_script({"PATH": f"{rig.bindir}:{os.environ['PATH']}", "PROBE_OUT_DIR": str(env / "o"),
+                      "FLEET_HOME": str(store), "HOME": str(rig.home), "CURSOR_KEY_FILE": str(other / "k")})
+    out = json.loads((store / "cursor-probe-result.json").read_text())
+    assert res.returncode == 0 and out["probes"]["d"] == "fail" and "protect" in out["why"]["d"]
+
+
+def test_no_key_file_fails_every_probe_and_spends_nothing(rig):
+    rig.keyfile.unlink()
+    _, out = rig.go()
+    assert out["probes"] == {k: "fail" for k in "abcde"} and out["passed"] is False
+    assert not [c for c in fake_cursor.calls(rig.bindir) if "--trust" in c["args"] and c["has_key"]]

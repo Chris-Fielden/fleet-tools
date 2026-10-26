@@ -944,24 +944,38 @@ def test_finished_tickets_on_the_branch_are_not_warned_about(task, repo):
     assert "WARNING" not in r.stdout
 
 
-# --- BD-124: voters are data-driven; cursor is advisory ----------------------
+# --- BD-124 / BD-136: voters are data-driven; cursor counts only when its header says so ----
 
-def test_cursor_review_parses_but_never_gates(tmp_path):
+def cursor_text(counted="yes", model="composer-2.5", verdict="PASS", commit=SHA):
+    return (f"Reviewer: Cursor (composer-2.5)\nCommit: {commit}\nModel: {model}\nCounted: {counted}\n\n"
+            f"VERDICT: {verdict}\nMUST FIX:\nSUMMARY: ok\n")
+
+
+def test_cursor_review_gates_only_when_counted(tmp_path):
     assert rk.parse_review(review_text("Cursor composer"))["kind"] == "cursor"
-    assert rk.voter_kind("Cursor composer") == "cursor" and rk.voter_kind("gpt") is None
+    assert rk.voter_kind("Cursor (composer-2.5)") == "cursor" and rk.voter_kind("gpt") is None
+    assert rk.voter_kind("Codex gpt-5") == "codex" and rk.voter_kind("Claude (opus)") == "claude"
     assert {v["company"] for v in rk.VOTERS.values()} == {"openai", "anthropic", "cursor"}
+    # no "Counted: yes" header, a non-Cursor model, or no model: not counted
+    for text in (review_text("Cursor composer"), cursor_text(counted="no"),
+                 cursor_text(model="claude-4-sonnet"), cursor_text(model="none")):
+        assert rk.parse_review(text)["counted"] is False
+    assert rk.parse_review(cursor_text())["counted"] is True
     d = tmp_path / "rv"
     put(d, "1.md", review_text("Codex"))
     put(d, "2.md", review_text("Claude (opus)"))
-    put(d, "3.md", review_text("Cursor composer", verdict="FAIL"))
+    put(d, "3.md", cursor_text(counted="no", verdict="FAIL"), age=10)
     got = rk.latest_reviews(d, SHA)
     assert "cursor" in got
-    assert rk.check_reviews(got, "high") == []
-    # a cursor PASS cannot stand in for a missing counted reviewer
-    put(d, "4.md", review_text("Cursor composer"), age=0)
-    only = {"cursor": got["cursor"]}
-    assert rk.check_reviews(only, "low")
-    assert not rk.counted("cursor") and rk.counted("codex") and rk.counted("claude")
+    assert rk.check_reviews(got, "high") == []          # the uncounted FAIL does not gate
+    put(d, "4.md", cursor_text(verdict="FAIL"), age=0)
+    assert rk.check_reviews(rk.latest_reviews(d, SHA), "high")   # a counted FAIL does
+    # a cursor PASS cannot stand in for the Claude review high risk needs
+    only = {"codex": rk.parse_review(review_text("Codex")), "cursor": rk.parse_review(cursor_text())}
+    only["codex"]["file"] = only["cursor"]["file"] = "x"
+    assert any("Claude" in p for p in rk.check_reviews(only, "high"))
+    assert rk.counted("cursor") and rk.counted("codex") and rk.counted("claude")
+    assert not rk.counted("cursor", {"counted": False}) and not rk.counted("nobody")
 
 
 def test_agents_and_creators_exclude_cursor():

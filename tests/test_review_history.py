@@ -145,11 +145,17 @@ def test_symlinked_reviews_dir_is_ignored(repo, tmp_path):
     assert rh.review_history(repo, wt, "HEAD", "HEAD") == []
 
 
-def test_cursor_vote_is_advisory_in_record_verdict(rig):
-    tk.record_verdict("task/demo", "app", "FAIL", A, "Cursor composer")   # cannot start a verdict
-    assert rig.get()["verdict"] is None and rounds(rig) in (None, [])
+def test_uncounted_cursor_review_is_never_recorded(rig):
+    tk.record_verdict("task/demo", "app", "FAIL", A, "Cursor (composer-2.5)", counted=False)
+    assert rig.get()["verdict"] is None
     tk.record_verdict("task/demo", "app", "PASS", A, "Codex")
-    tk.record_verdict("task/demo", "app", "FAIL", A, "Cursor composer")
+    tk.record_verdict("task/demo", "app", "FAIL", A, "Cursor (composer-2.5)", counted=False)
     v = rig.get()["verdict"]
-    assert v["result"] == "PASS" and v["reviews"]["cursor"]["result"] == "FAIL"
-    assert rig.get().get("fail_commits", []) == [] and rounds(rig) == [A]
+    assert v["result"] == "PASS" and "cursor" not in v["reviews"]
+
+
+def test_counted_cursor_vote_is_recorded(rig):
+    tk.record_verdict("task/demo", "app", "PASS", A, "Codex")
+    tk.record_verdict("task/demo", "app", "FAIL", A, "Cursor (composer-2.5)")
+    v = rig.get()["verdict"]
+    assert v["result"] == "FAIL" and v["reviews"]["cursor"]["result"] == "FAIL"
