@@ -606,6 +606,15 @@ def _stamp_time(text: str | None) -> datetime | None:
         return None
 
 
+def waits_problem(t: dict, by_id: dict) -> str | None:
+    """Why a ticket with a `Waits for:` line must not start yet (a ticket it waits for is not done), or None."""
+    waits = WAITS_RE.search(t.get("body") or "")
+    for dep in (waits.group(1).split(", ") if waits else []):
+        if dep in by_id and by_id[dep]["status"] != "done":
+            return f"waits for {dep} ({by_id[dep]['status']})"
+    return None
+
+
 def auto_open_problem(t: dict, by_id: dict, rules: dict | None, settings: dict, now: datetime,
                       opened: list[datetime]) -> str | None:
     """Why this proposed ticket stays proposed for now, or None when the rule opens it. Nothing
@@ -620,11 +629,9 @@ def auto_open_problem(t: dict, by_id: dict, rules: dict | None, settings: dict, 
     if t["branch"] == tk.leftovers_branch(t.get("parent") or "") and by_id.get(t.get("parent")) is not None \
             and by_id[t["parent"]]["status"] in ("proposed", "open", "claimed", "review"):
         return f"a leftovers ticket waits until {t['parent']} is finished"
-    waits = WAITS_RE.search(t.get("body") or "")
-    if waits:   # the controller's ordering: opens only once every ticket it waits for is done
-        for dep in waits.group(1).split(", "):
-            if dep in by_id and by_id[dep]["status"] != "done":
-                return f"waits for {dep} ({by_id[dep]['status']})"
+    wait = waits_problem(t, by_id)   # the controller's ordering: opens only once every ticket it waits for is done
+    if wait:
+        return wait
     if t["repo"] in settings["auto_open_deny_repos"]:
         return f"repo {t['repo']} is on auto_open_deny_repos"
     hour = sum(1 for at in opened if (now - at).total_seconds() < tk.AGENT_TICKET_WINDOW)
@@ -715,6 +722,7 @@ def decide_investigations(tickets: list[dict], settings: dict, now: datetime | N
                      key=lambda t: (t["created_by"] != "human", *tk.oldest_first_key(t)))
     decisions = []
     picked = False
+    by_id = {t["id"]: t for t in tickets}
     stuck = startup_block.research_hold()   # one stuck start holds every research launch
     for t in waiting:
         d = Decision(ticket=t, name=t["id"].lower(), agent=agent,
@@ -723,6 +731,8 @@ def decide_investigations(tickets: list[dict], settings: dict, now: datetime | N
             d.skip = f"{BLOCKED_SKIP} ({stuck}; fleet unblock {stuck})"
         elif folder_problem:
             d.skip = folder_problem
+        elif waits_problem(t, by_id):
+            d.skip = waits_problem(t, by_id)
         elif t["status"] == "proposed" and not settings["auto_investigate"]:
             d.skip = "auto_investigate is off; approve it to investigate"
         elif used >= settings["max_investigations_per_day"]:

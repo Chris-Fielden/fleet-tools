@@ -499,3 +499,31 @@ def test_done_waits_for_the_ship_result_file(projects, monkeypatch):
     (ship / f"{t['id']}.result").write_text(json.dumps({"code": 0, "message": "ok", "finished": "x"}))
     assert [x["id"] for x in dp.reconcile(tk.list_tickets(), s)] == [t["id"]]
     assert tk.load_ticket(t["id"])["status"] == "done"
+
+
+def test_long_titles_get_a_valid_task_name(rig):
+    text = HANDOFF.replace("Add the helper", "Add a very long helper title that goes on and on and on")
+    drop(text)
+    cycle(rig)
+    for t in tk.list_tickets():
+        assert dp.TASK_NAME_RE.fullmatch(t["branch"].removeprefix("task/")), t["branch"]
+
+
+def test_a_waiting_investigation_does_not_launch_early(rig):
+    inv = tk.create_ticket({"type": "investigate", "repo": "app", "branch": "task/inv-w", "title": "Look",
+                            "body": "Waits for: BD-99"}, needs_approval=True)
+    first = tk.create_ticket({"type": "build", "repo": "app", "branch": "task/first-w", "title": "First", "body": "b"})
+    body = f"Look\n\nWaits for: {first['id']}"
+    tk.append_to_body(inv["id"], "Waits", f"Waits for: {first['id']}") if False else None
+    t = dict(tk.load_ticket(inv["id"]), body=body)
+    assert dp.waits_problem(t, {first["id"]: first}) and "waits for" in dp.waits_problem(t, {first["id"]: first})
+    ds = dp.decide_investigations([t, first], dict(rig.settings, auto_investigate=True))
+    assert ds and ds[0].skip and "waits for" in ds[0].skip
+
+
+def test_proof_sections_must_be_populated_and_on_their_own_lines(projects, monkeypatch):
+    t, tip = review_ready_ticket(monkeypatch, projects)
+    empty = f"PROOF {tip}: x.\nWhat it does:\nDemo:\nAcceptance:\nLeftovers:"
+    oneline = f"PROOF {tip}: What it does: a Demo: b Acceptance: c Leftovers: d"
+    for bad in (empty, oneline):
+        assert rw.proof_note(dict(t, notes=[{"at": "2026-01-01T00:00:00Z", "by": "claude", "text": bad}]), tip) is None

@@ -256,7 +256,7 @@ def save_state(state: dict) -> None:
 
 def _slug(title: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
-    return s[:36].strip("-") or "work"
+    return s[:30].strip("-") or "work"   # "h<6>-<n>-" takes up to 11 of the 41 characters a task name may have
 
 
 def _branch(hid: str, n: int, title: str) -> str:
@@ -307,6 +307,8 @@ def _prevalidate(plan: dict, hid: str, existing: list[dict], projects_dir: Path 
             raise Rejected(f"repo {plan['repo']} is not a known repo folder")
     for n, t in enumerate(plan["tickets"], 1):
         branch = _branch(hid, n, t["title"])
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,40}", branch.removeprefix("task/")):
+            raise Rejected(f"ticket '{t['title'][:40]}' cannot be given a valid task name")
         mine = _find(existing, MARKER.format(hid=hid, n=n))
         clash = next((o for o in existing if o["branch"] == branch and o is not mine), None)
         if clash:

@@ -187,14 +187,22 @@ def proof_note(t: dict, tip: str) -> dict | None:
         m = _PROOF_COMMIT_RE.match(text)
         if not m or not tip.startswith(m.group(1).lower()):
             continue
-        low = text.lower()
-        if not all(f"{label}:" in low for label in PROOF_LABELS) or tk.check_plain(text, "PROOF"):
+        if tk.check_plain(text, "PROOF"):
             continue
-        demo = low.split("demo:", 1)[1]
-        for label in PROOF_LABELS:
-            if label != "demo" and f"{label}:" in demo:
-                demo = demo.split(f"{label}:", 1)[0]
-        if len([ln for ln in demo.splitlines() if ln.strip()]) > PROOF_DEMO_LINES + 1:
+        parts: dict[str, list[str]] = {}
+        current = None
+        for line in text.splitlines()[1:]:
+            head, sep, rest = line.partition(":")
+            if sep and head.strip().lower() in PROOF_LABELS and head == head.lstrip():
+                current = head.strip().lower()
+                parts.setdefault(current, [])
+                if rest.strip():
+                    parts[current].append(rest.strip())
+            elif current is not None and line.strip():
+                parts[current].append(line)
+        if set(parts) != set(PROOF_LABELS) or any(not v for v in parts.values()):
+            continue   # every part present on its own line and not empty
+        if len(parts["demo"]) > PROOF_DEMO_LINES:
             continue
         return n
     return None
