@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from . import areas
+from . import controller
 from . import dispatch as dp
 from . import dupes
 from . import governor
@@ -177,8 +178,9 @@ def _cycle(settings: dict, emit, warn, reserve=None, offer=None, retry_tabs=None
     if checks is not None:   # --watch only; before anything mirrors, or a mirror would undo the drag
         _pull_board_priorities(emit, warn)
     _reconcile(settings, emit, warn)
+    controller.run_cycle(settings, warn, emit, lambda t: kaneo.mirror_quietly(t, warn))
     for t in dp.auto_open(tk.list_tickets(), settings, clock.now(), warn):
-        emit(f"{t['id']}  auto-opened (filed from handoff {t.get('origin') or t['parent']})")
+        emit(f"{t['id']}  auto-opened (filed by {t['created_by']})")
         kaneo.mirror_quietly(t, warn)
     if retry_tabs is not None:
         done = {t["id"] for t in tk.list_tickets() if t["status"] == "done"}

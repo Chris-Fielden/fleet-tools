@@ -64,7 +64,7 @@ def test_closing_the_terminal_mid_ship_still_merges(reviewed, env):
     assert wait_for(lambda: tk.load_ticket(t["id"])["status"] == "done"), "the detached job did not finish"
     log = env / "fleet" / "ship" / f"{t['id']}.log"
     # the status flips inside the reconcile; the job writes this line just after it returns
-    assert wait_for(lambda: "merged and marked done" in log.read_text()), log.read_text()
+    assert wait_for(lambda: "merged, but is still" in log.read_text()), log.read_text()
     assert ship_cli._status(t["id"]) == 0
 
 

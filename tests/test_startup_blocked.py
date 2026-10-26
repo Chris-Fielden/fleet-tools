@@ -61,7 +61,7 @@ def test_not_ready_holds_pings_once_and_never_retries(projects, herdr_log, monke
     monkeypatch.setenv("FAKE_HERDR_NOT_READY", "1")
     first, second = idea(), idea()
     assert dispatch_main(["--once"]) == 1
-    assert tk.load_ticket(first["id"])["status"] == "proposed"   # put back, as for any failed launch
+    assert tk.load_ticket(first["id"])["status"] == "open"   # put back, as for any failed launch
     assert list(sb.load()) == [first["id"]] and sb.research_hold() == first["id"]
     assert len(starts(herdr_log)) == 1
     assert [(i, e) for i, e, _ in pings] == [(first["id"], "needs_human")]
@@ -74,7 +74,7 @@ def test_not_ready_holds_pings_once_and_never_retries(projects, herdr_log, monke
     out = capsys.readouterr().out
     assert "startup blocked" in out
     assert len(starts(herdr_log)) == 1 and len(pings) == 1
-    assert tk.load_ticket(second["id"])["status"] == "proposed"
+    assert tk.load_ticket(second["id"])["status"] == "open"
     assert dp.launches_today(dp.local_day(dp.datetime.now(dp.timezone.utc),
                                           dp.load_settings()["timezone"])) == used
 

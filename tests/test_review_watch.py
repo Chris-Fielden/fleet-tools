@@ -30,6 +30,20 @@ def ntfy():
     fake.stop()
 
 
+PROOF_NOTE = ("PROOF {tip}: the change does the demo work.\nWhat it does: the demo work.\nDemo: `demo`\nok\n"
+              "Acceptance: (1) passed\nLeftovers: none")
+
+
+def add_proof(monkeypatch, ticket_id, tip):
+    """The PROOF note (written as the agent) and the plain summary a ticket needs to reach review."""
+    monkeypatch.setenv("CLAUDECODE", "1")
+    try:
+        tk.add_note(ticket_id, PROOF_NOTE.format(tip=tip))
+    finally:
+        monkeypatch.delenv("CLAUDECODE")
+    tk.set_summary(ticket_id, "It does the demo work so people can use it. Nothing is needed from the human yet.")
+
+
 class Rig:
     """One claimed build ticket on a real branch with a task folder, and a fake
     herdr whose one agent is named after the ticket."""
@@ -86,15 +100,21 @@ class Rig:
     def verdict(self, result="PASS", reviewer="Codex", commit=None):
         tk.record_verdict("task/demo", "app", result, commit or self.tip(), reviewer)
 
-    def summary(self, text="All done.", by="claude"):
-        """A note as the agent writes it (`ticket note` run inside its session)."""
+    def summary(self, text="All done.", by="claude", proof=None):
+        """A note as the agent writes it (`ticket note` run inside its session). The ordinary final
+        summary also brings the PROOF note and plain summary a ticket needs to reach review."""
+        proof = text == "All done." if proof is None else proof
         for var in ("CLAUDECODE", "CODEX_SANDBOX"):
             self.monkeypatch.delenv(var, raising=False)
         self.monkeypatch.setenv("CLAUDECODE" if by == "claude" else "CODEX_SANDBOX", "1")
         try:
             tk.add_note(self.id, text)
+            if proof:   # the evidence a ticket needs to reach review: a PROOF note for the tip and a plain summary
+                tk.add_note(self.id, PROOF_NOTE.format(tip=self.tip()))
         finally:
             self.monkeypatch.delenv("CLAUDECODE" if by == "claude" else "CODEX_SANDBOX", raising=False)
+        if proof:
+            tk.set_summary(self.id, "It does the demo work so people can use it. Nothing is needed from the human yet.")
 
     def get(self):
         return tk.load_ticket(self.id)
@@ -260,6 +280,7 @@ def test_high_risk_needs_the_gate_not_just_one_pass(rig, ntfy):
     assert rig.get()["status"] == "claimed"
     rig.verdict("PASS", "Claude (opus)")
     rig.summary("second review in")
+    rig.summary()   # proof and plain summary after the last review
     rig.cycle(1)
     assert rig.get()["status"] == "review"
 
@@ -281,6 +302,7 @@ def test_back_to_claimed_when_the_tip_moves_or_the_agent_is_busy(rig, ntfy):
     rw.wait_rereviews()   # the idle agent's new commit starts a re-review (it cannot run in this rig)
     rig.verdict()
     rig.summary("new summary")
+    rig.summary()   # the proof and the plain summary of the new tip
     rig.cycle(4)
     assert rig.get()["status"] == "review"
     assert len(ntfy.requests) == 2   # a new commit pings again

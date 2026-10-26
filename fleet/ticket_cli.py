@@ -97,6 +97,10 @@ def _build_parser() -> argparse.ArgumentParser:
     note.add_argument("id", type=tk.normalize_id)
     note.add_argument("text")
 
+    summ = sub.add_parser("summary", help="set a ticket's plain summary: what it is, why it matters, where it stands")
+    summ.add_argument("id", type=tk.normalize_id)
+    summ.add_argument("text")
+
     rr = sub.add_parser("review-result",
                         help="record a saved review's result on a branch's tickets (run by scripts/review.sh)")
     rr.add_argument("--branch", required=True)
@@ -114,7 +118,7 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="level for the files this range changes, with the rule for each")
     risk.add_argument("--dir", default=".", help="the git repo to diff in (default: here)")
     risk.add_argument("--raise", dest="raise_to", choices=rk.LEVELS, metavar="LEVEL",
-                      help="raise the stored level (humans only; a level can never be lowered)")
+                      help="raise the stored level (a level can never be lowered)")
 
     gate = sub.add_parser("gate", help="merge gate: risk level and review check for a task branch")
     gate.add_argument("--base", required=True)
@@ -266,6 +270,9 @@ def _cmd_show(args) -> int:
         print(json.dumps(t, indent=2))
         return 0
     print(f"{t['id']}  {t['title']}")
+    print()
+    print(tk.summary_text(t))
+    print()
     for name in ("status", "priority", "risk", "type", "repo", "branch", "commit", "parent",
                  "created_by", "assignee", "verdict", "close_note", "base_commit", "created_at", "updated_at"):
         value = tk.verdict_line(t.get(name)) if name == "verdict" else t.get(name)
@@ -276,6 +283,12 @@ def _cmd_show(args) -> int:
     for n in t.get("notes", []):
         print(f"\n--- note by {n['by']}, {n['at']} ---")
         print(n["text"])
+    return 0
+
+
+def _cmd_summary(args) -> int:
+    t = _tracker().set_summary(args.id, args.text)
+    print(f"{t['id']} summary saved")
     return 0
 
 
@@ -525,7 +538,7 @@ def _cmd_sync(args) -> int:
 def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
     handler = {"new": _cmd_new, "list": _cmd_list, "show": _cmd_show, "approve": _cmd_approve,
-               "priority": _cmd_priority, "fix-titles": _cmd_fix_titles, "close": _cmd_close, "submit": _cmd_submit, "note": _cmd_note, "review-result": _cmd_review_result, "risk": _cmd_risk, "gate": _cmd_gate,
+               "priority": _cmd_priority, "fix-titles": _cmd_fix_titles, "close": _cmd_close, "submit": _cmd_submit, "note": _cmd_note, "summary": _cmd_summary, "review-result": _cmd_review_result, "risk": _cmd_risk, "gate": _cmd_gate,
                "dupes": _cmd_dupes, "sync": _cmd_sync,
                "claim-area": _cmd_claim_area, "release-area": _cmd_release_area}
     try:

@@ -267,7 +267,7 @@ def test_once_launches_one_investigation_and_one_build(projects, herdr_log):
     assert dispatch_main(["--once"]) == 0
     status = {t["id"]: t["status"] for t in tk.list_tickets()}
     assert status[build["id"]] == "claimed"
-    assert sorted([status[a["id"]], status[b["id"]]]) == ["claimed", "proposed"]
+    assert sorted([status[a["id"]], status[b["id"]]]) == ["claimed", "open"]
 
 
 def test_once_respects_the_daily_limit(projects, herdr_log, env):
@@ -277,7 +277,7 @@ def test_once_respects_the_daily_limit(projects, herdr_log, env):
     assert dispatch_main(["--once"]) == 0
     assert dispatch_main(["--once"]) == 0
     status = sorted(t["status"] for t in tk.list_tickets())
-    assert status == ["claimed", "proposed"]
+    assert status == ["claimed", "open"]
 
 
 def test_once_launch_failure_puts_ticket_back_and_does_not_count(projects, herdr_log, monkeypatch):
@@ -285,7 +285,7 @@ def test_once_launch_failure_puts_ticket_back_and_does_not_count(projects, herdr
     monkeypatch.setenv("FAKE_HERDR_STATE", "idle")
     assert dispatch_main(["--once"]) == 1
     got = tk.load_ticket(t["id"])
-    assert got["status"] == "proposed" and got["assignee"] is None and "started_at" not in got
+    assert got["status"] == "open" and got["assignee"] is None and "started_at" not in got
     assert [x for x in calls(herdr_log) if x[:2] == ["tab", "close"]] == [["tab", "close", "w1:t7"]]
     assert "LAUNCH_FAILED" in dp.log_path().read_text()
 
@@ -337,7 +337,7 @@ def test_log_failure_during_research_launch_rolls_back(projects, herdr_log, monk
             raise OSError("disk full")
     monkeypatch.setattr("fleet.launch.dp.log", boom)
     assert dispatch_main(["--once"]) == 1
-    assert tk.load_ticket(t["id"])["status"] == "proposed"
+    assert tk.load_ticket(t["id"])["status"] == "open"
     assert not herdr_log.exists()
 
 
@@ -436,7 +436,7 @@ def test_research_dir_inside_or_around_fleet_home_is_refused(projects, herdr_log
     assert dispatch_main(["--dry-run"]) == 0
     assert "skip: research_dir" in capsys.readouterr().out
     assert dispatch_main(["--once"]) == 0
-    assert tk.load_ticket(t["id"])["status"] == "proposed"
+    assert tk.load_ticket(t["id"])["status"] == "open"
     assert not herdr_log.exists()
 
 
@@ -480,7 +480,7 @@ def test_missing_guard_hooks_stop_the_launch(projects, herdr_log, monkeypatch, e
     t = idea()
     monkeypatch.setattr("fleet.launch.HOOKS_DIR", env / "nowhere" / ".claude" / "hooks")
     assert dispatch_main(["--once"]) == 1
-    assert tk.load_ticket(t["id"])["status"] == "proposed"
+    assert tk.load_ticket(t["id"])["status"] == "open"
     assert not herdr_log.exists()
 
 
@@ -513,7 +513,7 @@ def test_symlinked_claude_folder_is_not_written_through(projects, herdr_log, env
     assert sorted(p.name for p in victim.iterdir()) == (["settings.json"] if link == "file" else [])
     if link == "file":
         assert (victim / "settings.json").read_text() == "keep"
-    assert tk.load_ticket(t["id"])["status"] == "proposed" and not herdr_log.exists()
+    assert tk.load_ticket(t["id"])["status"] == "open" and not herdr_log.exists()
 
 
 def test_git_timeout_during_research_launch_rolls_back(projects, herdr_log, monkeypatch):
@@ -524,7 +524,7 @@ def test_git_timeout_during_research_launch_rolls_back(projects, herdr_log, monk
     monkeypatch.setattr("fleet.launch.dp._git", slow)
     assert dispatch_main(["--once"]) == 1
     got = tk.load_ticket(t["id"])
-    assert got["status"] == "proposed" and got["assignee"] is None and "started_at" not in got
+    assert got["status"] == "open" and got["assignee"] is None and "started_at" not in got
 
 
 def test_ticket_folder_that_is_its_own_repo_is_refused(projects, herdr_log, env):
@@ -533,7 +533,7 @@ def test_ticket_folder_that_is_its_own_repo_is_refused(projects, herdr_log, env)
     folder.mkdir(parents=True)
     __import__("subprocess").run(["git", "init", "-q", str(folder)], check=True)
     assert dispatch_main(["--once"]) == 1
-    assert tk.load_ticket(t["id"])["status"] == "proposed"
+    assert tk.load_ticket(t["id"])["status"] == "open"
     assert not (folder / ".claude").exists() and not herdr_log.exists()
 
 

@@ -222,6 +222,10 @@ def _message(ticket: dict, event: str, cfg: dict, detail: str | None = None) -> 
     if event == "ship":
         title = f"{ticket['id']} ready to ship"
         text = f"{ticket.get('risk', 'unknown')} risk · {_short(ticket['title'])}"
+        if detail:   # the first line of the PROOF note, quoted; it goes to a phone, so no secret may ride along
+            quote = f'{text} · "{_short(detail, 200)}"'
+            text = quote if not tk.check_secrets("notification", quote) else text
+        detail = None
     elif event == "oncall":   # `detail` is the on-call ticket's id
         title = f"{ticket['id']} failed, on-call {_short(detail or '?')} is on it"
         text = f"{ticket['type']} · {ticket['status']} · {_short(ticket['title'])}"

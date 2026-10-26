@@ -168,6 +168,70 @@ def has_summary_after_review(t: dict) -> bool:
                for n in t.get("notes", [])) or human_submitted(t)
 
 
+PROOF_PREFIX = "PROOF"
+PROOF_LABELS = ("what it does", "demo", "acceptance", "leftovers")   # each must head a part of the note
+PROOF_DEMO_LINES = 40
+_PROOF_COMMIT_RE = re.compile(r"^PROOF[ :]+([0-9a-f]{7,40})\b", re.I)
+
+
+def proof_note(t: dict, tip: str) -> dict | None:
+    """The newest PROOF note by the ticket's agent for exactly this tip, or None. It must start
+    with PROOF and the tip's commit id, spell out what the change does, show the agent's own
+    demo (at most PROOF_DEMO_LINES lines), each acceptance test and each leftover, and use no
+    unexplained shorthand. Only its shape is checked here, never whether it is true: the
+    reviewers read it."""
+    for n in reversed(t.get("notes", [])):
+        text = n["text"]
+        if n["by"] != t.get("assignee") or not text.startswith(PROOF_PREFIX):
+            continue
+        m = _PROOF_COMMIT_RE.match(text)
+        if not m or not tip.startswith(m.group(1).lower()):
+            continue
+        if tk.check_plain(text, "PROOF"):
+            continue
+        parts: dict[str, list[str]] = {}
+        current = None
+        for line in text.splitlines()[1:]:
+            head, sep, rest = line.partition(":")
+            if sep and head.strip().lower() in PROOF_LABELS and head == head.lstrip():
+                current = head.strip().lower()
+                parts.setdefault(current, [])
+                if rest.strip():
+                    parts[current].append(rest.strip())
+            elif current is not None and line.strip():
+                parts[current].append(line)
+        if set(parts) != set(PROOF_LABELS) or any(not v for v in parts.values()):
+            continue   # every part present on its own line and not empty
+        if len(parts["demo"]) > PROOF_DEMO_LINES:
+            continue
+        return n
+    return None
+
+
+def ready_to_move(t: dict, tip: str) -> bool:
+    """The evidence a ticket needs before it moves to review: a passing verdict for the exact
+    tip, the agent's summary after it, and (an agent's ticket) a PROOF note for the tip and a
+    current plain summary. A human-built ticket has no agent to write these."""
+    if not (passed_for_tip(t, tip) and has_summary_after_review(t)):
+        return False
+    if human_submitted(t) or prepared_after_review(t):
+        return True
+    return proof_note(t, tip) is not None and tk.summary_current(t)
+
+
+def prepared_after_review(t: dict) -> bool:
+    """The prep pass (the dispatcher) re-checked a branch it changed after the verdict and said
+    so in a note: no agent is around to write a new PROOF, and the pass checked the new tip itself."""
+    v = t.get("verdict")
+    return v is not None and any(n["by"] == "human" and n["at"] >= v["at"] and n["text"].startswith(prep.PASS_NOTE_PREFIX)
+                                 for n in t.get("notes", []))
+
+
+def proof_first_line(t: dict, tip: str) -> str | None:
+    n = proof_note(t, tip)
+    return n["text"].splitlines()[0] if n else None
+
+
 def human_submitted(t: dict) -> bool:
     """A human-built ticket with no agent that a human handed over with `ticket submit`: that
     note stands in for the agent's summary, whenever it was saved. The verdict must still be
@@ -253,7 +317,7 @@ def _ready_ping(t: dict, tip: str, settings: dict, now: datetime, state: dict, w
     except OSError as exc:
         warn(f"prep state unreadable ({exc}); the ready ping of {t['id']} waits")
         return
-    _ping(t, "ship", f"{t['id']}:ship:{tip}", state, warn)  # a send that failed is retried
+    _ping(t, "ship", f"{t['id']}:ship:{tip}", state, warn, proof_first_line(t, tip))  # a send that failed is retried
 
 
 def _ready_reminders(tickets: list[dict], state: dict, now: datetime, warn) -> None:
@@ -1019,7 +1083,11 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
         return
     agent_state = agent.get("agent_status") if agent else None
     stopped = agent_state in ("idle", "done") or (agent is None and human_submitted(t))   # no agent was ever on it
-    earned = passed_for_tip(t, tip) and has_summary_after_review(t)
+    try:
+        t = tk.adopt_plain_summary(t)
+    except (tk.TicketError, OSError) as exc:
+        warn(f"{t['id']}: plain summary not adopted ({exc})")
+    earned = ready_to_move(t, tip)
 
     _settle_stale_rereviews(t, tip, state, warn)
     with _REREVIEWS_LOCK:
@@ -1042,7 +1110,7 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
             return
         if outcome == "passed":   # no agent left to wait for: the new PASS is judged like any ready ticket
             stopped = True
-            earned = passed_for_tip(t, tip) and has_summary_after_review(t)
+            earned = ready_to_move(t, tip)
         else:
             earned = False
     elif agents_known and agent is None and earned and vouched_by_rereview(t):

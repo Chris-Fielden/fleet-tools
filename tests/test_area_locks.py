@@ -75,12 +75,15 @@ def test_agent_ticket_starts_proposed_and_cannot_be_opened_by_an_agent(projects,
     assert f"AUTO_OPEN {t['id']}" in dp.log_path().read_text()
 
 
-@pytest.mark.parametrize("make", ["no_origin", "agent_handoff", "unapproved_handoff", "chained"])
-def test_stays_proposed_without_a_human_handoff(projects, monkeypatch, make):
+# --- T1: nothing waits for a human: any filer, any type, any risk opens, within the caps -----
+
+@pytest.mark.parametrize("make", ["no_origin", "agent_handoff", "unapproved_handoff", "chained", "no_criteria",
+                                  "no_areas", "high_areas", "stored_high"])
+def test_every_proposed_ticket_opens_without_a_handoff(projects, monkeypatch, make):
     h = handoff(monkeypatch)
     if make == "no_origin":
         t = controller_ticket(monkeypatch, h, origin=None)
-    elif make == "agent_handoff":   # an agent-filed investigate ticket is not a handoff
+    elif make == "agent_handoff":
         as_agent(monkeypatch)
         a = tk.create_ticket({"type": "investigate", "repo": "app", "branch": "task/inv", "title": "I", "body": "b"})
         t = controller_ticket(monkeypatch, a)
@@ -88,76 +91,54 @@ def test_stays_proposed_without_a_human_handoff(projects, monkeypatch, make):
         as_human(monkeypatch)
         p = tk.create_ticket({"type": "investigate", "repo": "app", "branch": "task/inv", "title": "I", "body": "b"})
         t = controller_ticket(monkeypatch, p)
-    elif make == "chained":   # work that was itself auto-opened cannot vouch for more
+    elif make == "chained":
         first = controller_ticket(monkeypatch, h, 1, type="investigate", parent=h["id"], areas=None, body="look")
         assert opened(None) == [first["id"]]
         t = controller_ticket(monkeypatch, tk.load_ticket(first["id"]), 2)
-    assert opened(None) == []
-    assert tk.load_ticket(t["id"])["status"] == "proposed"
+    elif make == "no_criteria":
+        t = controller_ticket(monkeypatch, h, body="Add a helper, no criteria listed.")
+    elif make == "no_areas":
+        t = controller_ticket(monkeypatch, h, areas=None)
+    elif make == "high_areas":
+        t = controller_ticket(monkeypatch, h, areas=[".claude/hooks/guard_bash.py"])
+    else:
+        t = controller_ticket(monkeypatch, h)
+        tk.raise_risk(t["id"], "high")
+    assert t["id"] in opened(None)
+    assert tk.load_ticket(t["id"])["status"] == "open"
 
 
-def test_investigate_opens_only_under_a_handoff_parent(projects, monkeypatch):
+def test_investigate_without_a_parent_opens(projects, monkeypatch):
     h = handoff(monkeypatch)
     ok = controller_ticket(monkeypatch, h, 1, type="investigate", parent=h["id"], areas=None, body="look")
     other = controller_ticket(monkeypatch, h, 2, type="investigate", areas=None, body="look")
-    assert opened(None) == [ok["id"]]
-    assert tk.load_ticket(other["id"])["status"] == "proposed"
+    assert opened(None) == [ok["id"], other["id"]]
 
 
-def test_parent_only_investigate_opens(projects, monkeypatch):
-    h = handoff(monkeypatch)
-    inv = controller_ticket(monkeypatch, h, 1, type="investigate", parent=h["id"], areas=None, origin=None, body="look")
-    assert "origin" not in inv
-    assert opened(None) == [inv["id"]]
-
-
-def test_criteria_are_needed(projects, monkeypatch):
-    h = handoff(monkeypatch)
-    t = controller_ticket(monkeypatch, h, body="Add a helper, no criteria listed.")
-    assert opened(None) == [] and tk.load_ticket(t["id"])["status"] == "proposed"
+def test_criteria_parser_still_reads_a_body(projects):
     assert dp.acceptance_criteria(GOOD_BODY) == ["the helper returns the sorted names", "a test covers the empty case"]
     assert dp.acceptance_criteria("Acceptance:\n- short\n") == []
     assert dp.acceptance_criteria("## Acceptance criteria\n1. it prints the list\n") == ["it prints the list"]
 
 
-# --- 18: a high-risk file set never auto-opens ----------------------------------------
-
-@pytest.mark.parametrize("areas_, body", [
-    ([".claude/hooks/guard_bash.py"], GOOD_BODY),
-    (["fleet/dispatch_cli.py"], GOOD_BODY),
-    (["fleet/dispatch*.py"], GOOD_BODY),
-    (["**"], GOOD_BODY),
-    (["fleet/*.py"], GOOD_BODY),
-    ([".claude"], GOOD_BODY),
-    (["CLAUDE.md"], GOOD_BODY),
-    (["src/auth/login.py"], GOOD_BODY),
-    (["k8s/"], GOOD_BODY),
-    (["docs/x.md"], GOOD_BODY + "\nAlso edit scripts/review.sh.\n"),
-])
-def test_high_risk_file_set_never_auto_opens(projects, monkeypatch, areas_, body):
-    h = handoff(monkeypatch)
-    t = controller_ticket(monkeypatch, h, areas=areas_, body=body)
-    assert opened(None) == []
-    assert tk.load_ticket(t["id"])["status"] == "proposed"
-
-
-def test_stored_high_risk_never_auto_opens(projects, monkeypatch):
+def test_auto_open_is_logged(projects, monkeypatch):
     h = handoff(monkeypatch)
     t = controller_ticket(monkeypatch, h)
-    tk.raise_risk(t["id"], "high")
-    assert opened(None) == []
-
-
-def test_ordinary_file_set_opens(projects, monkeypatch):
-    h = handoff(monkeypatch)
-    t = controller_ticket(monkeypatch, h, areas=["fleet/notes.py", "tests/test_notes.py"])
     assert opened(None) == [t["id"]]
+    assert f"AUTO_OPEN {t['id']}" in dp.log_path().read_text()
 
 
-def test_no_declared_areas_stays_proposed(projects, monkeypatch):
-    h = handoff(monkeypatch)
-    controller_ticket(monkeypatch, h, areas=None)
+def test_leftovers_ticket_waits_for_its_parent_then_opens_at_its_risk(projects, monkeypatch):
+    as_human(monkeypatch)
+    parent = tk.create_ticket({"type": "build", "repo": "app", "branch": "task/par", "title": "P", "body": "b"})
+    tk.raise_risk(parent["id"], "high")
+    tk.set_status(parent["id"], "claimed", allowed_from=("open",), assignee="claude")
+    left = tk.create_leftovers_ticket(tk.load_ticket(parent["id"]), "Leftovers", "items")
+    assert left["status"] == "proposed" and left["risk"] == "high"
     assert opened(None) == []
+    tk.set_status(parent["id"], "done", allowed_from=("claimed",))
+    assert opened(None) == [left["id"]]
+    assert tk.load_ticket(left["id"])["risk"] == "high"
 
 
 # --- 19: caps are respected -----------------------------------------------------------

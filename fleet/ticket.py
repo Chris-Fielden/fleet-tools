@@ -34,10 +34,12 @@ FIELDS = (
 # Optional fields: may be absent from a stored ticket.
 OPTIONAL_FIELDS = ("close_note", "base_commit", "seq", "priority", "risk", "notes", "started_at",
                    "oncall", "oncall_base", "fail_commits", "investigation", "review_commits",
-                   "origin", "areas", "auto_opened_at")
+                   "origin", "areas", "auto_opened_at", "summary", "summary_at")
 # origin: the handoff ticket a controller-filed ticket came from (see dispatch.auto_open_problem).
 # areas: the repo-relative path globs the work will touch (fleet/areas.py: lock table, overlap).
 # auto_opened_at: set only by open_proposed, when the dispatcher opened a proposed ticket by rule.
+# summary: the plain-words account of the ticket (what it is, why it matters), shown first by `ticket show`
+# and on the Kaneo card; summary_at is when it was last written (see summary_current).
 # oncall: true on the fix ticket the dispatcher files for the on-call agent.
 # oncall_base: the failed branch's tip when the ticket failed; the on-call branch
 # starts from exactly that commit, however long it waits for the on-call slot.
@@ -62,7 +64,11 @@ CLOSE_OUTCOMES = {"done": "done", "failed": "failed", "cancelled": "cancelled"}
 # Fields a caller may supply when creating a ticket. Everything else in
 # FIELDS is set by the tool.
 CALLER_FIELDS = ("type", "repo", "branch", "title", "body", "commit", "parent", "priority",
-                 "origin", "areas")
+                 "origin", "areas", "summary")
+SUMMARY_MAX = 1500
+# Shorthand a reader cannot follow: design-step labels ("S8"), status tags ("[U]", "[V]"), failure-mode
+# numbers ("FM3"). A summary or PROOF note must spell them out.
+SHORTHAND_RE = re.compile(r"(?<![\w/.-])(?:S\d{1,2}|FM\d{1,2})(?![\w/.-])|\[(?:[UVP])\]")
 AREAS_MAX = 20
 AREA_MAX = 200
 
@@ -307,6 +313,8 @@ def _check_common(f: dict, errors: list[str]) -> None:
         errors.append("origin must be a ticket id like BD-12 or T-20250101-001")
     if f.get("areas") is not None:
         errors += check_areas(f["areas"])
+    if f.get("summary") is not None:
+        errors += check_summary(f["summary"])
 
     title = f.get("title")
     if not _is_str(title) or not 1 <= len(title) <= 100:
@@ -317,6 +325,21 @@ def _check_common(f: dict, errors: list[str]) -> None:
     body = f.get("body")
     if not _is_str(body) or not 1 <= len(body) <= BODY_MAX:
         errors.append(f"body must be 1 to {BODY_MAX} characters")
+
+
+def check_summary(text) -> list[str]:
+    """Problems with a plain summary: 1 to SUMMARY_MAX characters, no unexplained shorthand."""
+    if not _is_str(text) or not 1 <= len(text.strip()) <= SUMMARY_MAX:
+        return [f"summary must be 1 to {SUMMARY_MAX} characters"]
+    return check_plain(text, "summary")
+
+
+def check_plain(text: str, what: str) -> list[str]:
+    hit = SHORTHAND_RE.search(text)
+    if hit:
+        return [f"{what} uses unexplained shorthand ({hit.group(0)}): spell it out "
+                "(say 'design step 8', 'not yet confirmed')"]
+    return []
 
 
 def check_areas(areas) -> list[str]:
@@ -436,6 +459,8 @@ def validate_stored(data, allow_unknown: bool = False) -> list[str]:
         errors.append("investigation must be a ticket id, on a fix ticket")
     if "auto_opened_at" in data and not _is_time(data["auto_opened_at"]):
         errors.append("auto_opened_at must be a UTC ISO 8601 time like 2025-01-01T00:00:00Z")
+    if "summary_at" in data and not _is_time(data["summary_at"]):
+        errors.append("summary_at must be a UTC ISO 8601 time like 2025-01-01T00:00:00Z")
     if "started_at" in data and not _is_time(data["started_at"]):
         errors.append("started_at must be a UTC ISO 8601 time like 2025-01-01T00:00:00Z")
     if "notes" in data:
@@ -642,6 +667,8 @@ def create_ticket(fields: dict, *, needs_approval: bool = False, oncall: bool = 
     errors = validate_new({**fields, "body": fields["body"][:BODY_MAX]} if clipped else fields)
     if not errors:
         errors += check_secrets(fields["title"], fields["body"])
+        if fields.get("summary") is not None:
+            errors += check_secrets("summary", fields["summary"])
     if errors:
         raise TicketInvalid(errors)
 
@@ -698,9 +725,11 @@ def create_ticket(fields: dict, *, needs_approval: bool = False, oncall: bool = 
         }
         if fields.get("priority") is not None:
             ticket["priority"] = fields["priority"]
-        for name in ("origin", "areas"):
+        for name in ("origin", "areas", "summary"):
             if fields.get(name) is not None:
                 ticket[name] = fields[name]
+        if "summary" in ticket:
+            ticket["summary_at"] = now
         if oncall:
             ticket["oncall"] = True
             if oncall_base is not None:
@@ -733,18 +762,17 @@ def approve_ticket(ticket_id: str) -> dict:
 
 def open_proposed(ticket_id: str, reason: str) -> dict:
     """Open a proposed ticket by the dispatcher's auto-open rule (dispatch.auto_open). Only a
-    process with no agent environment can call it, and only on a proposed ticket that names an
-    origin (or, for an investigate ticket, a parent); an agent can never put its own ticket into the queue. The conditions themselves
-    are judged by the caller (dispatch.auto_open_problem), which also logs `reason`."""
+    process with no agent environment can call it, so an agent can never put its own ticket
+    into the queue; the caps and the deny list are judged by the caller
+    (dispatch.auto_open_problem), which also logs `reason`."""
     creator = current_creator()
     if creator != "human":
         raise TicketError(f"only the dispatcher can auto-open a ticket (running as {creator})")
     ticket_id = normalize_id(ticket_id)
     with _locked():
         ticket = load_ticket(ticket_id)
-        if ticket["status"] != "proposed" or not (
-                ticket.get("origin") or (ticket["type"] == "investigate" and ticket.get("parent"))):
-            raise TicketError(f"{ticket_id} is not a proposed ticket with an origin; it cannot be auto-opened")
+        if ticket["status"] != "proposed":
+            raise TicketError(f"{ticket_id} is {ticket['status']}; only a proposed ticket can be auto-opened")
         ticket["status"] = "open"
         ticket["auto_opened_at"] = ticket["updated_at"] = _now()
         _write_atomic(_ticket_path(ticket_id), ticket)
@@ -939,6 +967,79 @@ def add_note(ticket_id: str, text: str) -> dict:
     return ticket
 
 
+def set_summary(ticket_id: str, text: str, at: str | None = None) -> dict:
+    """Replace the ticket's plain summary (what it is, why it matters, where it stands, whether
+    the human is needed). Anyone may write one; it is checked for secrets and shorthand. `at`
+    (the dispatcher adopting an agent's note) keeps the note's own time as the summary's."""
+    ticket_id = normalize_id(ticket_id)
+    if not ID_RE.fullmatch(ticket_id):
+        raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])
+    errors = check_summary(text) or check_secrets("summary", text)
+    if errors:
+        raise TicketInvalid(errors)
+    with _locked():
+        ticket = load_ticket(ticket_id)
+        ticket["summary"] = text.strip()
+        ticket["summary_at"] = at or _now()
+        ticket["updated_at"] = _now()
+        _write_atomic(_ticket_path(ticket_id), ticket)
+    return ticket
+
+
+PLAIN_SUMMARY_PREFIX = "PLAIN SUMMARY:"   # an agent's note the dispatcher adopts as the ticket's summary
+
+
+def adopt_plain_summary(t: dict) -> dict:
+    """If the ticket's agent wrote a newer note starting PLAIN SUMMARY:, make its text the
+    summary (with the note's own time) and return the updated ticket. An agent cannot run
+    `ticket summary`, so this is how its words reach the field; a note that fails the summary
+    rules is left alone. Dispatcher only (a human's process)."""
+    if current_creator() != "human":
+        return t
+    for n in reversed(t.get("notes", [])):
+        if n["by"] == t.get("assignee") and n["text"].startswith(PLAIN_SUMMARY_PREFIX):
+            text = n["text"][len(PLAIN_SUMMARY_PREFIX):].strip()
+            if t.get("summary_at") and n["at"] <= t["summary_at"]:
+                return t
+            try:
+                return set_summary(t["id"], text, at=n["at"])
+            except TicketInvalid:
+                return t
+    return t
+
+
+def summary_current(t: dict) -> bool:
+    """The ticket has a plain summary written at or after its latest recorded verdict (so it
+    describes the reviewed work); a ticket with no verdict only needs one."""
+    if not t.get("summary") or not _is_time(t.get("summary_at")):
+        return False
+    v = t.get("verdict")
+    return v is None or t["summary_at"] >= v["at"]
+
+
+def summary_text(t: dict) -> str:
+    """What `ticket show` and the Kaneo card print first: the summary (or a plain note that there
+    is none yet), where the ticket stands, and whether the human is needed."""
+    head = t.get("summary") or "(no plain summary has been written yet)"
+    return f"SUMMARY: {head}\nWHERE IT STANDS: {standing(t)}"
+
+
+STANDING = {
+    "proposed": "Filed. It opens on its own within the daily limits; nothing is needed from the human.",
+    "open": "Waiting for an agent to pick it up. Nothing is needed from the human.",
+    "claimed": "An agent is building it or it is in review. Nothing is needed from the human yet.",
+    "review": "Built, reviewed and proven. Ready to ship: the human runs the ship command for {id}.",
+    "done": "Shipped. Nothing more is needed.",
+    "failed": "Failed. A human should read the notes and decide what happens next.",
+    "cancelled": "Cancelled. Nothing more is needed.",
+}
+
+
+def standing(t: dict) -> str:
+    """Where the ticket stands, in plain words and always current (worked out from its status)."""
+    return STANDING.get(t["status"], "").format(id=t["id"])
+
+
 def append_to_body(ticket_id: str, heading: str, items: str) -> dict | None:
     """Add the lines of `items` that the ticket body does not already hold,
     under `heading`. Returns the ticket, or None when nothing new was added.
@@ -986,7 +1087,15 @@ def create_leftovers_ticket(parent: dict, title: str, body: str, create=None, **
         body = body[:BODY_MAX - 15].rstrip() + "\n[...truncated]"
     fields = {"type": "fix", "repo": parent["repo"], "branch": leftovers_branch(parent["id"]),
               "parent": parent["id"], "title": title[:100], "body": body, **extra}
-    return (create or create_ticket)(fields, needs_approval=True)
+    new = (create or create_ticket)(fields, needs_approval=True)
+    # A leftover starts at its parent's risk, never below it (the dispatcher then opens it by itself).
+    try:
+        parent_level = rk.stored_level(parent)
+        if rk.rank(parent_level) > rk.rank(rk.stored_level(new)):
+            new = raise_risk(new["id"], parent_level)
+    except rk.RiskError as exc:
+        raise TicketError(f"{new['id']} was filed but its risk could not be set from {parent['id']}: {exc}") from None
+    return new
 
 
 def file_leftovers_items(parent: dict, heading: str, items: str, create=None) -> tuple[dict, str | None]:
@@ -1135,11 +1244,8 @@ def submit_ticket(ticket_id: str, tip: str, base_commit: str | None = None) -> d
 
 
 def raise_risk(ticket_id: str, level: str) -> dict:
-    """Raise a ticket's stored risk level. Humans only, and only upwards:
-    nobody can lower a level."""
-    creator = current_creator()
-    if creator != "human":
-        raise TicketError(f"only a human can raise a ticket's risk level (running as {creator})")
+    """Raise a ticket's stored risk level. Anyone may raise it (an agent, the controller, the
+    dispatcher), and only upwards: nothing here can lower a level."""
     ticket_id = normalize_id(ticket_id)
     if not ID_RE.fullmatch(ticket_id):
         raise TicketInvalid([f"'{ticket_id}' is not a ticket id (expected like {ID_EXAMPLE})"])

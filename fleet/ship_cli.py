@@ -60,6 +60,17 @@ def _reconcile() -> int:
     return subprocess.run([sys.executable, str(dispatch), "--reconcile"]).returncode
 
 
+def _reconcile_after_result(code: int) -> None:
+    """The ticket is marked done only once its ship has written its result file, so the
+    reconcile that decides it runs after that file exists (the watcher does it again later)."""
+    if code != 0:
+        return
+    try:
+        _reconcile()
+    except OSError:
+        pass
+
+
 _ship_ticket = ""   # the ticket this run ships: the gate checks it is on the branch and asks for its id
 
 
@@ -1077,6 +1088,7 @@ def _run_job(ticket_id: str, tip: str, answer: str) -> int:
     already given, then the one phone ping and the result file `ship --status` reads."""
     code = _ship_one(ticket_id, preset=(answer, tip))
     record_result(ticket_id, code, _last_message)
+    _reconcile_after_result(code)
     _ping_result(ticket_id, code)
     return code
 
@@ -1122,6 +1134,7 @@ def _ship_recorded(ticket_id: str, **kw) -> int:
             finally:
                 sys.stdout, sys.stderr = out, err
         record_result(ticket_id, code, _last_message)
+        _reconcile_after_result(code)
         return code
 
 

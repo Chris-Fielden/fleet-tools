@@ -9,6 +9,7 @@ from fleet import prep
 from fleet import review_watch as rw
 from fleet import ticket as tk
 from fleet.ship_cli import main as ship_main
+from test_review_watch import add_proof
 from test_dispatch import git, herdr_log, mk, projects  # noqa: F401
 from test_prep import (NIGHT, SIX, agent_names, finish_prep, in_review, log_lines, ntfy, q,  # noqa: F401
                        report, sent, set_agent_status, start_prep, write_list)
@@ -26,6 +27,7 @@ def ready(q, monkeypatch, branch, files):
         tk.add_note(t["id"], "All done.")
     finally:
         monkeypatch.delenv("CLAUDECODE")
+    add_proof(monkeypatch, t["id"], tip)
     return t
 
 

@@ -144,11 +144,14 @@ def test_human_can_raise_but_never_lower():
 
 
 @pytest.mark.parametrize("var", ["CLAUDECODE", "CODEX_SANDBOX"])
-def test_agents_cannot_raise(var):
+def test_agents_can_raise_but_never_lower(var):
     tid = run("new", *new_args()).stdout.split()[0]
     r = run("risk", tid, "--raise", "high", extra_env={var: "1"})
-    assert r.returncode == 1 and "only a human" in r.stderr
-    assert tk.load_ticket(tid)["risk"] == "medium"
+    assert r.returncode == 0
+    assert tk.load_ticket(tid)["risk"] == "high"
+    r = run("risk", tid, "--raise", "low", extra_env={var: "1"})
+    assert r.returncode == 1 and "can only be raised" in r.stderr
+    assert tk.load_ticket(tid)["risk"] == "high"
 
 
 def test_raise_needs_a_known_level_and_id():

@@ -28,7 +28,7 @@ def test_refused_investigation_logs_the_limit_not_none(projects, herdr_log):
     assert len(ours) == 1 and "daily launch limit reached" in ours[0]
     assert not any("None" in x for x in decision_lines())
     assert not any("would launch" in x for x in lines)
-    assert tk.load_ticket(t["id"])["status"] == "proposed"
+    assert tk.load_ticket(t["id"])["status"] == "open"
 
 
 def test_refused_build_logs_the_limit_not_none(projects, herdr_log):

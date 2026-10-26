@@ -21,7 +21,7 @@ from fleet import ticket as tk
 from test_dispatch import calls, claim, git, herdr_log, make_repo, mk, projects  # noqa: F401
 from test_kaneo import API_KEY, write_config as write_kaneo_config
 from test_notify import write_config as write_ntfy_config
-from test_review_watch import Rig, no_dialog, ntfy, rig, sent  # noqa: F401
+from test_review_watch import Rig, add_proof, no_dialog, ntfy, rig, sent  # noqa: F401
 from test_watch import FakeClock, watch
 
 
@@ -385,6 +385,7 @@ def test_an_on_call_ticket_follows_the_normal_ready_to_ship_flow(rig, ntfy, herd
     rig.monkeypatch.setenv("CLAUDECODE", "1")
     tk.add_note(oc["id"], "SUMMARY: fixed")
     rig.monkeypatch.delenv("CLAUDECODE")
+    add_proof(rig.monkeypatch, oc["id"], tip)
     world(rig, {"name": oc["id"].lower(), "agent_status": "idle"})
     rig.cycle(20)
     assert tk.load_ticket(oc["id"])["status"] == "review"
