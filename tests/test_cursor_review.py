@@ -348,3 +348,42 @@ def test_legacy_advisory_cursor_vote_still_loads_and_stays_advisory(rig):
     assert tk.validate_stored(t) == []
     assert t["verdict"]["result"] == "PASS" and not rk.majority_failed(t["verdict"]["reviews"])
     assert rk.vote_tally(t["verdict"]["reviews"]) == {"passed": 1, "failed": 0}
+
+
+def test_a_late_cursor_pass_keeps_the_summary_valid(rig, monkeypatch):
+    from fleet import review_watch as rw
+    r = _watch_rig(rig)
+    r.probe()
+    monkeypatch.setenv("CLAUDECODE", "1")             # the author writes the summary, after the Codex PASS
+    tk.add_note(r.ticket["id"], "All done.")
+    monkeypatch.delenv("CLAUDECODE")
+    before = tk.load_ticket(r.ticket["id"])
+    assert rw.has_summary_after_review(before)
+    monkeypatch.setattr(tk, "_now", lambda: "2099-01-01T00:00:00Z")   # the Cursor vote lands much later
+    _consider(r)
+    _consider(r)
+    after = tk.load_ticket(r.ticket["id"])
+    assert after["verdict"]["reviews"]["cursor"]["counted"] is True
+    assert after["verdict"]["at"] == before["verdict"]["at"] and rw.has_summary_after_review(after)
+    # a Cursor FAIL that flips the verdict is a new verdict, as any FAIL is
+    tk.record_verdict("task/demo", "app", "FAIL", r.tip, "Cursor (composer-2.5)")
+    assert tk.load_ticket(r.ticket["id"])["verdict"]["result"] == "FAIL"
+
+
+def test_after_a_restart_a_saved_review_is_taken_up_once(rig):
+    r = _watch_rig(rig)
+    r.probe()
+    res = r.run()                                     # saved, but the watcher died before recording it
+    assert res["counted"] and "cursor" not in tk.load_ticket(r.ticket["id"])["verdict"]["reviews"]
+    _consider(r)
+    _consider(r)
+    assert tk.load_ticket(r.ticket["id"])["verdict"]["reviews"]["cursor"]["result"] == "PASS"
+    assert len([c for c in r.calls() if "--trust" in c["args"]]) == 1 and len(r.events) == 1
+
+
+def test_after_a_restart_an_uncounted_review_gets_one_note_and_one_ping(rig):
+    r = _watch_rig(rig)                               # no probe result: not counted
+    assert not r.run()["counted"]
+    for _ in range(3):
+        _consider(r)
+    assert len(r.pings) == 1 and len(r.notes) == 1 and len(r.events) == 1

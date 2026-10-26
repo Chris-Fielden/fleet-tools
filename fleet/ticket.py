@@ -1163,8 +1163,14 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
                 reviews[kind]["counted"] = True   # the proof flag; absent = an advisory vote from before BD-136
             now = _now()
             failed = any(r["result"] == "FAIL" for k, r in reviews.items() if rk.counted(k, r))
-            t["verdict"] = {"result": "FAIL" if failed else "PASS",
-                            "commit": commit, "reviewer": reviewer, "at": now, "reviews": reviews}
+            result_now = "FAIL" if failed else "PASS"
+            if kind == "cursor" and same and old["result"] == result_now:
+                # A late Cursor vote that changes nothing keeps the verdict's time and reviewer, so
+                # the author's summary written after that verdict stays "after the review".
+                t["verdict"] = {**old, "reviews": reviews}
+            else:
+                t["verdict"] = {"result": result_now,
+                                "commit": commit, "reviewer": reviewer, "at": now, "reviews": reviews}
             # A round counts only while the majority of voting companies failed the commit; a
             # later PASS that makes it a split vote takes the round back.
             if rk.majority_failed(reviews):

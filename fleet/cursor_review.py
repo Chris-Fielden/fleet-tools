@@ -274,6 +274,7 @@ def run_review(repo: Path, wt: Path, branch: str, tip: str) -> dict:
 
 _JOBS: dict[tuple[str, str], dict] = {}
 _LOCK = threading.Lock()
+_SETTLED: set[tuple[str, str]] = set()   # saved reviews already taken up by this process
 
 
 def _job(repo: Path, wt: Path, branch: str, tip: str, entry: dict) -> None:
@@ -295,6 +296,38 @@ def reset() -> None:
     wait()
     with _LOCK:
         _JOBS.clear()
+        _SETTLED.clear()
+
+
+def _outcome(t: dict, tip: str, counted: bool, verdict: str, reason: str, emit, warn, ping, note) -> None:
+    tid = t["id"]
+    if counted:
+        v = t.get("verdict")
+        if v is not None and v["commit"] == tip and v["reviews"].get("cursor", {}).get("result") == verdict:
+            return   # already on the ticket
+        try:
+            tk.record_verdict(t["branch"], t["repo"], verdict, tip, REVIEWER)
+        except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
+            warn(f"{tid}: could not record the Cursor vote ({exc})")
+            return
+        emit(f"{tid}  Cursor review of {tip[:8]}: {verdict} (counted)")
+        return
+    emit(f"{tid}  Cursor review of {tip[:8]}: {verdict} (recorded, not counted)")
+    detail = f"Cursor's {verdict} on {tip[:7]} was recorded but not counted: {reason}"
+    note(tid, f"Cursor review of {tip[:8]} not counted", detail)
+    ping(t, "needs_human", f"{tid}:cursor_uncounted:{tip}", detail)
+
+
+def _settle_saved(t: dict, saved: dict, tip: str, emit, warn, ping, note) -> None:
+    """A Cursor review file exists for this tip but this process did not make it (it restarted):
+    make the ticket agree with it. Every step is idempotent (a recorded vote, a note marker and
+    a ping key are each checked), so a repeat changes nothing."""
+    if (t["id"], tip) in _SETTLED:
+        return
+    if saved["verdict"] in ("PASS", "FAIL"):
+        _SETTLED.add((t["id"], tip))
+        _outcome(t, tip, bool(saved["counted"]), saved["verdict"],
+                 "see the Reason line of the saved review", emit, warn, ping, note)
 
 
 def consider(t: dict, repo: Path, tip: str, settings: dict, emit, warn, ping, note) -> None:
@@ -313,7 +346,11 @@ def consider(t: dict, repo: Path, tip: str, settings: dict, emit, warn, ping, no
         v = t.get("verdict")
         if v is None or v["commit"] != tip or v["result"] != "PASS" or not wt.is_dir():
             return
-        if "cursor" in rk.latest_reviews(wt / ".reviews", tip) or not key_path().is_file():
+        saved = rk.latest_reviews(wt / ".reviews", tip).get("cursor")
+        if saved is not None:   # a restart: take up a saved review whose outcome never reached the ticket
+            _settle_saved(t, saved, tip, emit, warn, ping, note)
+            return
+        if not key_path().is_file():
             return
         entry = {"result": None}
         entry["thread"] = threading.Thread(target=_job, args=(repo, wt, branch, tip, entry),
@@ -332,15 +369,4 @@ def consider(t: dict, repo: Path, tip: str, settings: dict, emit, warn, ping, no
     if res["status"] != "saved":
         warn(f"{tid}: no Cursor review of {tip[:8]}: {res['reason']}")
         return
-    if res["counted"]:
-        try:
-            tk.record_verdict(branch, t["repo"], res["verdict"], tip, REVIEWER)
-        except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
-            warn(f"{tid}: could not record the Cursor vote ({exc})")
-            return
-        emit(f"{tid}  Cursor review of {tip[:8]}: {res['verdict']} (counted)")
-        return
-    emit(f"{tid}  Cursor review of {tip[:8]}: {res['verdict']} (recorded, not counted)")
-    detail = f"Cursor's {res['verdict']} on {tip[:7]} was recorded but not counted: {res['reason']}"
-    note(tid, f"Cursor review of {tip[:8]} not counted", detail)
-    ping(t, "needs_human", f"{tid}:cursor_uncounted:{tip}", detail)
+    _outcome(t, tip, res["counted"], res["verdict"], res["reason"], emit, warn, ping, note)
