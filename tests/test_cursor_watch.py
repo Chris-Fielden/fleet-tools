@@ -33,7 +33,7 @@ def cursor_setup(rig, monkeypatch, **cfg):
     monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
     rig.settings["cursor_review"] = True
     cr.probe_result_path().write_text(
-        '{"cli_version": "STUB 1.2.3", "probes": {"a": "pass", "b": "pass", "c": "pass", "d": "pass", "e": "pass"}, "passed": true}')
+        '{"cli_version": "STUB 1.2.3", "probes": {"a": "pass", "b": "pass", "c": "pass", "d": "pass", "e": "pass", "f": "pass"}, "passed": true}')
     return bindir
 
 

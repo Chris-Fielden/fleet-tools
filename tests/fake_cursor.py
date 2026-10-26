@@ -25,8 +25,12 @@ with open(os.path.join(here, "stub.log"), "a") as fh:
 if args[:1] == ["--version"]:
     print(cfg.get("version", "STUB 1.2.3")); sys.exit(0)
 if args[:1] == ["models"]:
+    if cfg.get("models_fail"):
+        print("Authentication required"); sys.exit(1)
     print("big-model - Big\nmini-model - Mini"); sys.exit(0)
 if args[:1] == ["status"]:
+    if cfg.get("status_fail"):
+        print("Authentication required"); sys.exit(1)
     print('{{"loggedIn":true}}'); sys.exit(0)
 prompt = args[-1] if args else ""
 mode = args[args.index("--mode") + 1] if "--mode" in args else "agent"
@@ -69,13 +73,33 @@ if "OUTSIDE=" in prompt:
     if hook("beforeReadFile", {{"file_path": target, "model": payload_model}}):
         out.append(open(target).read())
 if "every skill" in prompt:
-    out.append("no skills" if not cfg.get("skill_leak") else "skill leak: " + prompt.split("named ")[1].split()[0])
+    leak = cfg.get("skill_leak")
+    if not leak:
+        out.append("I have no skill named foo")
+    else:   # the planted skill (the probe puts it in cfg["skills_dir"]) shows up in the reply
+        for d in sorted(os.listdir(cfg["skills_dir"])):
+            body = open(os.path.join(cfg["skills_dir"], d, "SKILL.md")).read()
+            token = [w for w in body.replace(".", " ").split() if w.startswith("SKILLTOKEN-")]
+            out.append({{"token": ""}}.get(leak, d) + " " + (token[0] if leak != "name" else ""))
+if "GREP-OUTSIDE=" in prompt:
+    target = prompt.split("GREP-OUTSIDE=")[1].split()[0]
+    tools = [("Grep", {{"pattern": "OUTSIDE", "path": os.path.dirname(target)}}),
+             ("Glob", {{"glob_pattern": target}}), ("LS", {{"target_directory": os.path.dirname(target)}}),
+             ("SemanticSearch", {{"query": "OUTSIDE"}}), ("WebFetch", {{"url": "file://" + target}})]
+    for name, args in tools:
+        if hook("preToolUse", {{"tool_name": name, "tool_input": args, "model": payload_model}}) or cfg.get("f_leak"):
+            out.append(open(target).read())
+if "GREP-INSIDE" in prompt:
+    if hook("preToolUse", {{"tool_name": "Grep", "tool_input": {{"pattern": "x", "path": os.getcwd()}}, "model": payload_model}}):
+        out.append("grep-inside-ok")
 if prompt.startswith("You are a code reviewer"):
     if not cfg.get("no_read_hook"):
         hook("beforeReadFile", {{"file_path": "x", "model": payload_model, "email": "someone@example.com"}})
     out.append(cfg.get("review", "VERDICT: PASS\nMUST FIX:\nSUMMARY: ok"))
     if cfg.get("leak"):
         out.append("contact someone@example.com key " + os.environ.get("CURSOR_API_KEY", ""))
+if cfg.get("leak_all"):
+    out.append("contact someone@example.com key " + os.environ.get("CURSOR_API_KEY", ""))
 print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "result": "\n".join(out) or "ok", "duration_ms": 5}}))
 '''
 

@@ -9,36 +9,36 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "cursor-probe.sh"
 
-# A stand-in for the Cursor CLI: no network, no spend. It logs every call and
-# prints a result event. STUB_VERSION sets what --version says.
-FAKE_AGENT = """#!/bin/sh
-echo "$*" >> "$STUB_LOG"
-case "$1" in
-  --version) echo "${STUB_VERSION:-STUB 1.2.3}"; exit 0 ;;
-  models) printf 'big-model - Big\\nmini-model - Mini\\n'; exit 0 ;;
-  status) echo '{"loggedIn":true}'; exit 0 ;;
-esac
-case "$*" in *no-such-model-probe*) echo '{"type":"result","is_error":true}'; exit 1 ;; esac
-echo '{"type":"result","subtype":"success","result":"ok","duration_ms":5}'
-"""
+import json  # noqa: E402
+
+import fake_cursor  # noqa: E402
 
 
 @pytest.fixture
 def stub(env):
+    """The fake CLI (tests/fake_cursor.py). It reads its switches from a file, because the probe
+    runs every Cursor command under `env -i`."""
     bindir = env / "bin"
-    bindir.mkdir()
-    agent = bindir / "agent"
-    agent.write_text(FAKE_AGENT)
-    agent.chmod(agent.stat().st_mode | stat.S_IEXEC)
-    log = env / "stub.log"
-    log.touch()
-    return {"PATH": f"{bindir}:{os.environ['PATH']}", "STUB_LOG": str(log),
-            "PROBE_OUT_DIR": str(env / "out")}
+    fake_cursor.install(bindir)
+    return {"PATH": f"{bindir}:{os.environ['PATH']}", "PROBE_OUT_DIR": str(env / "out"),
+            "BINDIR": str(bindir)}
+
+
+def set_version(stub, version):
+    fake_cursor.install(Path(stub["BINDIR"]), version=version)
+
+
+def arg_lines(stub):
+    return [" ".join(c["args"]) for c in fake_cursor.calls(Path(stub["BINDIR"]))]
+
+
+def one_report(out_dir):
+    return next(out_dir.glob("probe-*.md"))
 
 
 def run_script(extra, tty=False):
     e = dict(os.environ)
-    e.update(extra)
+    e.update({k: v for k, v in extra.items() if k != "BINDIR"})
     if tty:
         master, slave = pty.openpty()
         try:
@@ -54,37 +54,41 @@ def run_script(extra, tty=False):
 def test_runs_with_stub_version_and_no_terminal(stub, env):
     r = run_script(stub)
     assert r.returncode == 0, r.stderr
-    report = next((env / "out").glob("probe-*.md")).read_text()
+    report = one_report(env / "out").read_text()
     for pid in ["P1", "P2", "P3", "P4", "P5a", "P5b", "P6", "P7", "P8", "P9",
                 "P10", "P11", "P12a", "P12b", "P12c"]:
         assert f"| {pid} |" in report
     assert "STUB 1.2.3" in report
-    assert "mini-model" in report          # cheapest model picked
-    assert "duration_ms, result, subtype, type" in report
+    assert "model: composer-2.5" in report     # the review model, not guessed from `agent models`
+    assert "information only" in report         # `agent status` proves nothing about auth
+    assert "duration_ms, is_error, result, subtype, type" in report
     assert "| P12c | bad model name | 1 |" in report
 
 
 def test_refuses_without_terminal_or_stub(stub, env):
-    r = run_script({**stub, "STUB_VERSION": "2026.01.01-real"})
+    set_version(stub, "2026.01.01-real")
+    r = run_script(stub)
     assert r.returncode == 3
     assert "not a terminal" in r.stderr
     assert not (env / "out").exists()
     # only the --version check ran: nothing else was spent
-    assert (env / "stub.log").read_text().strip() == "--version"
+    assert arg_lines(stub) == ["--version"]
 
 
 def test_runs_on_a_terminal_with_a_real_looking_version(stub, env):
-    r = run_script({**stub, "STUB_VERSION": "2026.01.01-real"}, tty=True)
+    set_version(stub, "2026.01.01-real")
+    r = run_script(stub, tty=True)
     assert r.returncode == 0, r.stderr
-    assert (env / "out" / "probe-2026.01.01-real.md").exists()
+    assert one_report(env / "out").name.startswith("probe-2026.01.01-real-")
 
 
 def test_probe_calls_are_safe(stub, env):
     run_script(stub)
-    calls = (env / "stub.log").read_text().splitlines()
+    calls = arg_lines(stub)
     probes = [c for c in calls if c.startswith("-p ")]
     assert len(probes) >= 12
-    assert all("--model mini-model" in c for c in probes[:-1])
+    assert all("--model composer-2.5" in c for c in probes[:-1])
+    assert not [c for c in calls if c.split()[0] == "models"]   # never asks the browser sign-in
     banned = ("--approve-mcps", "worker", "acp", "persist", "--worktree")
     for c in calls:
         assert not any(b in c.split() for b in banned), c
@@ -99,10 +103,6 @@ def test_never_touches_real_home_or_fleet(stub, env):
 
 
 # --- BD-136: the review probes a-e and the result file ----------------------------------
-
-import json  # noqa: E402
-
-import fake_cursor  # noqa: E402
 
 KEY = "fake-key-aaaa-bbbb"
 
@@ -139,16 +139,17 @@ def rig(env):
 def test_all_probes_pass_and_result_file_is_written(rig):
     res, out = rig.go()
     assert res.returncode == 0, res.stderr
-    assert out["probes"] == {k: "pass" for k in "abcde"}, out["why"]
+    assert out["probes"] == {k: "pass" for k in "abcdef"}, out["why"]
     assert out["passed"] is True and out["cli_version"] == "STUB 1.2.3"
     text = (rig.fleet / "cursor-probe-result.json").read_text()
     assert KEY not in text and "@" not in text
     assert oct((rig.fleet / "cursor-probe-result.json").stat().st_mode & 0o777) == "0o600"
     # the key went only to the review-style runs, and each ran in an empty HOME
     ran = [c for c in fake_cursor.calls(rig.bindir) if "/rv-" in (c["home"] or "") and "--trust" in c["args"]]
-    assert len(ran) == 4 and all(c["has_key"] and c["home_files"] == [] for c in ran)
-    # the older probes (P1-P12) never get the key
-    assert not [c for c in fake_cursor.calls(rig.bindir) if c["has_key"] and c not in ran]
+    assert len(ran) == 5 and all(c["has_key"] and c["home_files"] == [] for c in ran)
+    # the older probes (P1-P12) run the same way: the key from the file, an empty throwaway HOME
+    every = fake_cursor.calls(rig.bindir)
+    assert all(c["has_key"] and c["home_files"] == [] and c["home"] != str(rig.home) for c in every)
     assert KEY not in json.dumps(fake_cursor.calls(rig.bindir))
     # the planted skill is removed again
     assert list((rig.home / ".claude" / "skills").glob("fleetprobe-*")) == []
@@ -159,11 +160,52 @@ def test_all_probes_pass_and_result_file_is_written(rig):
     ({"hook_model": "claude-4-sonnet"}, "b"),      # not a Cursor model
     ({"ask_writes": True}, "c"),                   # ask mode wrote a file
     ({"exit": 1}, "e"),                            # no auth in the empty HOME
-    ({"skill_leak": True}, "e"),
+    ({"skill_leak": True}, "e"),                   # name and token in the reply
+    ({"skill_leak": "token"}, "e"),                # the token alone
+    ({"skill_leak": "name"}, "e"),                 # the undisclosed name alone
+    ({"f_leak": True}, "f"),                       # a search tool returned the outside canary
+    ({"ignore_hooks": True}, "f"),
 ])
 def test_a_failing_probe_fails_the_result(rig, cfg, probe):
-    _, out = rig.go(**cfg)
+    _, out = rig.go(skills_dir=str(rig.home / ".claude" / "skills"), **cfg)
     assert out["probes"][probe] == "fail" and out["passed"] is False, out
+
+
+def test_a_reply_that_says_it_has_no_such_skill_passes_e(rig):
+    _, out = rig.go(skills_dir=str(rig.home / ".claude" / "skills"))
+    assert out["probes"]["e"] == "pass" and out["probes"]["f"] == "pass", out["why"]
+    log = json.dumps(fake_cursor.calls(rig.bindir))
+    assert "fleetprobe-" not in log     # the prompt never names the planted skill
+    assert "SKILLTOKEN-" not in log
+
+
+def test_the_report_holds_each_reply_without_key_or_email(rig, env):
+    res, out = rig.go(leak_all=True)
+    assert res.returncode == 0, res.stderr
+    report = one_report(env / "out").read_text()
+    for p in "abcdef":
+        assert f"#### {p}" in report
+    assert "[key removed]" in report and "[email removed]" in report
+    assert "I have no skill named foo" in report
+    assert KEY not in report and "someone@example.com" not in report and "@" not in report.replace("@@", "")
+    assert KEY not in (rig.fleet / "cursor-probe-result.json").read_text()
+
+
+def test_a_second_run_never_overwrites_the_first_report(rig, env):
+    rig.go()
+    first = one_report(env / "out")
+    text = first.read_text()
+    rig.go()
+    reports = sorted((env / "out").glob("probe-*.md"))
+    assert len(reports) == 2 and first in reports and first.read_text() == text
+
+
+def test_the_probe_runs_on_the_key_alone_without_a_browser_sign_in(rig, env):
+    # `agent models` and `agent status` fail without the sign-in; the probe must not depend on them
+    res, out = rig.go(models_fail=True, status_fail=True)
+    assert res.returncode == 0 and out["passed"] is True, (res.stderr, out)
+    assert not [c for c in fake_cursor.calls(rig.bindir) if c["args"][:1] == ["models"]]
+    assert all(c["has_key"] for c in fake_cursor.calls(rig.bindir))
 
 
 def test_probe_d_needs_private_mode(rig):
@@ -188,5 +230,5 @@ def test_probe_d_needs_a_protected_folder(rig, env):
 def test_no_key_file_fails_every_probe_and_spends_nothing(rig):
     rig.keyfile.unlink()
     _, out = rig.go()
-    assert out["probes"] == {k: "fail" for k in "abcde"} and out["passed"] is False
+    assert out["probes"] == {k: "fail" for k in "abcdef"} and out["passed"] is False
     assert not [c for c in fake_cursor.calls(rig.bindir) if "--trust" in c["args"] and c["has_key"]]

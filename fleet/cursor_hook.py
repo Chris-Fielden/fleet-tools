@@ -4,7 +4,11 @@
 Stdlib only; run as a script, never imported by agents:
 
   cursor_hook.py json STATE_DIR ROOT          print the .cursor/hooks.json to install
-  cursor_hook.py shell|write STATE_DIR ROOT   deny (exit 2); the review may not run or write anything
+  cursor_hook.py shell STATE_DIR ROOT         deny (exit 2); the review may not run anything
+  cursor_hook.py tool STATE_DIR ROOT          preToolUse, for EVERY tool: deny all but Read, Grep, Glob
+                                              and LS; those only when every path argument is inside ROOT
+                                              (a tool with no checkable path, e.g. semantic search, web,
+                                              MCP, is denied)
   cursor_hook.py read STATE_DIR ROOT          allow a read INSIDE the review copy ROOT only (symlinks
                                               resolved), and keep only the model name from the payload
 
@@ -28,8 +32,7 @@ def hooks_json(state_dir: str, root: str) -> dict:
 
     return {"version": 1, "hooks": {
         "beforeShellExecution": [{"command": cmd("shell"), "failClosed": True}],
-        "preToolUse": [{"command": cmd("write"), "matcher": "Write|Edit|StrReplace|MultiEdit|Delete",
-                        "failClosed": True}],
+        "preToolUse": [{"command": cmd("tool"), "failClosed": True}],
         "beforeReadFile": [{"command": cmd("read"), "failClosed": True}],
     }}
 
@@ -48,8 +51,47 @@ def inside(path, root: str) -> bool:
     return full == root or full.startswith(root + os.sep)
 
 
+PATH_KEYS = ("path", "file_path", "target_directory", "directory", "dir", "paths", "glob", "glob_pattern",
+             "target_file", "target_notebook")
+
+
+def _strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _strings(v)
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _strings(v)
+
+
+def tool_allowed(payload, root: str) -> bool:
+    """preToolUse: Read (its path is checked again by beforeReadFile), and Grep/Glob/LS with at
+    least one path argument, every path argument inside ROOT. Anything else is denied."""
+    if not isinstance(payload, dict):
+        return False
+    name = payload.get("tool_name")
+    args = payload.get("tool_input")
+    if args is None:
+        args = {k: v for k, v in payload.items() if k not in ("tool_name", "model")}
+    if not isinstance(name, str) or not isinstance(args, dict):
+        return False
+    name = name.strip().lower()
+    if name not in ("read", "grep", "glob", "ls"):
+        return False
+    paths = [s for k in PATH_KEYS for s in _strings(args.get(k))]
+    # any other value that looks like a path (absolute, home or parent-relative) is checked too
+    for k, v in args.items():
+        if k not in PATH_KEYS:
+            paths += [s for s in _strings(v) if s.startswith(("/", "~")) or ".." in s.split("/")]
+    if not all(inside(p, root) for p in paths):
+        return False
+    return bool(paths) or name == "read"
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != 4 or argv[1] not in ("json", "shell", "write", "read"):
+    if len(argv) != 4 or argv[1] not in ("json", "shell", "tool", "read"):
         print(__doc__, file=sys.stderr)
         return 64
     mode, state_dir, root = argv[1], argv[2], argv[3]
@@ -61,9 +103,25 @@ def main(argv: list[str]) -> int:
         _event(state_dir, mode)
     except OSError:
         pass
-    if mode in ("shell", "write"):
+    if mode == "shell":
         print(json.dumps({"permission": "deny", "user_message": "read-only fleet review",
                           "agent_message": "this review is read-only: no shell, no writes"}))
+        return 2
+    if mode == "tool":
+        try:
+            ok = tool_allowed(json.loads(raw), root)
+        except (ValueError, AttributeError, TypeError):
+            ok = False
+        if ok:
+            print(json.dumps({"permission": "allow"}))
+            return 0
+        try:
+            _event(state_dir, "tool-denied")
+        except OSError:
+            pass
+        print(json.dumps({"permission": "deny", "user_message": "read-only fleet review",
+                          "agent_message": "this review is read-only: only Read, and Grep/Glob/LS "
+                                           "inside the reviewed folder, are allowed"}))
         return 2
     path = None
     try:
