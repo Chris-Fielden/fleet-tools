@@ -344,7 +344,7 @@ def parse_review(text: str) -> dict:
         ok = (head.get("counted", "").lower() == "yes" and all_composer(head.get("model", ""))
               and cursor_proven(text, head.get("commit")))
     return {"kind": kind, "reviewer": reviewer, "commit": head.get("commit"), "verdict": verdict,
-            "counted": ok}
+            "counted": ok, "model": head.get("model")}
 
 
 SECTION_RE = re.compile(

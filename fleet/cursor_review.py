@@ -341,25 +341,40 @@ def _outcome(t: dict, tip: str, res: dict, emit, warn, ping, note) -> bool:
     return True
 
 
-def _settle_saved(t: dict, saved: dict, tip: str, emit, warn, ping, note) -> None:
+def _probe_newer(saved: dict) -> bool:
+    """An uncounted saved review, and the probe result file was written after it: the human has
+    re-run the probe since, so the review is run again (and may now count)."""
+    if saved.get("counted"):
+        return False
+    try:
+        return probe_result_path().stat().st_mtime > Path(saved["file"]).stat().st_mtime
+    except (OSError, KeyError):
+        return False
+
+
+def _settle_saved(t: dict, saved: dict, tip: str, emit, warn, ping, note) -> bool:
     """A Cursor review file exists for this tip but this process did not make it (it restarted):
     make the ticket agree with it. Every step is idempotent (a recorded vote, a note marker and
     a ping key are each checked), so a repeat changes nothing."""
     if (t["id"], tip) in _SETTLED or saved["verdict"] not in ("PASS", "FAIL"):
-        return
+        return False
     res = {"counted": bool(saved["counted"]), "verdict": saved["verdict"], "file": saved.get("file"),
            "reason": "see the Reason line of the saved review"}
     if _outcome(t, tip, res, emit, warn, ping, note):
         _SETTLED.add((t["id"], tip))
+        return True
+    return False
 
 
-def consider(t: dict, repo: Path, tip: str, settings: dict, emit, warn, ping, note) -> None:
+def consider(t: dict, repo: Path, tip: str, settings: dict, emit, warn, ping, note) -> bool:
     """Called every watch cycle for a claimed or in-review ticket. When the setting is on, the
     tip already has a recorded PASS and no Cursor review exists, start one in a background thread;
     on a later cycle take up its result: record a counted vote on the ticket, or (not counted) a
-    note and one plain ping naming the reason."""
+    note and one plain ping naming the reason. Returns True when the ticket may have changed (the
+    caller reloads it). An uncounted review is run again once the human has re-run the probe after
+    it was saved."""
     if not settings.get("cursor_review"):
-        return
+        return False
     tid, branch = t["id"], t["branch"]
     wt = repo / ".worktrees" / branch.removeprefix("task/")
     key = (tid, tip)
@@ -368,13 +383,13 @@ def consider(t: dict, repo: Path, tip: str, settings: dict, emit, warn, ping, no
     if entry is None:
         v = t.get("verdict")
         if v is None or v["commit"] != tip or v["result"] != "PASS" or not wt.is_dir():
-            return
+            return False
         saved = rk.latest_reviews(wt / ".reviews", tip).get("cursor")
-        if saved is not None:   # a restart: take up a saved review whose outcome never reached the ticket
-            _settle_saved(t, saved, tip, emit, warn, ping, note)
-            return
+        if saved is not None and not _probe_newer(saved):
+            # a restart: take up a saved review whose outcome never reached the ticket
+            return _settle_saved(t, saved, tip, emit, warn, ping, note)
         if not key_path().is_file():
-            return
+            return False
         entry = {"result": None}
         entry["thread"] = threading.Thread(target=_job, args=(repo, wt, branch, tip, entry),
                                            name=f"cursor-{tid}", daemon=True)
@@ -383,14 +398,24 @@ def consider(t: dict, repo: Path, tip: str, settings: dict, emit, warn, ping, no
                 del _JOBS[k]
             _JOBS[key] = entry
         entry["thread"].start()
+        _SETTLED.discard(key)
         emit(f"{tid}  Cursor review of {tip[:8]} started")
-        return
-    if entry["thread"].is_alive() or entry.get("handled"):
-        return
+        return False
+    if entry["thread"].is_alive():
+        return False
+    if entry.get("handled"):
+        res = entry["result"]
+        if res.get("status") == "saved" and res.get("file") and _probe_newer(
+                {"counted": res["counted"], "file": res["file"]}):
+            with _LOCK:   # the probe was re-run after this uncounted review: review again next cycle
+                _JOBS.pop(key, None)
+        return False
     res = entry["result"]
     if res["status"] != "saved":
         entry["handled"] = True
         warn(f"{tid}: no Cursor review of {tip[:8]}: {res['reason']}")
-        return
+        return False
     if _outcome(t, tip, res, emit, warn, ping, note):
         entry["handled"] = True
+        return True
+    return False
