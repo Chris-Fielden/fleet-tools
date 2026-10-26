@@ -53,7 +53,7 @@ def test_merges_through_finish_task_and_marks_done(shipping, monkeypatch, capsys
     # run from the repo's main checkout, with the task name and nothing else
     assert log.read_text().strip() == f"{repo.resolve()}|demo --ticket {t['id']}"
     assert tk.load_ticket(t["id"])["status"] == "done"
-    assert f"{t['id']} merged and marked done" in capsys.readouterr().out
+    assert f"{t['id']} merged, but is still" in capsys.readouterr().out
 
 
 def test_ships_a_ticket_in_review_and_marks_it_done(shipping, monkeypatch, capsys):
@@ -62,7 +62,7 @@ def test_ships_a_ticket_in_review_and_marks_it_done(shipping, monkeypatch, capsy
     monkeypatch.setenv("FAKE_MERGE", "1")
     assert ship_main([t["id"]]) == 0
     assert tk.load_ticket(t["id"])["status"] == "done"
-    assert f"{t['id']} merged and marked done" in capsys.readouterr().out
+    assert f"{t['id']} merged, but is still" in capsys.readouterr().out
 
 
 def test_cancelled_review_ticket_stays_in_review(shipping, capsys):
@@ -369,7 +369,7 @@ def test_ship_accepts_a_lowercase_or_mixed_case_id(shipping, monkeypatch, capsys
     monkeypatch.setenv("FAKE_MERGE", "1")
     assert ship_main([t["id"].swapcase()]) == 0
     assert tk.load_ticket(t["id"])["status"] == "done"
-    assert f"{t['id']} merged and marked done" in capsys.readouterr().out
+    assert f"{t['id']} merged, but is still" in capsys.readouterr().out
 
 
 def test_ship_lowercase_unknown_id_is_still_refused(shipping, capsys):

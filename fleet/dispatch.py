@@ -575,11 +575,12 @@ def decide(tickets: list[dict], settings: dict) -> list[Decision]:
     return decisions
 
 
-# --- auto-open: the dispatcher opens a controller-filed proposed ticket by rule ---------
+# --- auto-open: the dispatcher opens every proposed ticket by rule, within the caps ---------
 
 CRITERION_HEAD_RE = re.compile(r"^\W*acceptance(?: (?:criteria|tests?))?\W*$", re.I)
 CRITERION_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(\S.{9,})$")
-AUTO_OPEN_TYPES = ("build", "fix", "investigate")
+AUTO_OPEN_TYPES = tk.TYPES   # any type
+WAITS_RE = re.compile(r"^Waits for: ((?:[A-Z]{2}-[1-9]\d*|T-\d{8}-\d{3,})(?:, (?:[A-Z]{2}-[1-9]\d*|T-\d{8}-\d{3,}))*)$", re.M)
 
 
 def acceptance_criteria(body: str) -> list[str]:
@@ -598,13 +599,6 @@ def acceptance_criteria(body: str) -> list[str]:
     return out
 
 
-def is_handoff(t: dict | None) -> bool:
-    """A handoff is an investigate ticket a human filed or approved (it was never auto-opened
-    itself, so auto-opened work cannot vouch for more auto-opened work)."""
-    return (t is not None and t["type"] == "investigate" and t["created_by"] == "human"
-            and t["status"] in ("open", "claimed", "review", "done") and "auto_opened_at" not in t)
-
-
 def _stamp_time(text: str | None) -> datetime | None:
     try:
         return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
@@ -614,32 +608,23 @@ def _stamp_time(text: str | None) -> datetime | None:
 
 def auto_open_problem(t: dict, by_id: dict, rules: dict | None, settings: dict, now: datetime,
                       opened: list[datetime]) -> str | None:
-    """Why this proposed ticket must stay proposed (a human runs `ticket approve`), or None when
-    the rule opens it. `opened` holds the times of every auto-open so far (for the caps).
-    Rule: (a) an agent filed it from a human handoff, with acceptance criteria in the body;
-    (b) it is not high risk and its declared areas and body name no high-rule file;
-    (c) its repo is not on auto_open_deny_repos; (d) the hourly and daily caps have room."""
+    """Why this proposed ticket stays proposed for now, or None when the rule opens it. Nothing
+    waits for a human: any proposed ticket (any type, any filer, any risk) opens, within the
+    caps. `opened` holds the times of every auto-open so far (for the caps). Rule: (a) it is
+    not an on-call ticket (the dispatcher files those open); (b) a leftovers ticket waits until
+    its parent is no longer in progress, because its branch starts from main; (c) its repo is
+    not on auto_open_deny_repos; (d) the hourly and daily caps and the launch limit have room.
+    `rules` and `by_id` are kept for callers; the risk rules no longer hold a ticket back."""
     if t["status"] != "proposed" or t["type"] not in AUTO_OPEN_TYPES or t.get("oncall"):
-        return "not a proposed build, fix or investigate ticket"
-    if t["created_by"] not in tk.AGENTS:
-        return "not filed by the controller"
-    origin = t.get("origin") or (t["parent"] if t["type"] == "investigate" else None)
-    if not is_handoff(by_id.get(origin)):
-        return "no human handoff behind it (origin missing or not a handoff)"
-    if t["type"] == "investigate" and t["parent"] != origin:
-        return "an investigate ticket must be filed with the handoff as its parent"
-    if rules is None:
-        return "the risk rules could not be read"
-    if t["type"] != "investigate":
-        if not acceptance_criteria(t["body"]):
-            return "no acceptance criteria in the body"
-        if not t.get("areas"):
-            return "no declared areas, so its file set is unknown"
-        if rk.rank(t.get("risk") or "medium") >= rk.rank("high"):
-            return "risk is high"
-        hot = areas.high_areas(t["areas"], rules) or rk.high_paths(t["body"], rules)
-        if hot:
-            return f"touches a high-risk file ({hot[0]})"
+        return "not a proposed ticket the rule can open"
+    if t["branch"] == tk.leftovers_branch(t.get("parent") or "") and by_id.get(t.get("parent")) is not None \
+            and by_id[t["parent"]]["status"] in ("proposed", "open", "claimed", "review"):
+        return f"a leftovers ticket waits until {t['parent']} is finished"
+    waits = WAITS_RE.search(t.get("body") or "")
+    if waits:   # the controller's ordering: opens only once every ticket it waits for is done
+        for dep in waits.group(1).split(", "):
+            if dep in by_id and by_id[dep]["status"] != "done":
+                return f"waits for {dep} ({by_id[dep]['status']})"
     if t["repo"] in settings["auto_open_deny_repos"]:
         return f"repo {t['repo']} is on auto_open_deny_repos"
     hour = sum(1 for at in opened if (now - at).total_seconds() < tk.AGENT_TICKET_WINDOW)
@@ -680,7 +665,7 @@ def auto_open(tickets: list[dict], settings: dict, now: datetime | None = None,
         except (tk.TicketError, tk.TicketInvalid, OSError) as exc:
             warn(f"auto-open: {t['id']}: {exc}")
             continue
-        log("AUTO_OPEN", f"{t['id']} {t['type']} origin {new.get('origin') or new['parent']}")
+        log("AUTO_OPEN", f"{t['id']} {t['type']} filed by {t['created_by']} risk {new.get('risk', 'default')}")
         opened.append(now)
         done.append(new)
     return done
@@ -895,6 +880,22 @@ def delivered_by_partner(repo: Path, t: dict, tickets: list[dict]) -> dict | Non
     return None
 
 
+def ship_state(ticket_id: str) -> str:
+    """How the ticket's ship stands: "none" (no ship was run through the ship command), "running"
+    (it left a log but no result file yet), "ok" (the result file says it finished cleanly) or
+    "failed". A ticket is marked done only when its ship is "none" or "ok", never at the merge."""
+    d = tk.fleet_home() / "ship"
+    if not tk.ID_RE.fullmatch(ticket_id):
+        return "failed"
+    try:
+        result = json.loads((d / f"{ticket_id}.result").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "running" if (d / f"{ticket_id}.log").exists() else "none"
+    except (OSError, ValueError):
+        return "failed"
+    return "ok" if isinstance(result, dict) and result.get("code") == 0 else "failed"
+
+
 def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None, stuck: set | None = None):
     """Set claimed (or in-review) tickets whose branch was merged to done; a stacked ticket whose
     commits arrived through its partner's merge is closed as delivered. Yields the changed
@@ -909,6 +910,13 @@ def reconcile(tickets: list[dict], settings: dict, warn=lambda m: None, stuck: s
                 stuck.add(t["id"])
             continue
         note = None
+        if is_merged(repo, t["branch"], t.get("base_commit")):
+            shipped = ship_state(t["id"])
+            if shipped not in ("none", "ok"):
+                log("RECONCILE_SKIP", f"{t['id']} merged, but its ship is {shipped}; done waits for the ship result")
+                if stuck is not None and shipped == "failed":
+                    stuck.add(t["id"])
+                continue
         if not is_merged(repo, t["branch"], t.get("base_commit")):
             partner = delivered_by_partner(repo, t, tickets)
             if partner is None:

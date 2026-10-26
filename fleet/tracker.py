@@ -65,8 +65,12 @@ class Tracker(ABC):
     def add_note(self, ticket_id: str, text: str) -> dict: ...
 
     @abstractmethod
+    def set_summary(self, ticket_id: str, text: str) -> dict:
+        """Replace the ticket's plain summary."""
+
+    @abstractmethod
     def set_risk(self, ticket_id: str, level: str) -> dict:
-        """Raise the stored risk level (never lowers it; humans only)."""
+        """Raise the stored risk level (never lowers it)."""
 
     @abstractmethod
     def set_priority(self, ticket_id: str, priority: str) -> dict:
@@ -129,6 +133,9 @@ class LocalTracker(Tracker):
 
     def add_note(self, ticket_id, text):
         return self._mirrored(tk.add_note(ticket_id, text))
+
+    def set_summary(self, ticket_id, text):
+        return self._mirrored(tk.set_summary(ticket_id, text))
 
     def set_risk(self, ticket_id, level):
         return self._mirrored(tk.raise_risk(ticket_id, level))

@@ -285,7 +285,7 @@ def card_description(t: dict, usage: str | None = None) -> str:
     lines = [f"{name}: {val(name)}" for name in
              ("type", "branch", "commit", "parent", "created_by", "assignee")]
     notes = t.get("notes", [])
-    top = ""
+    top = (f"**Summary:** {t['summary']}\n\n**Where it stands:** {tk.standing(t)}\n\n") if t.get("summary") else ""
     action = {"proposed": ("approve", "Approve"), "review": ("ship", "Ship")}.get(t["status"])
     link = wc.action_url(action[0], t["id"]) if action else None
     if link:   # opens a confirmation page on the tailnet; the link alone changes nothing

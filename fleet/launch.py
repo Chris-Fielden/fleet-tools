@@ -43,7 +43,14 @@ Never run ticket, idea or alert against the real store, except `ticket show` for
 your own ticket, `ticket note` for your final summary and `ticket new` for a
 genuine proposal. Tests must use a temporary FLEET_HOME.
 Do the work, make scripts/check.sh pass, and commit. Then run
-scripts/review.sh and fix anything it marks MUST FIX. Last, record your final
+scripts/review.sh and fix anything it marks MUST FIX. Then write the ticket's plain
+summary as a note that starts "PLAIN SUMMARY:" with `ticket note {id} "..."` (what it is,
+why it matters, where it stands, whether the human must do anything; plain words, no
+labels like S8 or [U]; at most 1500 characters), and a note that starts "PROOF <full tip commit id>" with these parts, each on its own
+line start: "What it does:" (plain words), "Demo:" (the command you ran and its output,
+at most 40 lines), "Acceptance:" (each acceptance test: passed or not), "Leftovers:"
+(each review leftover: fixed, or the ID of the ticket you filed). A ticket cannot
+move to review without both. Last, record your final
 summary (what changed, how you verified it, and the review verdict) with
 `ticket note {id} "SUMMARY"` (at most 4000 characters, no secrets). Do not
 stop until that note is saved: if the command fails, fix the cause and run it
@@ -68,7 +75,11 @@ Never run ticket, idea or alert against the real store, except `ticket show` for
 your own ticket and for {parent} (read-only), `ticket note` for your final summary
 and `ticket new` for a genuine proposal. Tests must use a temporary FLEET_HOME.
 Find why it failed and fix it, make scripts/check.sh pass, and commit. Then run
-scripts/review.sh and fix anything it marks MUST FIX. Last, record your final
+scripts/review.sh and fix anything it marks MUST FIX. Then write the ticket's plain
+summary as a note that starts "PLAIN SUMMARY:" and a note that starts "PROOF <full tip
+commit id>" with the parts "What it does:", "Demo:" (command and output, at most 40
+lines), "Acceptance:" and "Leftovers:" (plain words, no labels like S8 or [U]). Last,
+record your final
 summary (what changed, how you verified it, and the review verdict) with
 `ticket note {id} "SUMMARY"` (at most 4000 characters, no secrets). Do not
 stop until that note is saved: if the command fails, fix the cause and run it
