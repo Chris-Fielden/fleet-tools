@@ -32,7 +32,12 @@ def test_vote_needs_two_distinct_companies_and_no_fail():
     assert not rk.vote_passes({**ok, "claude": {"result": "FAIL"}})
 
 
-def test_an_advisory_cursor_pass_is_not_a_vote():
+def test_cursor_is_a_third_company_vote():
+    yes = {"result": "PASS", "counted": True}
+    assert rk.vote_passes({"codex": {"result": "PASS"}, "cursor": yes})
+    assert not rk.vote_passes({"codex": {"result": "PASS"}, "cursor": {"result": "FAIL", "counted": True}})
+    assert rk.majority_failed({"codex": {"result": "FAIL"}, "cursor": {"result": "FAIL", "counted": True}})
+    # a cursor vote without the proof flag (stored before BD-136) is advisory: no vote
     assert not rk.vote_passes({"codex": {"result": "PASS"}, "cursor": {"result": "PASS"}})
     assert not rk.majority_failed({"codex": {"result": "PASS"}, "cursor": {"result": "FAIL"}})
 

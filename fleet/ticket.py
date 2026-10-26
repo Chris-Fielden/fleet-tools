@@ -387,15 +387,16 @@ def _check_verdict(v) -> list[str]:
           and re.fullmatch(r"[0-9a-f]{40}", v["commit"]) and _is_str(v["reviewer"])
           and 1 <= len(v["reviewer"]) <= REVIEWER_MAX and _is_time(v["at"])
           and isinstance(v["reviews"], dict) and v["reviews"]
-          and all(k in REVIEW_KINDS and isinstance(r, dict) and set(r) == {"result", "reviewer"}
+          and all(k in REVIEW_KINDS and isinstance(r, dict) and set(r) in ({"result", "reviewer"}, {"result", "reviewer", "counted"})
                   and r["result"] in VERDICT_RESULTS and _is_str(r["reviewer"])
                   and 1 <= len(r["reviewer"]) <= REVIEWER_MAX
                   for k, r in v["reviews"].items())
+          and any(rk.counted(k, r) for k, r in v["reviews"].items())
           and v["result"] == ("FAIL" if any(r["result"] == "FAIL" for k, r in v["reviews"].items()
-                                            if rk.counted(k)) else "PASS"))
+                                            if rk.counted(k, r)) else "PASS"))
     if not ok:
         return ["verdict must be null or {result: PASS or FAIL, commit: a full commit id, "
-                "reviewer, at: a UTC time, reviews: {codex or claude: {result, reviewer}}}"]
+                "reviewer, at: a UTC time, reviews: {" + ", ".join(REVIEW_KINDS) + ": {result, reviewer}} with at least one counted vote}"]
     return []
 
 
@@ -1124,13 +1125,13 @@ def verdict_line(v: dict | None) -> str:
     return f"{v['result']} ({who}) on commit {v['commit']} at {v['at']}"
 
 
-def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: str) -> list[dict]:
+def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: str,
+                   counted: bool = True) -> list[dict]:
     """Record a review's result on the open, claimed or in-review tickets of a branch.
     Information only: the merge gate reads the saved review itself. Reviews of
     the same commit by the counted reviewers are combined (FAIL wins); a review of
-    a different commit replaces the old verdict. An advisory voter (cursor) is saved
-    next to a counted verdict of the same commit but never changes its result, never
-    starts a verdict and never adds to the fail/review rounds. Proposed tickets are
+    a different commit replaces the old verdict. A review that is not counted (`counted` False:
+    a Cursor review without a passing probe) is never recorded: it changes nothing. Proposed tickets are
     skipped on purpose: nothing reviews a ticket that has not been approved, so a
     stray review of its branch is dropped rather than stored. A failed ticket still takes the verdicts of its branch: that is how a new passing tip can revive it. Returns the tickets changed."""
     errors = []
@@ -1142,26 +1143,36 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
         errors.append(f"result must be one of: {', '.join(VERDICT_RESULTS)}")
     if not re.fullmatch(r"[0-9a-f]{40}", commit or ""):
         errors.append("commit must be a full 40-character commit id")
-    kind = (reviewer or "").split(" ")[0].lower()
+    kind = rk.voter_kind(reviewer)
     if not _is_str(reviewer) or not 1 <= len(reviewer) <= REVIEWER_MAX or kind not in REVIEW_KINDS:
         errors.append(f"reviewer must start with {', '.join(REVIEW_KINDS)} and be 1 to {REVIEWER_MAX} characters")
     if errors:
         raise TicketInvalid(errors)
     changed = []
+    if not counted:
+        return changed
     with _locked():
         for t in list_tickets():
             if t["branch"] != branch or t["repo"] != repo or t["status"] not in ("open", "claimed", "review", "failed"):
                 continue
             old = t["verdict"]
             same = bool(old) and old["commit"] == commit
-            if not rk.counted(kind) and not same:
-                continue   # advisory votes ride along with a counted verdict, never start one
+            if kind == "cursor" and not same:
+                continue   # Cursor reviews a tip that already has a verdict; it never starts one
             reviews = dict(old["reviews"]) if same else {}
             reviews[kind] = {"result": result, "reviewer": reviewer}
+            if kind == "cursor":
+                reviews[kind]["counted"] = True   # the proof flag; absent = an advisory vote from before BD-136
             now = _now()
-            failed = any(r["result"] == "FAIL" for k, r in reviews.items() if rk.counted(k))
-            t["verdict"] = {"result": "FAIL" if failed else "PASS",
-                            "commit": commit, "reviewer": reviewer, "at": now, "reviews": reviews}
+            failed = any(r["result"] == "FAIL" for k, r in reviews.items() if rk.counted(k, r))
+            result_now = "FAIL" if failed else "PASS"
+            if kind == "cursor" and same and old["result"] == result_now:
+                # A late Cursor vote that changes nothing keeps the verdict's time and reviewer, so
+                # the author's summary written after that verdict stays "after the review".
+                t["verdict"] = {**old, "reviews": reviews}
+            else:
+                t["verdict"] = {"result": result_now,
+                                "commit": commit, "reviewer": reviewer, "at": now, "reviews": reviews}
             # A round counts only while the majority of voting companies failed the commit; a
             # later PASS that makes it a split vote takes the round back.
             if rk.majority_failed(reviews):

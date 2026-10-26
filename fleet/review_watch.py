@@ -48,6 +48,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import areas
+from . import cursor_review
 from . import dialog
 from . import dispatch as dp
 from . import fresh
@@ -401,6 +402,8 @@ def _unrecorded_pings(t: dict, repo: Path, tip: str, state: dict, now: datetime,
     wt = repo / ".worktrees" / t["branch"].removeprefix("task/")
     seen, unrecorded = state["unrecorded_seen"], set()
     for kind, info in sorted(rk.latest_reviews(wt / ".reviews", tip).items()):
+        if not rk.counted(kind, info):
+            continue   # an uncounted Cursor review is never recorded on the ticket, by design
         recorded = (v is not None and v["commit"] == tip and kind in v["reviews"]
                     and v["reviews"][kind]["result"] == info["verdict"])
         try:
@@ -1088,6 +1091,12 @@ def _check_one(t: dict, agent: dict | None, agents_known: bool, settings: dict,
     except (tk.TicketError, OSError) as exc:
         warn(f"{t['id']}: plain summary not adopted ({exc})")
     earned = ready_to_move(t, tip)
+    if cursor_review.consider(
+            t, repo, tip, settings, emit, warn,
+            lambda tk_, ev, key, detail: _ping(tk_, ev, key, state, warn, detail),
+            lambda tid, marker, text: _note_once(tid, marker, text, warn)):
+        t = tk.load_ticket(t["id"])   # a Cursor vote may have changed the verdict: judge the new one
+        earned = ready_to_move(t, tip)
 
     _settle_stale_rereviews(t, tip, state, warn)
     with _REREVIEWS_LOCK:

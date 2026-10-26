@@ -25,6 +25,9 @@ DEFAULTS = {
     "builder": "claude",
     "models": {"claude": "sonnet", "codex": None},
     "max_running": 1,
+    # BD-136: the watcher runs a Cursor review of a passing tip (needs the key file and, to COUNT,
+    # a passing probe result for the installed Cursor version; see fleet/cursor_review.py).
+    "cursor_review": False,
     "auto_investigate": True,
     "max_investigations_per_day": 3,
     "watch_interval_seconds": 120,
@@ -163,6 +166,10 @@ def _merge(settings: dict, given, path: Path) -> None:
             if model is not None and (not isinstance(model, str) or not model.strip()):
                 raise SettingsError(f"{path}: the model for {agent} must be a name or null")
             settings["models"][agent] = model
+    if "cursor_review" in given:
+        if not isinstance(given["cursor_review"], bool):
+            raise SettingsError(f"{path}: cursor_review must be true or false")
+        settings["cursor_review"] = given["cursor_review"]
     if "max_running" in given:
         settings["max_running"] = _whole(path, given, "max_running", 1, "1 or more")
     if "auto_investigate" in given:

@@ -190,7 +190,8 @@ def due(t: dict, state: dict, now: datetime, busy_ids) -> bool:
     commit, tid = v["commit"], t["id"]
     if commit in state["classified"].get(tid, {}) or state["attempts"].get(tid, {}).get(commit, 0) >= ATTEMPTS:
         return False
-    if sum(1 for k in v.get("reviews", {}) if rk.counted(k)) >= sum(1 for k in tk.REVIEW_KINDS if rk.counted(k)):
+    # Cursor reviews only a tip that already passed (BD-136), so a FAIL never waits for it.
+    if all(k in v.get("reviews", {}) for k in rk.ALWAYS_REVIEW):
         return True
     try:
         at = datetime.fromisoformat(v["at"].replace("Z", "+00:00"))

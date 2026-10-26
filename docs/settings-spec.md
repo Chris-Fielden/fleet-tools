@@ -14,6 +14,7 @@ with a plain message.
 | `builder` | `claude` | agent that builds new work (`claude` or `codex`) |
 | `models` | `{"claude": "sonnet", "codex": null}` | model per agent; null = tool default |
 | `max_running` | `1` | tickets claimed at once (a ticket in review does not count) |
+| `cursor_review` | `false` | the watcher runs a Cursor review of a passing tip; it counts only with a passing probe result for the installed Cursor version (BD-136) |
 | `auto_investigate` | `true` | start proposed investigations without approval |
 | `max_investigations_per_day` | `3` | |
 | `watch_interval_seconds` | `120` | at least 30 |

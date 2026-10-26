@@ -355,8 +355,11 @@ def _cmd_review_result(args) -> int:
     info = rk.parse_review(review_text)
     if info["verdict"] is None or not info["commit"]:
         raise tk.TicketInvalid([f"{args.file} has no VERDICT line or no Commit header"])
-    changed = tk.record_verdict(args.branch, args.repo, info["verdict"], info["commit"], info["reviewer"])
-    if not changed:
+    changed = tk.record_verdict(args.branch, args.repo, info["verdict"], info["commit"], info["reviewer"],
+                                counted=info["counted"])
+    if not info["counted"]:
+        print(f"the {info['reviewer']} review is not counted; it is saved but no vote was recorded")
+    elif not changed:
         print(f"no open, claimed or in-review ticket on {args.branch} in {args.repo}; nothing recorded")
     for t in changed:
         print(f"{t['id']} verdict {t['verdict']['result']} recorded")

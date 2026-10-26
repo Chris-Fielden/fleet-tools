@@ -14,7 +14,7 @@ from fleet import ticket as tk
 from test_dispatch import claim, make_repo, mk, projects  # noqa: F401  (fixtures)
 from test_guard_hooks import bash, run_hook
 
-NOW = datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc).replace(microsecond=0)   # the real clock: tickets are stamped with it
 GOOD_BODY = "Add a helper.\n\nAcceptance:\n- the helper returns the sorted names\n- a test covers the empty case\n"
 
 
