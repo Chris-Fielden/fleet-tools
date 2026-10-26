@@ -209,6 +209,13 @@ def test_the_probe_runs_on_the_key_alone_without_a_browser_sign_in(rig, env):
     assert all(c["has_key"] for c in fake_cursor.calls(rig.bindir))
 
 
+def test_f_fails_cleanly_when_no_tool_was_ever_called(rig):
+    # no hook event at all (no events.log): a clean "f: fail", not a crash before the result file
+    res, out = rig.go(no_tools=True)
+    assert res.returncode == 0 and out["probes"]["f"] == "fail" and "never refused" in out["why"]["f"]
+    assert out["passed"] is False
+
+
 def test_probe_d_needs_private_mode(rig):
     rig.keyfile.chmod(0o644)
     _, out = rig.go()

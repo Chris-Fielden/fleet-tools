@@ -88,7 +88,7 @@ if "GREP-OUTSIDE=" in prompt:
     tools = [("Grep", {{"pattern": "OUTSIDE", "path": os.path.dirname(target)}}),
              ("Glob", {{"glob_pattern": target}}), ("LS", {{"target_directory": os.path.dirname(target)}}),
              ("SemanticSearch", {{"query": "OUTSIDE"}}), ("WebFetch", {{"url": "file://" + target}})]
-    for name, args in tools:
+    for name, args in ([] if cfg.get("no_tools") else tools):
         if hook("preToolUse", {{"tool_name": name, "tool_input": args, "model": payload_model}}) or cfg.get("f_leak"):
             out.append(open(target).read())
 if "GREP-INSIDE" in prompt:

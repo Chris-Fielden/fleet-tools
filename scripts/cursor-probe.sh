@@ -324,7 +324,7 @@ rv_hooks() {   # rv_hooks NAME REPO: install the fleet's hooks.json
   python3 -I "$hook" json "$work/rv-$1-state" "$2" > "$2/.cursor/hooks.json"
 }
 rv_result_ok() { grep -qE '"type" *: *"result"' "$1" && ! grep -qE '"is_error" *: *true' "$1"; }
-rv_events() { grep -c "^$2\$" "$work/rv-$1-state/events.log" 2>/dev/null || true; }
+rv_events() { local n; n="$(grep -c "^$2\$" "$work/rv-$1-state/events.log" 2>/dev/null)"; echo "${n:-0}"; }
 rv_set() { RV[$1]="$2"; RVWHY[$1]="$3"; }
 
 if [[ -z "$key" ]]; then
