@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.26.1] - 2026-10-26
+
+### Changed
+
+- BD-128: Auto-open rules and file-area locks for parallel work
+
 ## [ship-2026.10.25.8] - 2026-10-25
 
 ### Changed
