@@ -280,8 +280,8 @@ def test_high_risk_needs_the_gate_not_just_one_pass(rig, ntfy):
     assert rig.get()["status"] == "claimed"
     rig.verdict("PASS", "Claude (opus)")
     rig.summary("second review in")
-    rig.summary("second review in")
     rig.summary()   # proof and plain summary after the last review
+    rig.cycle(1)
     assert rig.get()["status"] == "review"
 
 
