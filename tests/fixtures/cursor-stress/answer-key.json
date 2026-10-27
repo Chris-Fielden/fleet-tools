@@ -1,0 +1,21 @@
+{
+ "comment": "Kept OUTSIDE repo/. No reviewer ever sees it. kind: bug (security|logic|missing-test), code-typo, cosmetic. snippet must appear on that line (a test checks).",
+ "items": [
+  {"id": "sec-sql", "file": "shopdesk/orders.py", "line": 25, "kind": "bug", "category": "security", "snippet": "WHERE customer = '{customer}'"},
+  {"id": "sec-password", "file": "shopdesk/auth.py", "line": 11, "kind": "bug", "category": "security", "snippet": "admin123"},
+  {"id": "sec-path", "file": "shopdesk/invoices.py", "line": 9, "kind": "bug", "category": "security", "snippet": "os.path.join(INVOICE_DIR, name)"},
+  {"id": "logic-discount", "file": "shopdesk/orders.py", "line": 15, "kind": "bug", "category": "logic", "snippet": "percent / 10"},
+  {"id": "logic-page", "file": "shopdesk/orders.py", "line": 31, "kind": "bug", "category": "logic", "snippet": "* size + 1]"},
+  {"id": "logic-overdue", "file": "shopdesk/reports.py", "line": 17, "kind": "bug", "category": "logic", "snippet": "time.time() < due_timestamp"},
+  {"id": "test-refund", "file": "shopdesk/refunds.py", "line": 4, "kind": "bug", "category": "missing-test", "snippet": "def issue_refund"},
+  {"id": "test-monthly", "file": "shopdesk/reports.py", "line": 7, "kind": "bug", "category": "missing-test", "snippet": "def monthly_total"},
+  {"id": "typo-cap", "file": "shopdesk/orders.py", "line": 13, "kind": "code-typo", "snippet": "max_discount_percnt"},
+  {"id": "typo-timeout", "file": "shopdesk/auth.py", "line": 21, "kind": "code-typo", "snippet": "session_timeout_minuts"},
+  {"id": "typo-retry", "file": "shopdesk/reports.py", "line": 21, "kind": "code-typo", "snippet": "retry_limt"},
+  {"id": "cos-readme", "file": "README.md", "line": 7, "kind": "cosmetic", "snippet": "seperate"},
+  {"id": "cos-message", "file": "shopdesk/invoices.py", "line": 14, "kind": "cosmetic", "snippet": "Ordr"},
+  {"id": "cos-comment", "file": "shopdesk/reports.py", "line": 16, "kind": "cosmetic", "snippet": "teh"},
+  {"id": "cos-comment2", "file": "shopdesk/auth.py", "line": 10, "kind": "cosmetic", "snippet": "recieve"}
+ ],
+ "ticket_typos": ["gave given", "Hay the total", "hay the total"]
+}

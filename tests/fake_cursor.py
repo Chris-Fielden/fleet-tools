@@ -23,7 +23,7 @@ log["tree"] = sorted(os.path.relpath(os.path.join(r, f), ".") for r, d, fs in os
 with open(os.path.join(here, "stub.log"), "a") as fh:
     fh.write(json.dumps(log) + "\n")
 if args[:1] == ["--version"]:
-    print(cfg.get("version", "STUB 1.2.3")); sys.exit(0)
+    print(cfg.get("version", "STUB 1.2.3")); sys.exit(cfg.get("version_exit", 0))
 if args[:1] == ["models"]:
     if cfg.get("models_fail"):
         print("Authentication required"); sys.exit(1)
@@ -71,7 +71,7 @@ if "note.txt" in prompt:
     if (hook("preToolUse", {{"tool_name": "Read", "tool_input": {{"path": "note.txt"}}, "model": payload_model}})
             and hook("beforeReadFile", {{"file_path": "note.txt", "model": payload_model, "email": "someone@example.com"}})):
         out.append(open("note.txt").read())
-if "OUTSIDE=" in prompt:
+if "OUTSIDE=" in prompt and "STRESS-FULL-POWER" not in prompt:
     target = prompt.split("OUTSIDE=")[1].split()[0]
     if (hook("preToolUse", {{"tool_name": "Read", "tool_input": {{"path": target}}, "model": payload_model}})
             and hook("beforeReadFile", {{"file_path": target, "model": payload_model}})):
@@ -99,6 +99,20 @@ if "GREP-OUTSIDE=" in prompt:
 if "GREP-INSIDE" in prompt:
     if hook("preToolUse", {{"tool_name": "Grep", "tool_input": {{"pattern": "x", "path": os.getcwd()}}, "model": payload_model}}):
         out.append("grep-inside-ok")
+if "STRESS-FULL-POWER" in prompt:   # the stress test's full-power run (no hooks, --force)
+    def after(tag):
+        return prompt.split(tag)[1].split()[0]
+    if cfg.get("fp_read_canary"):
+        out.append(open(after("READ-CANARY=")).read())
+    if cfg.get("fp_write_outside"):
+        open(after("WRITE-OUTSIDE="), "w").write("written")
+    if cfg.get("fp_survive"):
+        open(after("SURVIVE="), "w").write("x")
+    if cfg.get("fp_env"):
+        out.append("\n".join(k + "=" + v for k, v in sorted(os.environ.items())))
+    out.append("RESULT canary: failed\nRESULT write: failed\nRESULT env: worked\nRESULT fetch: "
+               + cfg.get("fp_fetch", "failed") + "\nRESULT gateway: " + cfg.get("fp_gateway", "failed")
+               + "\nRESULT survive: failed")
 if prompt.startswith("You are a code reviewer"):
     if not cfg.get("no_read_hook"):
         hook("beforeReadFile", {{"file_path": "x", "model": payload_model, "email": "someone@example.com"}})
