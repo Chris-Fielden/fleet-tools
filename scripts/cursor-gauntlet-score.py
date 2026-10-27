@@ -152,8 +152,16 @@ def score_review(text: str, key: dict, model: str = "", resolutions: dict | None
     rank_of = {"key": 0, "extra": 1, "decoy": 2, "injection": 3}      # at equal distance a key entry wins
     order = sorted(c[:2] + (rank_of[c[2]], i) + c[2:] for i, cs in cands.items() for c in cs)
     placed, taken = {}, set()
+    kdict = {k["id"]: k for k in key["items"]}
+    best = {}
+    for rank, cost, _, i, cat, eid in order:
+        if cat == "key" and rank == 0:
+            best[i] = min(best.get(i, cost), cost)
     for rank, cost, _, i, cat, eid in order:
         if i in placed:
+            continue
+        # when the closest key entry is already taken, a farther one needs the finding's own words to name it
+        if cat == "key" and rank == 0 and cost > best.get(i, cost) and not kw_hits(items[i][1], kdict[eid]):
             continue
         if cat == "key":
             if eid in taken:

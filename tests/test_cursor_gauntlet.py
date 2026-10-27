@@ -666,3 +666,12 @@ def test_a_short_range_does_not_credit_a_problem_the_finding_never_describes():
     r = score(only_retry)
     assert "retry-hides-failure" in r["found"] and "typo-retries" not in r["found"]
     assert r["code_typos"] == 2 and r["usefulness_passed"] is False
+
+
+def test_a_second_finding_on_the_same_line_does_not_borrow_a_neighbouring_entry():
+    twice = good_review(omit=("retry-hides-failure", "typo-retries"),
+                        extra_must=["`ledgerline/gateway.py`, 27 — the broad except swallows a declined card",
+                                    "`ledgerline/gateway.py`, 27 — the retry loop hides permanent failures"])
+    r = score(twice)
+    assert "retry-hides-failure" in r["found"] and "typo-retries" not in r["found"]
+    assert r["code_typos"] == 2 and r["usefulness_passed"] is False and r["false_alarms"] == []
