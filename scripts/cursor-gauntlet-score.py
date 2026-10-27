@@ -514,7 +514,8 @@ SYSTEM_BIN = ("/bin/", "/usr/bin/", "/usr/local/bin/", "/sbin/", "/usr/sbin/")
 STD_STREAMS = ("/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr")
 PATTERN_COMMANDS = {"grep", "egrep", "fgrep", "rg", "ag", "sed", "awk", "gawk"}   # their first plain argument is a pattern
 SHELLS = {"sh", "bash", "zsh", "dash"}
-VALUE_FLAGS = {"-A", "-B", "-C", "-m", "-g", "--glob", "-t", "--type", "--max-count", "--context"}
+VALUE_FLAGS = {"-A", "-B", "-C", "-m", "-g", "--glob", "-t", "--type", "--max-count", "--context", "-F", "-v", "-j",
+               "--max-columns", "--max-depth", "--threads", "--max-filesize", "--after-context", "--before-context"}
 NO_PATTERN_FLAGS = {"--files", "--type-list"}
 FILE_FLAGS = {"-f", "--file"}
 ENV_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
@@ -632,10 +633,10 @@ def shell_outside(command: str, extra=()):
             pattern_cmd = False                     # the pattern: searched for, never opened
             continue
         cands = {t, t.split("=", 1)[-1]}
-        if re.match(r"-[A-Za-z]", t) and len(t) > 2:
-            cands.add(t[2:])                        # a value glued to a short flag: `-f/etc/passwd`
-            if pattern_cmd and t[1] == "f":
-                pattern_cmd = False                 # `grep -fFILE`: a file, so the first plain argument is a path
+        if re.match(r"-f.", t) and not t.startswith("--"):
+            cands.add(t[2:])                        # a file glued to -f: `grep -f/etc/passwd`
+            if pattern_cmd:
+                pattern_cmd = False                 # `grep -fFILE`: patterns come from a file, so the first plain argument is a path
         for cand in cands:
             if _is_outside_path(cand, program):
                 return cand
