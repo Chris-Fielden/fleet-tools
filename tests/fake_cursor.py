@@ -38,6 +38,7 @@ model = args[args.index("--model") + 1] if "--model" in args else ""
 if "no-such-model-probe" in args:
     print('{{"type":"result","is_error":true}}'); sys.exit(1)
 if cfg.get("exit"):
+    sys.stderr.write(cfg.get("stderr", ""))
     sys.exit(cfg["exit"])
 if cfg.get("needs_key") and not os.environ.get("CURSOR_API_KEY"):
     print(json.dumps({{"type": "result", "is_error": True, "result": "not logged in"}})); sys.exit(1)
@@ -116,12 +117,25 @@ if "STRESS-FULL-POWER" in prompt:   # the stress test's full-power run (no hooks
 if prompt.startswith("You are a code reviewer"):
     if not cfg.get("no_read_hook"):
         hook("beforeReadFile", {{"file_path": "x", "model": payload_model, "email": "someone@example.com"}})
-    out.append(cfg.get("review", "VERDICT: PASS\nMUST FIX:\nSUMMARY: ok"))
+    review = cfg.get("review", "VERDICT: PASS\nMUST FIX:\nSUMMARY: ok")
+    if cfg.get("review_seq"):   # the gauntlet runs several reviews: the Nth call gets the Nth text
+        counter = os.path.join(here, "review.count")
+        k = int(open(counter).read()) if os.path.exists(counter) else 0
+        open(counter, "w").write(str(k + 1))
+        review = cfg["review_seq"][min(k, len(cfg["review_seq"]) - 1)]
+    out.append(review)
     if cfg.get("leak"):
         out.append("contact someone@example.com key " + os.environ.get("CURSOR_API_KEY", ""))
+if "Your review did not meet the bar" in prompt:   # the gauntlet's debrief turn
+    if cfg.get("resume_fail") and "--resume" in args:
+        sys.exit(1)
+    out.append(cfg.get("debrief", "I most likely missed the race and the ticket wording."))
 if cfg.get("leak_all"):
     out.append("contact someone@example.com key " + os.environ.get("CURSOR_API_KEY", ""))
-print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "result": "\n".join(out) or "ok", "duration_ms": 5}}))
+doc = {{"type": "result", "subtype": "success", "is_error": False, "result": "\n".join(out) or "ok", "duration_ms": 5}}
+if cfg.get("session"):
+    doc["session_id"] = cfg["session"]
+print(json.dumps(doc))
 '''
 
 

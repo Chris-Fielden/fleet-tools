@@ -130,6 +130,15 @@ box_run() {
   )
 }
 
+# Box mode, used by scripts/cursor-gauntlet.sh (BD-141): `--box-run USE_KEY CWD HOME SECONDS PROGRAM [ARGS...]`
+# runs one program in this same box (the key, if USE_KEY is 1, is read from the key file as usual).
+if [[ "${1:-}" == "--box-run" ]]; then
+  shift
+  [[ $# -ge 5 && -d "$2" && -d "$3" ]] || { echo "cursor-stress: --box-run needs USE_KEY CWD HOME SECONDS PROGRAM" >&2; exit 7; }
+  box_run "$@"
+  exit $?
+fi
+
 # Wrapper mode, used by the probe step: the probe thinks this is the Cursor CLI. It runs the real one
 # in the box, with only the probe's throwaway folder (PROBE_WORK_DIR, which holds fake canaries and the
 # probe's HOME and repos) added. Any other folder or HOME is refused.
