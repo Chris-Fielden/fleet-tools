@@ -636,3 +636,25 @@ def test_a_probe_that_did_not_finish_is_invalid_not_a_failed_probe(rig):
     probes = [x for x in invalid if x["step"] == "probes"][0]
     assert probes["side"] == "theirs" and "did not finish" in probes["proof"]
     assert verdicts(run)["cursor"].startswith("NO-GO (its own side failed")
+
+
+def test_one_finding_that_covers_a_short_range_credits_each_problem_in_it():
+    grouped = good_review(omit=("retry-hides-failure", "typo-retries"),
+                          extra_must=["`ledgerline/gateway.py`, 24–29 — the retry count key is misspelled (max_retrys), and the "
+                                      "loop retries every error and then returns pending, hiding a declined card"])
+    r = score(grouped)
+    assert {"retry-hides-failure", "typo-retries"} <= set(r["found"])
+    assert r["bugs"] == 12 and r["code_typos"] == 3 and r["usefulness_passed"] is True
+    sloppy = score(good_review(omit=("retry-hides-failure", "typo-retries", "stock-race", "invoice-leak"),
+                               extra_must=["`ledgerline/inventory.py`, 1–30 — whole file is racy",
+                                           "`ledgerline/invoices.py`, 1–40 — whole file leaks"]))
+    assert all(not f["also"] for f in sloppy["findings"])        # a wide range credits only the entry it is nearest to
+
+
+def test_preflight_a_stale_codex_reading_is_no_reading(rig):
+    make_exe(rig.usage, "#!/bin/sh\ncat <<'EOF'\n" + json.dumps([
+        {"tool": "claude", "weekly": {"tokens": 5}},
+        {"tool": "codex", "five_hour": {"used_percent": 1.0, "stale": True}, "weekly": {"used_percent": 2.0, "stale": True}}]) + "\nEOF\n")
+    res = rig.go()
+    started_nothing(rig, res)
+    assert "Codex usage is unknown" in res.stderr

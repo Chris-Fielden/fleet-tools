@@ -143,9 +143,9 @@ for r in data if isinstance(data, list) else []:
         seen = False
         for k in ("five_hour", "weekly"):
             w = r.get(k) or {}
-            if w.get("used_percent") is not None:
+            if w.get("used_percent") is not None and not w.get("stale"):     # an old reading is no reading
                 seen = True
-                if not w.get("stale") and w["used_percent"] >= mx:
+                if w["used_percent"] >= mx:
                     bad.append("Codex %s window is %g%% used" % (k, w["used_percent"]))
         if not seen:
             bad.append("Codex usage is unknown")
@@ -567,8 +567,11 @@ done
 
 res_args=()
 [[ -n "${GAUNTLET_RESOLUTIONS:-}" ]] && res_args=(--resolutions "$GAUNTLET_RESOLUTIONS")
-PKEY="$key" python3 -I "$score" report --key "$gkey" "${res_args[@]}" "$out"
 status=0
+if ! PKEY="$key" python3 -I "$score" report --key "$gkey" "${res_args[@]}" "$out"; then
+  echo "cursor-gauntlet: the scorer failed (our side): there is NO valid report and no verdict; the saved reviews are in $out" >&2
+  status=1
+fi
 if [[ -n "$key" ]]; then
   while IFS= read -r f; do
     echo "cursor-gauntlet: the API key was found in $f: removing it" >&2
