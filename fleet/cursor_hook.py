@@ -163,7 +163,7 @@ def main(argv: list[str]) -> int:
                     _event(state_dir, "tool-allowed-" + tool)
                     if _search_outside(payload, root) and _tool_parts(payload)[0] == tool:
                         _event(state_dir, "tool-allowed-outside-" + tool)
-            except OSError:
+            except Exception:   # evidence only: never let it change the decision
                 pass
             print(json.dumps({"permission": "allow"}))
             return 0
@@ -177,7 +177,7 @@ def main(argv: list[str]) -> int:
                 if parts is None or parts[0] not in ALLOWED_TOOLS or parts[0] != tool:
                     # a name we do not know (or one the cleaning changed): the report lists it
                     _event(state_dir, "tool-unknown-" + tool)
-        except OSError:
+        except Exception:   # evidence only: the deny below must always be printed
             pass
         print(json.dumps({"permission": "deny", "user_message": "read-only fleet review",
                           "agent_message": "this review is read-only: only Read, and Grep/Glob/LS "

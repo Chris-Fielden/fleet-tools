@@ -447,7 +447,8 @@ sys.exit(0 if "\"permissionDecision\": \"deny\"" in out.getvalue() else 1)' "$1"
     rv_set f fail "the tool hook let a search tool through with a path outside the reviewed folder"
   elif [[ "$(rv_sum f tool-refused-outside- $search_tools)" -lt 1 ]]; then
     unknown="$(rv_unknown f)"
-    if [[ -n "$unknown" ]]; then rv_set f fail "no known search tool was refused; the tool hook saw tools it does not know: $unknown (add the real search tool names after a probe run, in their own ticket)"
+    if [[ -z "$search_tools" ]]; then rv_set f fail "could not read the search tool list from the hook"
+    elif [[ -n "$unknown" ]]; then rv_set f fail "no known search tool was refused; the tool hook saw tools it does not know: $unknown (add the real search tool names after a probe run, in their own ticket)"
     else rv_set f fail "the tool hook never refused a search tool aimed outside the folder (no evidence)"; fi
   else rv_set f pass "a search tool aimed outside the reviewed folder was refused; none got through"; fi
 fi
