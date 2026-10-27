@@ -9,6 +9,7 @@ Stdlib only; run as a script, never imported by agents:
                                               and LS; those only when every path argument is inside ROOT
                                               (a tool with no checkable path, e.g. semantic search, web,
                                               MCP, is denied)
+  cursor_hook.py search-tools                 print the search-type tool names, one per line
   cursor_hook.py read STATE_DIR ROOT          allow a read INSIDE the review copy ROOT only (symlinks
                                               resolved), and keep only the model name from the payload
 
@@ -66,28 +67,58 @@ def _strings(value):
             yield from _strings(v)
 
 
-def tool_allowed(payload, root: str) -> bool:
-    """preToolUse: Read (its path is checked again by beforeReadFile), and Grep/Glob/LS with at
-    least one path argument, every path argument inside ROOT. Anything else is denied."""
+# The tools a review may use. SEARCH_TOOLS are the ones that look for files by path or pattern: the
+# probe (scripts/cursor-probe.sh) reads this same list, so a name added here counts in both places.
+# Real Cursor names are added only after a real probe run shows them (BD-139).
+SEARCH_TOOLS = ("grep", "glob", "ls")
+ALLOWED_TOOLS = ("read",) + SEARCH_TOOLS
+
+
+def _tool_parts(payload):
+    """(lower-case tool name, argument dict) of a preToolUse payload, or None when malformed."""
     if not isinstance(payload, dict):
-        return False
+        return None
     name = payload.get("tool_name")
     args = payload.get("tool_input")
     if args is None:
         args = {k: v for k, v in payload.items() if k not in ("tool_name", "model")}
     if not isinstance(name, str) or not isinstance(args, dict):
-        return False
-    name = name.strip().lower()
-    if name not in ("read", "grep", "glob", "ls"):
-        return False
+        return None
+    return name.strip().lower(), args
+
+
+def _path_args(args: dict) -> list:
     paths = [s for k in PATH_KEYS for s in _strings(args.get(k))]
     # any other value that looks like a path (absolute, home or parent-relative) is checked too
     for k, v in args.items():
         if k not in PATH_KEYS:
             paths += [s for s in _strings(v) if s.startswith(("/", "~")) or ".." in s.split("/")]
+    return paths
+
+
+def tool_allowed(payload, root: str) -> bool:
+    """preToolUse: Read (its path is checked again by beforeReadFile), and Grep/Glob/LS with at
+    least one path argument, every path argument inside ROOT. Anything else is denied."""
+    parts = _tool_parts(payload)
+    if parts is None:
+        return False
+    name, args = parts
+    if name not in ALLOWED_TOOLS:
+        return False
+    paths = _path_args(args)
     if not all(inside(p, root) for p in paths):
         return False
     return bool(paths) or name == "read"
+
+
+def _search_outside(payload, root: str) -> bool:
+    """Evidence for the probe, apart from the decision: a search tool (by its exact name) with a
+    path outside ROOT. Allowed, it can only be a broken tool_allowed; denied, it is the proof the
+    probe wants: a known search tool really aimed outside the folder and refused."""
+    parts = _tool_parts(payload)
+    if parts is None or parts[0] not in SEARCH_TOOLS:
+        return False
+    return not all(inside(p, root) for p in _path_args(parts[1]))
 
 
 def payload_tool_name(raw: str) -> str:
@@ -99,6 +130,9 @@ def payload_tool_name(raw: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if argv[1:2] == ["search-tools"]:   # the one list the probe shares
+        print("\n".join(SEARCH_TOOLS))
+        return 0
     if len(argv) != 4 or argv[1] not in ("json", "shell", "tool", "read"):
         print(__doc__, file=sys.stderr)
         return 64
@@ -116,19 +150,34 @@ def main(argv: list[str]) -> int:
                           "agent_message": "this review is read-only: no shell, no writes"}))
         return 2
     if mode == "tool":
+        payload = None
         try:
-            ok = tool_allowed(json.loads(raw), root)
+            payload = json.loads(raw)
+            ok = tool_allowed(payload, root)
         except (ValueError, AttributeError, TypeError):
             ok = False
+        tool = payload_tool_name(raw)   # evidence for the probe: one lower-case, letters-only word
         if ok:
+            try:
+                if tool:
+                    _event(state_dir, "tool-allowed-" + tool)
+                    if _search_outside(payload, root) and _tool_parts(payload)[0] == tool:
+                        _event(state_dir, "tool-allowed-outside-" + tool)
+            except Exception:   # evidence only: never let it change the decision
+                pass
             print(json.dumps({"permission": "allow"}))
             return 0
         try:
             _event(state_dir, "tool-denied")
-            tool = payload_tool_name(raw)   # per-tool evidence for the probe: one lower-case word
             if tool:
                 _event(state_dir, "tool-denied-" + tool)
-        except OSError:
+                if _search_outside(payload, root) and _tool_parts(payload)[0] == tool:
+                    _event(state_dir, "tool-refused-outside-" + tool)
+                parts = _tool_parts(payload)   # the same name the allow decision used
+                if parts is None or parts[0] not in ALLOWED_TOOLS or parts[0] != tool:
+                    # a name we do not know (or one the cleaning changed): the report lists it
+                    _event(state_dir, "tool-unknown-" + tool)
+        except Exception:   # evidence only: the deny below must always be printed
             pass
         print(json.dumps({"permission": "deny", "user_message": "read-only fleet review",
                           "agent_message": "this review is read-only: only Read, and Grep/Glob/LS "
