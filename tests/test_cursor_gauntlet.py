@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -135,6 +136,25 @@ def rig(env):
     r = Rig()
     r.home, r.fleet, r.keyfile, r.boxbin, r.bindir, r.others, r.usage = home, fleet, kf, boxbin, bindir, others, usage
     r.out = env / "gauntlet-out"
+
+    def plan(weekly=10, five=10, saved_ago=timedelta(0), weekly_resets=timedelta(days=3), five_resets=timedelta(hours=2),
+             raw=None, delete=False):
+        """Write (or remove) the status line's plan-usage.json; times are relative to now."""
+        target = fleet / "plan-usage.json"
+        if delete:
+            target.unlink(missing_ok=True)
+            return
+        now = datetime.now(timezone.utc)
+
+        def iso(d):
+            return d.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def win(pct, dt):
+            return None if pct is None else {"used_percent": pct, "resets_at": iso(now + dt)}
+        target.write_text(raw if raw is not None else json.dumps(
+            {"saved_at": iso(now - saved_ago), "weekly": win(weekly, weekly_resets), "five_hour": win(five, five_resets)}))
+    r.plan = plan
+    plan()
 
     def go(models="cursor", cursor=None, claude=None, codex=None, extra_env=None, args=()):
         fake_cursor.install(bindir, **{"hook_model": "composer-2.5", "needs_key": True, "review": GOOD, **(cursor or {})})
@@ -930,3 +950,105 @@ def test_a_box_error_inside_a_probe_excerpt_is_still_our_side(tmp_path):
     out = subprocess.run(["bash", "-c", f'source <(sed -n "/^classify() {{/,/^}}/p" {SCRIPT}); classify 0 {f} no'],
                          capture_output=True, text=True)
     assert out.stdout.startswith("ours|the box failed|"), out
+
+
+# preflight: Claude's real plan usage (FX-52)
+
+def plan_fails(rig, res, *needles):
+    started_nothing(rig, res)
+    for n in needles:
+        assert n in res.stderr
+    assert "Traceback" not in res.stderr
+
+
+def test_preflight_plan_weekly_at_the_limit_fails(rig):
+    rig.plan(weekly=80)
+    plan_fails(rig, rig.go(), "weekly", "80%", "resets")
+
+
+def test_preflight_plan_exactly_the_limit_fails_just_under_passes(rig):
+    rig.plan(weekly=80.0)
+    plan_fails(rig, rig.go(), "80%")
+    rig.plan(weekly=79.99)
+    assert rig.go().returncode == 0
+
+
+def test_preflight_plan_five_hour_over_fails(rig):
+    rig.plan(weekly=10, five=85)
+    plan_fails(rig, rig.go(), "5-hour", "85%")
+
+
+def test_preflight_plan_under_the_limit_passes_and_is_recorded(rig):
+    rig.plan(weekly=79, five=20)
+    res = rig.go()
+    assert res.returncode == 0, res.stderr
+    pre = (rig.run_dir() / "preflight.txt").read_text()
+    assert "weekly 79%" in pre and "5-hour 20%" in pre and "reading saved 20" in pre
+
+
+def test_preflight_plan_no_file_says_open_claude_code(rig):
+    rig.plan(delete=True)
+    plan_fails(rig, rig.go(), "open Claude Code")
+
+
+def test_preflight_plan_corrupt_file_fails_without_a_traceback(rig):
+    rig.plan(raw="{not json")
+    plan_fails(rig, rig.go(), "open Claude Code")
+
+
+def test_preflight_plan_old_reading_fails(rig):
+    rig.plan(saved_ago=timedelta(hours=6))
+    plan_fails(rig, rig.go(), "open Claude Code")
+    rig.plan(saved_ago=timedelta(hours=4, minutes=59))
+    assert rig.go().returncode == 0
+
+
+def test_preflight_plan_reading_from_the_future_fails(rig):
+    rig.plan(saved_ago=timedelta(hours=-1))
+    plan_fails(rig, rig.go(), "open Claude Code")
+
+
+def test_preflight_plan_ended_weekly_window_is_not_a_block(rig):
+    rig.plan(weekly=95, five=20, weekly_resets=timedelta(hours=-1))
+    res = rig.go()
+    assert res.returncode == 0, res.stderr
+    assert "weekly window ended" in (rig.run_dir() / "preflight.txt").read_text()
+
+
+def test_preflight_plan_ended_five_hour_window_is_not_a_block(rig):
+    rig.plan(weekly=10, five=99, five_resets=timedelta(hours=-1))
+    assert rig.go().returncode == 0
+
+
+def test_preflight_plan_both_windows_ended_is_unknown(rig):
+    rig.plan(weekly=10, five=10, weekly_resets=timedelta(hours=-1), five_resets=timedelta(hours=-1))
+    plan_fails(rig, rig.go(), "open Claude Code")
+
+
+def test_preflight_plan_five_hour_ended_but_weekly_high_fails(rig):
+    rig.plan(weekly=90, five=10, five_resets=timedelta(hours=-1))
+    plan_fails(rig, rig.go(), "weekly", "90%")
+
+
+def test_preflight_plan_one_window_missing_the_other_is_judged(rig):
+    rig.plan(weekly=None, five=90)
+    plan_fails(rig, rig.go(), "5-hour", "90%")
+    rig.plan(weekly=None, five=20)
+    assert rig.go().returncode == 0
+
+
+def test_preflight_plan_limit_is_gauntlet_max_used(rig):
+    rig.plan(weekly=60)
+    plan_fails(rig, rig.go(extra_env={"GAUNTLET_MAX_USED": "50"}), "weekly", "60%")
+
+
+def test_preflight_plan_limit_not_a_number_is_a_fail_line(rig):
+    plan_fails(rig, rig.go(extra_env={"GAUNTLET_MAX_USED": "abc"}), "GAUNTLET_MAX_USED is not a number")
+
+
+def test_preflight_plan_and_codex_both_bad_show_both_lines(rig):
+    rig.plan(weekly=90)
+    make_exe(rig.usage, "#!/bin/sh\ncat <<'EOF'\n" + json.dumps([
+        {"tool": "claude", "weekly": {"tokens": 5}},
+        {"tool": "codex", "five_hour": {"used_percent": 97.0, "stale": False}, "weekly": {"used_percent": 20.0}}]) + "\nEOF\n")
+    plan_fails(rig, rig.go(), "Codex five_hour window is 97% used", "Claude weekly plan window is 90% used")

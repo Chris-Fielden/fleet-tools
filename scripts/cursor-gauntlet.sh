@@ -141,7 +141,11 @@ try:
     data = json.loads(sys.stdin.read())
 except ValueError:
     print("the usage readers gave no readable answer"); sys.exit(1)
-mx = float(os.environ["MAXUSED"]); bad = []
+try:
+    mx = float(os.environ["MAXUSED"])
+except ValueError:
+    print("GAUNTLET_MAX_USED is not a number"); sys.exit(1)
+bad = []
 for r in data if isinstance(data, list) else []:
     if r.get("tool") == "codex":
         seen = False
@@ -165,6 +169,34 @@ for t in ("claude", "codex"):
         bad.append("no %s usage reading" % t)
 print("; ".join(bad)); sys.exit(1 if bad else 0)' <<< "$usage_out")" \
   && ok_line "Claude and Codex usage is left" || bad_line "usage: ${usage_msg:-no answer}"
+
+# Claude's real plan usage (what the status line saved): a run that starts near the limit can run dry and be INVALID
+plan_msg="$(MAXUSED="${GAUNTLET_MAX_USED:-80}" python3 -I -c '
+import os, sys
+sys.path.insert(0, sys.argv[1])
+try:
+    mx = float(os.environ["MAXUSED"])
+except ValueError:
+    print("GAUNTLET_MAX_USED is not a number: %r" % os.environ["MAXUSED"]); sys.exit(1)
+from fleet import planusage
+d = planusage.load()
+if not d["available"]:
+    print("Claude plan usage is unknown (no fresh reading): open Claude Code and send any prompt so the status line "
+          "saves a fresh reading, then run again"); sys.exit(1)
+bad, parts = [], []
+for label, key in (("weekly", "weekly"), ("5-hour", "five_hour")):
+    w = d.get(key)
+    if not w:
+        parts.append("%s unknown" % label); continue
+    if w["stale"]:
+        parts.append("%s window ended" % label); continue
+    parts.append("%s %g%% (resets %s)" % (label, w["used_percent"], w["resets_at"] or "unknown"))
+    if w["used_percent"] >= mx:
+        bad.append("Claude %s plan window is %g%% used (limit %g%%), resets %s" % (label, w["used_percent"], mx, w["resets_at"] or "at an unknown time"))
+if bad:
+    print("; ".join(bad)); sys.exit(1)
+print("Claude plan: %s, reading saved %s" % (", ".join(parts), d["saved_at"]))' "$here")" \
+  && ok_line "$plan_msg" || bad_line "plan usage: ${plan_msg:-no answer}"
 
 # the network
 if [[ -n "${GAUNTLET_NET_CMD:-}" ]]; then
