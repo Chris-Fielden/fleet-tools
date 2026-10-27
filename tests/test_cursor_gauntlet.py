@@ -816,11 +816,13 @@ def test_a_model_side_crash_keeps_its_record_when_the_trace_also_left_the_copy(r
     "/bin/bash -lc 'git diff HEAD~1 -- ledgerline/gateway.py'",
     "/usr/bin/git log --oneline",
     "sed -n '/retry/p' ledgerline/gateway.py",
+    "grep -rn '/etc/ledgerline/service-token' .",
+    "grep -e /etc/x -n ledgerline/gateway.py",
     "grep -n \"/charge\" ledgerline/gateway.py 2>/dev/null",
     "COPYDIR/ledgerline/gateway.py",
 ])
 def test_ordinary_contained_calls_are_not_a_leak(call):
-    assert G.outside_in(call.replace("COPYDIR", "/work/copy"), ["/work/copy"]) is None
+    assert G.outside_in("command", call.replace("COPYDIR", "/work/copy"), ["/work/copy"]) is None
 
 
 @pytest.mark.parametrize("call", [
@@ -830,9 +832,12 @@ def test_ordinary_contained_calls_are_not_a_leak(call):
     "cat --file=/home/x/.ssh/id_ed25519",
     "cat /work/copy-other/secret",
     "bash -c 'cat /tmp/x'",
+    'cat "/data/secret"',
+    "/bin/bash -lc \"cat '/data/secret'\"",
+    "grep -n x /srv2/file",
 ])
 def test_calls_that_name_a_path_outside_the_copy_are_a_leak(call):
-    assert G.outside_in(call, ["/work/copy"]) is not None
+    assert G.outside_in("command", call, ["/work/copy"]) is not None
 
 
 def test_tool_output_in_a_trace_is_not_read_as_a_path_the_baseline_used():
@@ -848,3 +853,13 @@ def test_tool_output_in_a_trace_is_not_read_as_a_path_the_baseline_used():
         assert S.check_trace(f, ["/work/copy"])[0] == "ok"
         f.write_text(json.dumps({"type": "tool_use", "input": {"command": "grep -r key $HOME"}}) + "\n")
         assert S.check_trace(f, ["/work/copy"])[0] == "left"
+
+
+def test_a_search_pattern_field_is_not_a_path_but_a_path_field_is():
+    ev = {"type": "tool_use", "input": {"pattern": "/etc/ledgerline/token", "path": "ledgerline"}}
+    assert [k for k, _ in G.call_strings(ev)] == ["path"]
+    assert G.outside_in("path", "/data/secret", ["/work/copy"]) == "/data/secret"
+    assert G.outside_in("file_path", "/work/copy/a.py", ["/work/copy"]) is None
+    assert G.outside_in("file_path", "/work/copy-other/a.py", ["/work/copy"]) is not None
+    unknown = {"type": "something_new", "input": {"file_path": "/etc/passwd"}}
+    assert G.call_strings(unknown)

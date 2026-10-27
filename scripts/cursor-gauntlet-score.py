@@ -27,6 +27,7 @@ import math
 import os
 import random
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -502,73 +503,122 @@ def lock_hash(gauntlet_dir: Path, key_file: Path) -> str:
 OUTSIDE_WORDS = ("fleet-tools", ".fleet", "gauntlet-key", "answer-key")
 CALL_TYPES = {"tool_use", "command_execution", "file_read", "file_search", "file_list", "mcp_tool_call",
               "web_search", "tool_call", "function_call"}
-SKIP_KEYS = {"id", "type", "status", "exit_code", "tool_use_id"}
+CALL_MARKS = {"input", "command", "arguments", "tool_name"}      # an event of an unknown type that still looks like a call
+SKIP_KEYS = {"id", "type", "status", "exit_code", "tool_use_id", "name", "description", "prompt", "subagent_type"}
 RESULT_KEYS = {"aggregated_output", "output", "result", "content_result"}
+PATH_KEYS = {"file_path", "path", "notebook_path", "cwd", "dir", "directory", "paths", "files", "file", "glob"}
+PATTERN_KEYS = {"pattern", "query", "regex", "old_string", "new_string"}      # searched for, never opened
+SYSTEM_BIN = ("/bin/", "/usr/bin/", "/usr/local/bin/", "/sbin/", "/usr/sbin/")
+STD_STREAMS = ("/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr")
+PATTERN_COMMANDS = {"grep", "egrep", "fgrep", "rg", "ag", "sed", "awk", "gawk"}   # their first plain argument is a pattern
+SHELLS = {"sh", "bash", "zsh", "dash"}
 ABS_RE = re.compile(r"(?:^|[\s\"'=(:,\[])(/[^\s\"'|;&)\]]*)")
 DOTDOT_RE = re.compile(r"(?:^|[/\s\"'=(])\.\.(?:[/\s\"')]|$)")
 HOME_RE = re.compile(r"(?:^|[\s\"'=(:,/])(?:~|\$HOME|\$\{HOME\})(?:[/\s\"')]|$)")
 
 
 def call_strings(ev) -> list:
-    """Every string a tool call of this trace event carries (the call itself, never what came back)."""
+    """(key, string) for every string a tool call of this trace event carries (the call itself, never what came back)."""
     out = []
 
-    def walk(x, in_call):
+    def walk(x, in_call, key=""):
         if isinstance(x, dict):
-            call = in_call or x.get("type") in CALL_TYPES
+            call = in_call or x.get("type") in CALL_TYPES or bool(CALL_MARKS & set(x))
             for k, v in x.items():
                 if k not in SKIP_KEYS and not (call and k in RESULT_KEYS):
-                    walk(v, call)
+                    walk(v, call, k)
         elif isinstance(x, list):
             for v in x:
-                walk(v, in_call)
-        elif isinstance(x, str) and in_call:
-            out.append(x)
+                walk(v, in_call, key)
+        elif isinstance(x, str) and in_call and key not in PATTERN_KEYS:
+            out.append((key, x))
     walk(ev, False)
     return out
 
 
-SYSTEM_BIN = ("/bin/", "/usr/bin/", "/usr/local/bin/", "/sbin/", "/usr/sbin/")
-STD_STREAMS = ("/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr")
-# where a path can only be a path: a quoted or glued token with one of these first parts. Anything else after a quote or
-# an equals sign (a sed or grep pattern such as '/foo/p') is not read as a path.
-KNOWN_ROOTS = ("etc", "home", "root", "usr", "var", "tmp", "opt", "proc", "sys", "mnt", "srv", "boot", "lib", "lib64",
-               "run", "dev", "bin", "sbin", "Users", "COPY")
-COMMAND_LEAD_RE = re.compile(r"(?:^|[|;&(]|\bsh\s+-[a-z]*c|\bbash\s+-[a-z]*c|\bzsh\s+-[a-z]*c)\s*['\"]?$")
-
-
-def abs_outside(text: str):
-    """The first absolute path in a call that is not a system program being run or a standard stream."""
-    for m in ABS_RE.finditer(text):
-        path = m.group(1)
-        lead = text[:m.start(1)]
-        if path in STD_STREAMS:
-            continue
-        if path.startswith(SYSTEM_BIN) and COMMAND_LEAD_RE.search(lead):
-            continue                                    # `/bin/bash -lc ...`, `/usr/bin/git log`: the program, not a file
-        if lead[-1:] not in ("", " ", "\t", "\n"):      # glued to a quote, "=", ":" ...
-            if path.split("/")[1:2] and path.split("/")[1] not in KNOWN_ROOTS:
-                continue                                # looks like a pattern, not a place
-        return path
-    return None
-
-
-def outside_in(text: str, copies, extra=()):
-    """The first thing in a tool call's text that names a path outside the copy, or None."""
-    for c in sorted(copies, key=len, reverse=True):
-        text = re.sub(re.escape(c) + r"(?=$|[/\s\"')\]:,;|&])", "COPY", text)
-    hit = abs_outside(text)
-    if hit:
-        return hit
-    if DOTDOT_RE.search(text):
-        return ".."
-    if HOME_RE.search(text):
-        return "~ or $HOME"
+def _word_hit(text: str, extra):
     low = text.lower()
     for w in OUTSIDE_WORDS + tuple(extra):
         if w and w.lower() in low:
             return w
     return None
+
+
+def _dots_or_home(text: str):
+    if DOTDOT_RE.search(text):
+        return ".."
+    if HOME_RE.search(text):
+        return "~ or $HOME"
+    return None
+
+
+def _is_outside_path(p: str, program: bool):
+    """p is meant as a path: is it outside the copy (the copy was already rewritten to COPY)?"""
+    if p in STD_STREAMS or (program and p.startswith(SYSTEM_BIN)):
+        return False
+    return p.startswith("/") and not (p == "COPY" or p.startswith("COPY/"))
+
+
+def shell_outside(command: str):
+    """The first outside path a shell command names, or None. Quotes are understood, so a quoted path counts and a
+    search pattern (the first plain argument of grep, sed, awk ...) does not."""
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError:
+        return abs_outside_loose(command)
+    start, pattern_cmd, skip_next, scripts = True, False, False, set()
+    for i, t in enumerate(toks):
+        if set(t) <= set("|;&()<>"):
+            start, pattern_cmd = True, False
+            continue
+        if skip_next:
+            skip_next = False
+            continue
+        if i in scripts:                            # already read as a command of its own
+            continue
+        program = start
+        if start:
+            base = t.rsplit("/", 1)[-1]
+            pattern_cmd, start = base in PATTERN_COMMANDS, False
+            if base in SHELLS:                      # `bash -lc 'script'`: the script is a command too
+                for j in range(i + 1, len(toks) - 1):
+                    if toks[j].startswith("-") and "c" in toks[j][1:]:
+                        hit = shell_outside(toks[j + 1])
+                        if hit:
+                            return hit
+                        scripts.add(j + 1)
+                        break
+        elif pattern_cmd and t == "-e":
+            skip_next = True                        # the pattern after -e
+            continue
+        elif pattern_cmd and not t.startswith("-"):
+            pattern_cmd = False                     # the pattern: searched for, never opened
+            continue
+        for cand in {t, t.split("=", 1)[-1]}:
+            if _is_outside_path(cand, program):
+                return cand
+    return None
+
+
+def abs_outside_loose(text: str):
+    """When a command cannot be split (unbalanced quotes): any absolute path counts, except the standard streams."""
+    for m in ABS_RE.finditer(text):
+        if m.group(1) not in STD_STREAMS and not m.group(1).startswith("COPY"):
+            return m.group(1)
+    return None
+
+
+def outside_in(key: str, text: str, copies, extra=()):
+    """The first thing in a tool call's text that names a path outside the copy, or None."""
+    for c in sorted(copies, key=len, reverse=True):
+        text = re.sub(re.escape(c) + r"(?=$|[/\s\"')\]:,;|&])", "COPY", text)
+    if key in PATH_KEYS:
+        hit = text if _is_outside_path(text.strip(), False) else None
+    else:
+        hit = shell_outside(text)
+    return hit or _dots_or_home(text) or _word_hit(text, extra)
 
 
 def check_trace(path: Path, copies, extra=()):
@@ -586,8 +636,8 @@ def check_trace(path: Path, copies, extra=()):
         if not isinstance(ev, dict):
             continue
         seen = True
-        for text in call_strings(ev):
-            hit = outside_in(text, copies, extra)
+        for key, text in call_strings(ev):
+            hit = outside_in(key, text, copies, extra)
             if hit:
                 return "left", f"{hit}: {line.strip()[:300]}"
     return ("ok", "") if seen else ("missing", "the trace has no readable event")

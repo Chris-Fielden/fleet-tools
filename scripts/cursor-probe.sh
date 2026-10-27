@@ -332,13 +332,13 @@ print(re.sub(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", "[email removed]", text))' "$1" 2>
 # usage limit or a network failure shows up in the report and not only on the terminal
 rv_unfinished() {
   local own
-  own="$({ head -c 200 "$work/rv-$1.out"; echo; head -c 200 "$work/rv-$1.err"; } 2>/dev/null | tr '\n' ' ' | PKEY="$key" python3 -I -c '
+  own="$({ head -c 20000 "$work/rv-$1.out"; echo; head -c 20000 "$work/rv-$1.err"; } 2>/dev/null | tr '\n' ' ' | PKEY="$key" python3 -I -c '
 import os, re, sys
 t = sys.stdin.read()
 k = os.environ.get("PKEY", "")
 if k:
     t = t.replace(k, "[key removed]")
-print(re.sub(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", "[email removed]", t).strip())' 2>/dev/null)"
+print(re.sub(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", "[email removed]", t).strip()[:300])' 2>/dev/null)"
   echo "the run did not finish, so nothing was proved (its own output: ${own:-nothing})"
 }
 rv_hooks() {   # rv_hooks NAME REPO: install the fleet's hooks.json
