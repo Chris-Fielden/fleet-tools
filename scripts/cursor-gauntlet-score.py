@@ -497,7 +497,100 @@ def lock_hash(gauntlet_dir: Path, key_file: Path) -> str:
     return h.hexdigest()
 
 
+# --- did a baseline stay inside its copy? ------------------------------------------------------
+
+OUTSIDE_WORDS = ("fleet-tools", ".fleet", "gauntlet-key", "answer-key")
+CALL_TYPES = {"tool_use", "command_execution", "file_read", "file_search", "file_list", "mcp_tool_call",
+              "web_search", "tool_call", "function_call"}
+SKIP_KEYS = {"id", "type", "status", "exit_code", "tool_use_id"}
+RESULT_KEYS = {"aggregated_output", "output", "result", "content_result"}
+ABS_RE = re.compile(r"(?:^|[\s\"'=(:,\[])(/[^\s\"'|;&)\]]*)")
+DOTDOT_RE = re.compile(r"(?:^|[/\s\"'=(])\.\.(?:[/\s\"')]|$)")
+HOME_RE = re.compile(r"(?:^|[\s\"'=(:,/])(?:~|\$HOME|\$\{HOME\})(?:[/\s\"')]|$)")
+
+
+def call_strings(ev) -> list:
+    """Every string a tool call of this trace event carries (the call itself, never what came back)."""
+    out = []
+
+    def walk(x, in_call):
+        if isinstance(x, dict):
+            call = in_call or x.get("type") in CALL_TYPES
+            for k, v in x.items():
+                if k not in SKIP_KEYS and not (call and k in RESULT_KEYS):
+                    walk(v, call)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v, in_call)
+        elif isinstance(x, str) and in_call:
+            out.append(x)
+    walk(ev, False)
+    return out
+
+
+def outside_in(text: str, copies, extra=()):
+    """The first thing in a tool call's text that names a path outside the copy, or None."""
+    for c in sorted(copies, key=len, reverse=True):
+        text = text.replace(c, "COPY")
+    for m in ABS_RE.finditer(text):
+        if m.group(1) != "/dev/null":
+            return m.group(1)
+    if DOTDOT_RE.search(text):
+        return ".."
+    if HOME_RE.search(text):
+        return "~ or $HOME"
+    low = text.lower()
+    for w in OUTSIDE_WORDS + tuple(extra):
+        if w and w.lower() in low:
+            return w
+    return None
+
+
+def check_trace(path: Path, copies, extra=()):
+    """(status, proof): ok | left (proof is the offending trace line) | missing."""
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "missing", "no trace file"
+    seen = False
+    for line in raw.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        seen = True
+        for text in call_strings(ev):
+            hit = outside_in(text, copies, extra)
+            if hit:
+                return "left", f"{hit}: {line.strip()[:300]}"
+    return ("ok", "") if seen else ("missing", "the trace has no readable event")
+
+
+def error_lines(text: str) -> str:
+    """The lines of a CLI's output that can be an error: plain text and result/error events, never tool output."""
+    keep = []
+    for line in text.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            keep.append(line)
+            continue
+        if isinstance(ev, dict) and (ev.get("type") in ("result", "error", "turn.failed") or ev.get("is_error")):
+            keep.append(line)
+    return "\n".join(keep) + "\n"
+
+
 def main(argv: list) -> int:
+    if argv[1:2] == ["errors"]:
+        sys.stdout.write(error_lines(sys.stdin.read()))
+        return 0
+    if argv[1:2] == ["trace-check"]:
+        # trace-check TRACE EXTRA_WORDS_CSV COPY...: exit 0 ok, 1 left its copy (proof on stdout), 2 no usable trace
+        st, proof = check_trace(Path(argv[2]), argv[4:], [w for w in argv[3].split(",") if w])
+        print(proof)
+        return {"ok": 0, "left": 1}.get(st, 2)
     if argv[1:2] in (["reply"], ["scrub"], ["review-prompt"]):
         return S.main(argv)
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])

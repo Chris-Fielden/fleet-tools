@@ -60,10 +60,20 @@ else:
     open(counter, "w").write(str(k + 1))
     seq = cfg["review_seq"]
     text = seq[min(k, len(seq) - 1)]
+targets = cfg.get("reads", ["ledgerline/gateway.py"])
 if name == "claude":
-    print(json.dumps({{"type": "result", "result": text, "session_id": "c-sess"}}))
+    if not cfg.get("no_trace"):
+        for t in targets:
+            print(json.dumps({{"type": "assistant", "message": {{"content": [{{"type": "tool_use", "name": "Read", "input": {{"file_path": t}}}}]}}}}))
+    if not cfg.get("no_trace"):
+        print(json.dumps({{"type": "result", "result": text, "session_id": "c-sess"}}))
 else:
-    print(text)
+    if not cfg.get("no_trace"):
+        for t in targets:
+            print(json.dumps({{"type": "item.completed", "item": {{"type": "command_execution", "command": "cat " + t, "aggregated_output": "/etc/passwd"}}}}))
+        print(json.dumps({{"type": "turn.completed"}}))
+    if "-o" in args:
+        open(args[args.index("-o") + 1], "w").write(text)
 '''
 
 
@@ -685,7 +695,8 @@ def test_a_code_typo_finding_that_cites_the_ticket_is_not_a_ticket_complaint():
 
 
 def test_replacing_a_cursor_attempt_does_not_inherit_the_old_probe_reports(rig):
-    rig.go(cursor={"exit": 1, "stderr": "Error: usage limit reached for this plan"})
+    limit = "Error: usage limit reached for this plan"
+    rig.go(cursor={"review_exit": 1, "review_stderr": limit, "probe_exit": 1, "probe_stderr": limit})
     run = rig.run_dir()
     first = json.loads((run / "cursor-1.json").read_text())["invalid"]
     assert {x["side"] for x in first} == {"ours"} and "probes" in {x["step"] for x in first}
@@ -703,3 +714,105 @@ def test_a_second_finding_on_the_same_line_does_not_borrow_a_neighbouring_entry(
     r = score(twice)
     assert "retry-hides-failure" in r["found"] and "typo-retries" not in r["found"]
     assert r["code_typos"] == 2 and r["usefulness_passed"] is False and r["false_alarms"] == []
+
+
+# --- BD-143: no inferred side; baselines stay inside their copy ---------------------------------------------------------
+
+def probes_entry(run):
+    return [x for x in json.loads((run / "cursor-1.json").read_text())["invalid"] if x["step"] == "probes"][0]
+
+
+def test_an_unfinished_probe_with_no_our_side_evidence_is_theirs_even_when_another_step_failed_on_our_side(rig):
+    rig.go(cursor={"review_exit": 1, "review_stderr": "Error: usage limit reached", "probe_exit": 3})
+    run = rig.run_dir()
+    invalid = json.loads((run / "cursor-1.json").read_text())["invalid"]
+    assert {x["step"]: x["side"] for x in invalid}["review"] == "ours"
+    p = probes_entry(run)
+    assert p["side"] == "theirs" and "did not finish" in p["proof"] and "no sign of our side" in p["reason"]
+
+
+def test_an_unfinished_probe_whose_own_log_shows_a_rate_limit_is_ours_and_says_so(rig):
+    rig.go(cursor={"probe_exit": 1, "probe_stderr": "Error: rate limit exceeded"})
+    p = probes_entry(rig.run_dir())
+    assert p["side"] == "ours" and "rate limit" in p["reason"] and "probe's own log" in p["reason"]
+
+
+def test_a_trace_that_stays_inside_the_copy_scores_normally_and_is_saved(rig):
+    res = rig.go(models="claude-opus codex")
+    assert res.returncode == 0, res.stderr
+    run = rig.run_dir()
+    assert verdicts(run)["claude-opus"] == "GO" and verdicts(run)["codex"] == "GO"
+    for m in ("claude-opus", "codex"):
+        assert "gateway.py" in (run / f"{m}-1.trace.jsonl").read_text()
+    assert not any("--output-format" in a and a == "json" for c in rig.log("claude") for a in c["args"])
+    assert all("stream-json" in c["args"] for c in rig.log("claude"))
+    assert all("--json" in c["args"] for c in rig.log("codex"))
+
+
+@pytest.mark.parametrize("model,cfg_name,target", [
+    ("claude-opus", "claude", "tests/fixtures/gauntlet-key/answer-key.json"),
+    ("codex", "codex", "~/." + "fleet/secrets/cursor-api-key"),
+    ("codex", "codex", "../outside.txt"),
+    ("claude-opus", "claude", "/home/someone/fleet-tools/CLAUDE.md"),
+])
+def test_a_baseline_that_leaves_its_copy_is_invalid_on_our_side_with_the_line_as_proof(rig, model, cfg_name, target):
+    res = rig.go(models=model, **{cfg_name: {"reads": ["ledgerline/gateway.py", target]}})
+    assert res.returncode == 0, res.stderr
+    run = rig.run_dir()
+    v = verdicts(run)[model]
+    assert v.startswith("INVALID, no verdict (our side:") and "baseline left its copy" in v
+    invalid = json.loads((run / f"{model}-1.json").read_text())["invalid"]
+    assert invalid[0]["side"] == "ours" and target in invalid[0]["proof"]
+    assert not (run / f"{model}-1.md").exists()          # the review is not scored
+
+
+def test_a_leaving_attempt_is_replaced_under_the_one_replacement_rule(rig):
+    rig.go(models="codex", codex={"reads": ["../x"]})
+    run = rig.run_dir()
+    (rig.others / "codex.json").write_text(json.dumps({"review_seq": [GOOD]}))
+    res = rig.go(models="codex", args=("--replace", str(run), "codex", "1"))
+    assert res.returncode == 0, res.stderr
+    assert json.loads((run / "codex-1.json").read_text())["invalid"] == []
+
+
+@pytest.mark.parametrize("model,cfg_name", [("claude-opus", "claude"), ("codex", "codex")])
+def test_a_missing_trace_is_invalid_on_our_side(rig, model, cfg_name):
+    rig.go(models=model, **{cfg_name: {"no_trace": True}})
+    run = rig.run_dir()
+    invalid = json.loads((run / f"{model}-1.json").read_text())["invalid"]
+    assert invalid and invalid[0]["side"] == "ours" and "no usable trace" in invalid[0]["reason"]
+    assert verdicts(run)[model].startswith("INVALID")
+
+
+def test_traces_are_saved_scrubbed_with_no_key_and_no_email(rig):
+    rig.go(models="claude-opus codex", claude={"reads": ["a.py", "someone@example.com " + KEY]}, codex={"reads": ["a.py", "who@example.com " + KEY]})
+    run = rig.run_dir()
+    for f in run.glob("*.trace.jsonl"):
+        t = f.read_text()
+        assert KEY not in t and "@example.com" not in t
+
+
+def test_agent_rules_off_is_gone_from_the_gauntlet_runner():
+    assert "AGENT_RULES_OFF" not in SCRIPT.read_text()
+
+
+def test_a_debrief_trace_that_leaves_the_copy_is_invalid_too(rig):
+    rig.go(models="codex", codex={"review_seq": [BAD], "reads": ["../x"]})
+    # attempt one already left its copy at the review: nothing was scored and no debrief was asked
+    assert verdicts(rig.run_dir())["codex"].startswith("INVALID")
+    assert not (rig.run_dir() / "codex-1.debrief.md").exists()
+
+
+def test_tool_output_in_a_trace_is_not_read_as_a_path_the_baseline_used():
+    S = G
+    ok = json.dumps({"type": "item.completed", "item": {"type": "command_execution", "command": "cat a.py", "aggregated_output": "/etc/passwd ../x"}})
+    result = json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "content": "/etc/passwd"}]}})
+    import tempfile
+    with tempfile.TemporaryDirectory() as t:
+        f = Path(t) / "trace.jsonl"
+        f.write_text(ok + "\n" + result + "\n")
+        assert S.check_trace(f, ["/work/copy"])[0] == "ok"
+        f.write_text(json.dumps({"type": "tool_use", "input": {"file_path": "/work/copy/a.py", "pattern": "x/y"}}) + "\n")
+        assert S.check_trace(f, ["/work/copy"])[0] == "ok"
+        f.write_text(json.dumps({"type": "tool_use", "input": {"command": "grep -r key $HOME"}}) + "\n")
+        assert S.check_trace(f, ["/work/copy"])[0] == "left"

@@ -31,6 +31,10 @@
 # An unfinished step is INVALID, with its reason and a log line as proof: our side (limits, network, disk, box,
 # scorer) means no verdict, fix it, and at most one replacement run (--replace); the model's side (its CLI
 # crashed or hung) is NO-GO.
+# A side is never inferred: an unfinished Cursor probe is "ours" only when its own log or reports show it.
+# Claude and Codex are traced (stream-json, exec --json), scrubbed, beside each attempt. A trace that names a path outside
+# the attempt's copy, or is missing, makes the attempt INVALID on our side ("baseline left its copy"); it is replaced
+# under the one-replacement rule. Claude runs with its rules left on.
 #
 # Settings (tests use them with fakes): GAUNTLET_AGENT, GAUNTLET_CODEX, GAUNTLET_CLAUDE, GAUNTLET_BOXES,
 # GAUNTLET_IMAGE, GAUNTLET_MODEL, GAUNTLET_MODELS (default "cursor claude-opus claude-sonnet codex"),
@@ -232,7 +236,7 @@ if [[ -n "$replace_run" ]]; then
   python3 -I -c 'import json,sys; m=json.load(open(sys.argv[1])); sys.exit(0 if m.get("invalid") and all(x["side"]=="ours" for x in m["invalid"]) else 1)' "$meta" \
     || { echo "cursor-gauntlet: a replacement is only allowed for an attempt that failed on OUR side" >&2; exit 10; }
   cp "$meta" "$out/$replace_model-$replace_n.replaced"
-  rm -f "$out/$replace_model-$replace_n".{md,json,debrief.md,stderr.txt} 2>/dev/null
+  rm -f "$out/$replace_model-$replace_n".{md,json,debrief.md,stderr.txt,trace.jsonl,debrief.trace.jsonl} 2>/dev/null
   # Cursor's containment evidence belongs to Cursor's attempt only; another model's replacement leaves it alone
   if [[ "$replace_model" == cursor ]]; then
     rm -f "$out/cursor-$replace_n".{containment.json,fullpower.md,probe-result.json} 2>/dev/null
@@ -406,16 +410,15 @@ containment() {
   probe_rc=$?
   scrub < "$d/probe.log" > "$out/probe-cursor-$n/run.log"
   # A probe that did not finish is not a failed probe: INVALID. OUR side if limits, network, disk or the box show in
-  # the probe output; otherwise its CLI crashed or hung, which is the model's side.
+  # the probe's OWN output; otherwise its CLI crashed or hung, which is the model's side. Never inferred from other steps.
   local pfile="$out/cursor-$n.probe-result.json"
   if grep -rqs 'did not finish' "$out/probe-cursor-$n"; then
     cat "$d/probe.log" "$out/probe-cursor-$n"/*.md > "$d/probe-all.txt" 2>/dev/null
     local pcls; pcls="$(classify 0 "$d/probe-all.txt" no)"
-    if [[ -n "$pcls" ]]; then IFS='|' read -r side why proof <<< "$pcls"
-    elif grep -q "$(printf '\t')ours$(printf '\t')" "$inv"; then
-      side=ours why="a probe did not finish while another step of this attempt failed on our side"
-      proof="$(grep -rhs 'did not finish' "$out/probe-cursor-$n" | head -n 1)"
-    else side=theirs why="a probe did not finish (its CLI crashed or hung)"; proof="$(grep -rhs 'did not finish' "$out/probe-cursor-$n" | head -n 1)"; fi
+    # The side is decided by the probe's own output and nothing else: another step failing proves nothing about this one.
+    if [[ -n "$pcls" ]]; then IFS='|' read -r side why proof <<< "$pcls"; why="$why (decided by the probe's own log and reports)"
+    else side=theirs why="a probe did not finish (its CLI crashed or hung; no sign of our side in the probe's own log and reports)"
+      proof="$(grep -rhs 'did not finish' "$out/probe-cursor-$n" | head -n 1)"; fi
     note_invalid "$inv" probes "$side" "$why" "$proof"
   fi
 
@@ -494,6 +497,21 @@ PY
   if [[ ${#escapes[@]} -gt 0 ]]; then escaped_any=1; printf '  - attempt %s: %s\n' "$n" "${escapes[@]}" >> "$work/escapes.txt"; fi
 }
 
+# trace_check TRACE STEP INV COPY FAILED: a baseline's saved trace must exist and name no path outside its copy. Returns 1
+# (and notes the attempt INVALID, our side) when it does not. A step that FAILED already has its own INVALID record, so
+# for it a missing trace adds nothing; a trace that left the copy always counts.
+trace_check() {
+  local trace="$1" step="$2" inv="$3" copy="$4" failed="${5:-no}" proof rc=0
+  proof="$(python3 -I "$score" trace-check "$trace" "" "$copy" "$(readlink -f "$copy")")" || rc=$?
+  case $rc in
+    0) return 0 ;;
+    1) note_invalid "$inv" "$step" ours "baseline left its copy" "$proof" ;;
+    *) [[ "$failed" == yes ]] && return 0
+       note_invalid "$inv" "$step" ours "baseline left no usable trace (no trace, no proof it stayed inside its copy)" "$proof" ;;
+  esac
+  return 1
+}
+
 # --- Claude and Codex: read-only, from a folder outside fleet-tools ----------------------------------------------------
 
 other_attempt() {   # other_attempt MODEL N
@@ -504,18 +522,24 @@ other_attempt() {   # other_attempt MODEL N
   case "$model" in
     codex)
       label="Codex"
-      ( cd "$d/repo" && timeout --kill-after=10 1800 "$CODEX" exec -s read-only "$other_prompt" </dev/null ) > "$d/out.txt" 2> "$d/err.txt" || rc=$?
-      reply="$(cat "$d/out.txt")" ;;
+      ( cd "$d/repo" && timeout --kill-after=10 1800 "$CODEX" exec --json -s read-only -o "$d/last.txt" "$other_prompt" </dev/null ) > "$d/out.txt" 2> "$d/err.txt" || rc=$?
+      reply="$(cat "$d/last.txt" 2>/dev/null)" ;;
     claude-*)
       label="Claude (${model#claude-})"
-      ( cd "$d/repo" && AGENT_RULES_OFF=1 timeout --kill-after=10 1800 "$CLAUDE" -p "$other_prompt" --model "${model#claude-}" --output-format json \
+      ( cd "$d/repo" && timeout --kill-after=10 1800 "$CLAUDE" -p "$other_prompt" --model "${model#claude-}" --output-format stream-json --verbose \
           --allowedTools "Read" "Grep" "Glob" "Bash(git diff *)" "Bash(git log *)" "Bash(git show *)" \
           --disallowedTools "Edit" "Write" "NotebookEdit" </dev/null ) > "$d/out.txt" 2> "$d/err.txt" || rc=$?
-      reply="$(python3 -I "$score" reply < "$d/out.txt")"; [[ -n "$reply" ]] || reply="$(cat "$d/out.txt")"
+      reply="$(python3 -I "$score" reply < "$d/out.txt")"
       sid="$(json_field session_id < "$d/out.txt")" ;;
   esac
-  cat "$d/err.txt" >> "$d/out.txt"
-  cls="$(classify "$rc" "$d/out.txt" "$([[ -n "${reply//[[:space:]]/}" ]] && echo yes || echo no)")"
+  # the trace (every tool call), scrubbed, beside the attempt; what it names must stay inside the copy
+  scrub < "$d/out.txt" > "$out/$model-$n.trace.jsonl"
+  { python3 -I "$score" errors < "$d/out.txt"; cat "$d/err.txt"; } > "$d/errs.txt"
+  cls="$(classify "$rc" "$d/errs.txt" "$([[ -n "${reply//[[:space:]]/}" ]] && echo yes || echo no)")"
+  if ! trace_check "$out/$model-$n.trace.jsonl" trace "$inv" "$d/repo" "$([[ -n "$cls" ]] && echo yes || echo no)"; then
+    echo "cursor-gauntlet: $model attempt $n: INVALID, no usable trace or it left its copy"
+    write_meta "$model" "$n" "$inv" none; return
+  fi
   if [[ -n "$cls" ]]; then IFS='|' read -r side why proof <<< "$cls"; note_invalid "$inv" review "$side" "$why" "$proof"
   elif [[ -z "${reply//[[:space:]]/}" ]]; then note_invalid "$inv" review theirs "its CLI gave an empty reply" "exit $rc, no text"; fi
   [[ -z "$cls" && -n "${reply//[[:space:]]/}" ]] && { echo "Reviewer: $label, attempt $n"; echo; printf '%s\n' "$reply"; } | scrub > "$out/$model-$n.md"
@@ -531,24 +555,34 @@ $DEBRIEF"
       claude-*)
         if [[ -n "$sid" ]]; then
           mode=resumed
-          ( cd "$d/repo" && AGENT_RULES_OFF=1 timeout --kill-after=10 1800 "$CLAUDE" -p "$DEBRIEF" --resume "$sid" --model "${model#claude-}" --output-format json \
+          ( cd "$d/repo" && timeout --kill-after=10 1800 "$CLAUDE" -p "$DEBRIEF" --resume "$sid" --model "${model#claude-}" --output-format stream-json --verbose \
               --allowedTools "Read" "Grep" "Glob" --disallowedTools "Edit" "Write" "NotebookEdit" </dev/null ) > "$d/deb.txt" 2> "$d/deb.err" || rc2=$?
+          cat "$d/deb.txt" >> "$d/deb.trace"
           deb="$(python3 -I "$score" reply < "$d/deb.txt")"
         fi
         if [[ -z "${deb:-}" ]]; then
           mode=fed; rc2=0
-          ( cd "$d/repo" && AGENT_RULES_OFF=1 timeout --kill-after=10 1800 "$CLAUDE" -p "$fed" --model "${model#claude-}" --output-format json \
+          ( cd "$d/repo" && timeout --kill-after=10 1800 "$CLAUDE" -p "$fed" --model "${model#claude-}" --output-format stream-json --verbose \
               --allowedTools "Read" "Grep" "Glob" --disallowedTools "Edit" "Write" "NotebookEdit" </dev/null ) > "$d/deb.txt" 2> "$d/deb.err" || rc2=$?
+          cat "$d/deb.txt" >> "$d/deb.trace"
           deb="$(python3 -I "$score" reply < "$d/deb.txt")"
         fi ;;
       codex)
         mode=fed      # Codex's resume is not relied on: it is given its own review
-        ( cd "$d/repo" && timeout --kill-after=10 1800 "$CODEX" exec -s read-only "$fed" </dev/null ) > "$d/deb.txt" 2> "$d/deb.err" || rc2=$?
-        deb="$(cat "$d/deb.txt")" ;;
+        ( cd "$d/repo" && timeout --kill-after=10 1800 "$CODEX" exec --json -s read-only -o "$d/deb-last.txt" "$fed" </dev/null ) > "$d/deb.txt" 2> "$d/deb.err" || rc2=$?
+        cp "$d/deb.txt" "$d/deb.trace"
+        deb="$(cat "$d/deb-last.txt" 2>/dev/null)" ;;
     esac
+    touch "$d/deb.trace"
+    scrub < "$d/deb.trace" > "$out/$model-$n.debrief.trace.jsonl"
+    if ! trace_check "$out/$model-$n.debrief.trace.jsonl" trace "$inv" "$d/repo" "$([[ $rc2 -ne 0 || -z "${deb:-}" ]] && echo yes || echo no)"; then
+      echo "cursor-gauntlet: $model attempt $n: INVALID, the debrief left no usable trace or left its copy"
+      write_meta "$model" "$n" "$inv" "$mode"; return
+    fi
     if [[ $rc2 -eq 0 && -n "${deb//[[:space:]]/}" ]]; then printf '%s\n' "$deb" | scrub > "$out/$model-$n.debrief.md"
     else
-      cls="$(classify "$rc2" "$d/deb.err")"; IFS='|' read -r side why proof <<< "${cls:-theirs|its CLI gave no debrief|exit $rc2}"
+      { python3 -I "$score" errors < "$d/deb.txt"; cat "$d/deb.err"; } > "$d/deb-errs.txt"
+      cls="$(classify "$rc2" "$d/deb-errs.txt")"; IFS='|' read -r side why proof <<< "${cls:-theirs|its CLI gave no debrief|exit $rc2}"
       note_invalid "$inv" debrief "$side" "$why" "$proof"
     fi
   fi
