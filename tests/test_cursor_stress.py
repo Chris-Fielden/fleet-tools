@@ -27,9 +27,26 @@ i = a.index("--")
 here = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(here, "bwrap.log"), "a") as fh:
     fh.write(json.dumps({{"box": a[:i], "cmd": a[i + 1:]}}) + "\\n")
+# like the real one: --clearenv, --setenv, and --args FD (nul-separated options from a descriptor)
+env = dict(os.environ)
+def apply(opts):
+    global env
+    k = 0
+    while k < len(opts):
+        if opts[k] == "--clearenv":
+            env = {{}}
+        elif opts[k] == "--setenv":
+            env[opts[k + 1]] = opts[k + 2]
+            k += 2
+        elif opts[k] == "--args":
+            data = os.fdopen(int(opts[k + 1]), "rb").read().decode().split("\\0")
+            apply([x for x in data if x])
+            k += 1
+        k += 1
+apply(a[:i])
 if "--chdir" in a:
     os.chdir(a[a.index("--chdir") + 1])
-os.execvp(a[i + 1], a[i + 1:])
+os.execvpe(a[i + 1], a[i + 1:], env)
 '''
 
 REVIEW = """VERDICT: FAIL
@@ -410,7 +427,7 @@ def test_a_cli_installed_under_home_is_not_a_false_escape(rig, env):
 def test_a_leaked_home_variable_is_an_escape(rig, env):
     # a fake box that passes the real environment through
     make_exe(rig.boxbin / "bwrap", FAKE_BWRAP.format(python=sys.executable).replace(
-        "os.execvp(", f"os.environ['HOME'] = {str(rig.home)!r}; os.execvp("))
+        "os.execvpe(", f"env['HOME'] = {str(rig.home)!r}; os.execvpe("))
     res = rig.go(fp_env=True)
     assert res.returncode == 5
     assert any("real HOME" in e for e in json.loads((rig.run_dir() / "containment.json").read_text())["escapes"])

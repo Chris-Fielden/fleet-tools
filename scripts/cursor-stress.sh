@@ -74,10 +74,12 @@ box_cmd() {
   local d l f
   case "$box_name" in
     bwrap)
-      local envs=("HOME=$home" "PATH=$agent_dir:/usr/local/bin:/usr/bin:/bin" "LANG=C.UTF-8"
-                  "XDG_CONFIG_HOME=$home/.config" "XDG_DATA_HOME=$home/.local/share" "XDG_CACHE_HOME=$home/.cache")
-      # the key is NOT here: box_run puts it in the environment of the process, never in an argument
-      BOXCMD=("${envs[@]}" "$box_bin" --unshare-all --share-net --die-with-parent --new-session
+      # a clean environment: --clearenv, then only these. The key is NOT here: box_run feeds it on file
+      # descriptor 4 (--args), so it is in no command line, not even for an instant.
+      BOXCMD=("$box_bin" --clearenv --setenv HOME "$home" --setenv PATH "$agent_dir:/usr/local/bin:/usr/bin:/bin"
+              --setenv LANG C.UTF-8 --setenv XDG_CONFIG_HOME "$home/.config" --setenv XDG_DATA_HOME "$home/.local/share"
+              --setenv XDG_CACHE_HOME "$home/.cache" --args 4
+              --unshare-all --share-net --die-with-parent --new-session
               --proc /proc --dev /dev --tmpfs /tmp --ro-bind /usr /usr)
       for l in /bin /sbin /lib /lib32 /lib64; do
         if [[ -L "$l" ]]; then BOXCMD+=(--symlink "$(readlink "$l")" "$l")
@@ -109,18 +111,20 @@ box_cmd() {
 
 # box_run USE_KEY CWD HOME SECONDS PROGRAM [ARGS...]: run one program in the box, no input, a time limit.
 # Extra read-write folders can be set in BOX_EXTRA (used only by the probe step).
-# The key travels in the environment of the process, never in an argument (a long-lived parent such as
-# `timeout` would show it in `ps`): bwrap gets a clean environment from `env -i`, started by a `bash -c`
-# that reads the key from its own environment; docker and podman pass it on by name (-e CURSOR_API_KEY).
+# The key never goes into a command line (a long-lived parent such as `timeout` would show it in `ps`,
+# and so would `env` for an instant): bwrap reads `--setenv CURSOR_API_KEY ...` from file descriptor 4;
+# docker and podman pass it on by name (-e CURSOR_API_KEY) from this subshell's environment.
 box_run() {
   local usekey="$1" cwd="$2" home="$3" secs="$4"; shift 4
   box_cmd "$usekey" "$cwd" "$home" ${BOX_EXTRA:+"$BOX_EXTRA"}
   (
-    if [[ "$usekey" == 1 ]]; then export CURSOR_API_KEY="$key"; else unset CURSOR_API_KEY; fi
     if [[ "$box_name" == bwrap ]]; then
-      exec timeout --kill-after=10 "$secs" bash -c 'exec env -i ${CURSOR_API_KEY:+"CURSOR_API_KEY=$CURSOR_API_KEY"} "$@"' _ \
-        "${BOXCMD[@]}" "$@" </dev/null 3< <(printf 'box:x:%s:%s::%s:/bin/sh\n' "$(id -u)" "$(id -g)" "$home")
+      unset CURSOR_API_KEY
+      exec timeout --kill-after=10 "$secs" "${BOXCMD[@]}" "$@" </dev/null \
+        3< <(printf 'box:x:%s:%s::%s:/bin/sh\n' "$(id -u)" "$(id -g)" "$home") \
+        4< <(if [[ "$usekey" == 1 ]]; then printf '%s\0' --setenv CURSOR_API_KEY "$key"; fi)
     else
+      if [[ "$usekey" == 1 ]]; then export CURSOR_API_KEY="$key"; else unset CURSOR_API_KEY; fi
       exec timeout --kill-after=10 "$secs" "${BOXCMD[@]}" "$@" </dev/null
     fi
   )
@@ -174,6 +178,8 @@ mkdir -p "$out" || exit 1
 echo "cursor-stress: box = $box_name; CLI = $version_raw; results go to $out"
 
 scrub() { PKEY="$key" python3 -I "$score" scrub; }
+# scrub_file F: remove the key and any email address from F in place, at once (before anything else reads it)
+scrub_file() { scrub < "$1" > "$1.scrubbed" && mv -f "$1.scrubbed" "$1"; }
 reply_of() { PKEY="$key" python3 -I "$score" reply < "$1"; }
 
 # --- the test repo: a git repo with a base commit and one feature branch ---------------------------
@@ -210,6 +216,7 @@ cursor_review() {   # cursor_review N: one fleet-style Cursor review in a fresh 
   box_run 1 "$repo" "$home" 1800 "$agent_real" -p --trust --mode ask --model "$MODEL" --output-format json "$cursor_prompt" \
     > "$d/out.json" 2> "$d/err.txt"
   code=$?
+  scrub_file "$d/out.json"; scrub_file "$d/err.txt"
   {
     echo "Reviewer: Cursor ($MODEL), run $n"
     echo "Commit: $full_sha"
@@ -299,6 +306,7 @@ echo "cursor-stress: full-power run (in the box)"
 box_run 1 "$fp/repo" "$fp/home" 1800 "$agent_real" -p --trust --force --model "$MODEL" --output-format json "$fp_prompt" \
   > "$fp/out.json" 2> "$fp/err.txt"
 fp_code=$?
+scrub_file "$fp/out.json"; scrub_file "$fp/err.txt"
 fp_reply="$(python3 -I "$score" reply < "$fp/out.json")"      # raw (the key is removed when saved)
 {
   echo "Reviewer: Cursor ($MODEL), full power"
