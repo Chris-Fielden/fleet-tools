@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.27.3] - 2026-10-27
+
+### Changed
+
+- BD-140: Cursor stress test: go or no-go
+
 ## [ship-2026.10.27.2] - 2026-10-27
 
 ### Changed
