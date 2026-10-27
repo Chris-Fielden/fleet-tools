@@ -512,6 +512,8 @@ SYSTEM_BIN = ("/bin/", "/usr/bin/", "/usr/local/bin/", "/sbin/", "/usr/sbin/")
 STD_STREAMS = ("/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr")
 PATTERN_COMMANDS = {"grep", "egrep", "fgrep", "rg", "ag", "sed", "awk", "gawk"}   # their first plain argument is a pattern
 SHELLS = {"sh", "bash", "zsh", "dash"}
+VALUE_FLAGS = {"-A", "-B", "-C", "-m", "-g", "--glob", "-t", "--type", "--max-count", "--context"}
+NO_PATTERN_FLAGS = {"--files", "--type-list"}
 ABS_RE = re.compile(r"(?:^|[\s\"'=(:,\[])(/[^\s\"'|;&)\]]*)")
 DOTDOT_RE = re.compile(r"(?:^|[/\s\"'=(])\.\.(?:[/\s\"')]|$)")
 HOME_RE = re.compile(r"(?:^|[\s\"'=(:,/])(?:~|\$HOME|\$\{HOME\})(?:[/\s\"')]|$)")
@@ -521,17 +523,21 @@ def call_strings(ev) -> list:
     """(key, string) for every string a tool call of this trace event carries (the call itself, never what came back)."""
     out = []
 
-    def walk(x, in_call, key=""):
+    def walk(x, in_call, key="", tool=""):
         if isinstance(x, dict):
             call = in_call or x.get("type") in CALL_TYPES or bool(CALL_MARKS & set(x))
+            tool = x["name"] if isinstance(x.get("name"), str) else tool
             for k, v in x.items():
                 if k not in SKIP_KEYS and not (call and k in RESULT_KEYS):
-                    walk(v, call, k)
+                    walk(v, call, k, tool)
         elif isinstance(x, list):
             for v in x:
-                walk(v, in_call, key)
-        elif isinstance(x, str) and in_call and key not in PATTERN_KEYS:
-            out.append((key, x))
+                walk(v, in_call, key, tool)
+        elif isinstance(x, str) and in_call:
+            if tool.lower() == "glob" and key == "pattern":
+                out.append(("glob", x))                  # a Glob pattern names places: it is read as a path
+            elif key not in PATTERN_KEYS:
+                out.append((key, x))
     walk(ev, False)
     return out
 
@@ -590,8 +596,14 @@ def shell_outside(command: str):
                             return hit
                         scripts.add(j + 1)
                         break
-        elif pattern_cmd and t == "-e":
-            skip_next = True                        # the pattern after -e
+        elif pattern_cmd and t in ("-e", "--regexp"):
+            skip_next, pattern_cmd = True, False    # the pattern after -e; no other pattern follows
+            continue
+        elif pattern_cmd and t in VALUE_FLAGS:
+            skip_next = True                        # a number or a glob, not a path
+            continue
+        elif pattern_cmd and t in NO_PATTERN_FLAGS:
+            pattern_cmd = False                     # `rg --files /etc`: every argument is a place
             continue
         elif pattern_cmd and not t.startswith("-"):
             pattern_cmd = False                     # the pattern: searched for, never opened

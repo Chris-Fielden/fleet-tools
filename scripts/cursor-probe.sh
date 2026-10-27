@@ -332,13 +332,24 @@ print(re.sub(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", "[email removed]", text))' "$1" 2>
 # usage limit or a network failure shows up in the report and not only on the terminal
 rv_unfinished() {
   local own
-  own="$({ head -c 20000 "$work/rv-$1.out"; echo; head -c 20000 "$work/rv-$1.err"; } 2>/dev/null | tr '\n' ' ' | PKEY="$key" python3 -I -c '
+  own="$(PKEY="$key" python3 -I -c '
 import os, re, sys
-t = sys.stdin.read()
 k = os.environ.get("PKEY", "")
-if k:
-    t = t.replace(k, "[key removed]")
-print(re.sub(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", "[email removed]", t).strip()[:300])' 2>/dev/null)"
+ERR = re.compile(r"usage limit|rate.?limit|quota|too many requests|\b429\b|credit|resolve|refused|ENOTFOUND|unreachable|ETIMEDOUT|EAI_AGAIN|ECONNRESET|no space|bwrap", re.I)
+def clean(t):
+    if k:
+        t = t.replace(k, "[key removed]")
+    return re.sub(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", "[email removed]", t)
+bits = []
+for path in sys.argv[1:]:
+    try:
+        text = clean(open(path, encoding="utf-8", errors="replace").read(20000))
+    except OSError:
+        continue
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    hit = next((l for l in lines if ERR.search(l)), "")      # an error line wins over start-up chatter
+    bits.append((hit or " ".join(lines))[:150])
+print(" | ".join(b for b in bits if b))' "$work/rv-$1.out" "$work/rv-$1.err" 2>/dev/null)"
   echo "the run did not finish, so nothing was proved (its own output: ${own:-nothing})"
 }
 rv_hooks() {   # rv_hooks NAME REPO: install the fleet's hooks.json

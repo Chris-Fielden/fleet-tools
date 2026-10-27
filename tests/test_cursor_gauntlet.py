@@ -835,6 +835,9 @@ def test_ordinary_contained_calls_are_not_a_leak(call):
     'cat "/data/secret"',
     "/bin/bash -lc \"cat '/data/secret'\"",
     "grep -n x /srv2/file",
+    "grep -e token /etc/passwd",
+    "rg --files /etc",
+    "grep -A 3 foo /etc/passwd",
 ])
 def test_calls_that_name_a_path_outside_the_copy_are_a_leak(call):
     assert G.outside_in("command", call, ["/work/copy"]) is not None
@@ -863,3 +866,12 @@ def test_a_search_pattern_field_is_not_a_path_but_a_path_field_is():
     assert G.outside_in("file_path", "/work/copy-other/a.py", ["/work/copy"]) is not None
     unknown = {"type": "something_new", "input": {"file_path": "/etc/passwd"}}
     assert G.call_strings(unknown)
+
+
+def test_a_glob_pattern_is_a_place_but_a_grep_pattern_is_not():
+    glob = {"type": "tool_use", "name": "Glob", "input": {"pattern": "/etc/*"}}
+    assert G.call_strings(glob) == [("glob", "/etc/*")]
+    assert G.outside_in("glob", "/etc/*", ["/work/copy"]) is not None
+    assert G.outside_in("glob", "**/*.py", ["/work/copy"]) is None
+    grep = {"type": "tool_use", "name": "Grep", "input": {"pattern": "/etc/*", "path": "."}}
+    assert [k for k, _ in G.call_strings(grep)] == ["path"]
