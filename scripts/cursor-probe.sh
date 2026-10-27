@@ -20,6 +20,8 @@
 # no key). The fleet counts a Cursor review as a vote only while that file passes for the
 # installed CLI version. The key is read from $FLEET_HOME/secrets/cursor-api-key.
 #
+# PROBE_WORK_DIR: make the throwaway folder inside this one. PROBE_REVIEW_ONLY=1: only probes a-f.
+#         PROBE_RESULT_FILE: where the result file goes (the stress test keeps its own copy).
 # Output: $PROBE_OUT_DIR (default .reviews/cursor-rereview in this repo)
 #         /probe-<version>-<run time>.md  (a report is never overwritten)
 set -uo pipefail
@@ -46,7 +48,7 @@ if ! command -v "$AGENT" >/dev/null 2>&1; then
   exit 2
 fi
 
-vhome="$(mktemp -d)"
+vhome="$(mktemp -d ${PROBE_WORK_DIR:+-p "$PROBE_WORK_DIR"})"
 version_raw="$(cursor "$vhome" 30 --version 2>&1 </dev/null | head -n 1)"
 rm -rf "$vhome"
 if [[ ! -t 0 && "$version_raw" != *STUB* ]]; then
@@ -63,7 +65,7 @@ report="$out_dir/probe-$version-$run_stamp.md"
 n=1
 while [[ -e "$report" ]]; do n=$((n + 1)); report="$out_dir/probe-$version-$run_stamp-$n.md"; done
 
-work="$(mktemp -d)" || exit 1
+work="$(mktemp -d ${PROBE_WORK_DIR:+-p "$PROBE_WORK_DIR"})" || exit 1
 planted=""
 cleanup() { rm -rf "$work"; [[ -z "$planted" ]] || rm -rf "${HOME:?}/.claude/skills/$planted"; }
 trap cleanup EXIT
@@ -149,6 +151,9 @@ note() {
   DETAILS[i]+=$'\n'"- observed: $(printf '%s' "$1" | scrub)"$'\n'
 }
 exists() { [[ -e "$1" ]] && echo yes || echo no; }
+
+# PROBE_REVIEW_ONLY=1 (the stress test, BD-140) skips P1-P12 and runs only the review probes below.
+if [[ -z "${PROBE_REVIEW_ONLY:-}" ]]; then
 
 # P1: version, status, kernel.
 r="$(new_repo p1)"
@@ -281,13 +286,15 @@ note "event types: $(grep -o '"type" *: *"[a-z_]*"' "$work/P12b.out" | sort | un
     >"$work/P12c.out" 2>"$work/P12c.err" </dev/null )
 record P12c "bad model name" "$?" "$work/P12c.out" "$work/P12c.err" json
 
+fi   # PROBE_REVIEW_ONLY
+
 ### BD-136: the review probes a-e. They decide whether a Cursor review COUNTS as a vote.
 # They run the way a fleet review runs (fleet/cursor_review.py): the key from the key file in
 # the command's environment only, an empty throwaway HOME, the fleet's own hook file
 # (fleet/cursor_hook.py). The result file holds the CLI version and pass/fail per probe: no hook
 # payloads, no email, no key. Any probe that could not prove its point is a fail.
 result_file="${PROBE_RESULT_FILE:-$fleet_home/cursor-probe-result.json}"
-hook="$here/fleet/cursor_hook.py"
+hook="${PROBE_HOOK:-$here/fleet/cursor_hook.py}"   # PROBE_HOOK: a copy the Cursor CLI can reach (the stress test box)
 declare -A RV=() RVWHY=() RVREPLY=()
 
 # rv_run NAME REPO PROMPT [agent flags...]: one review-style run; output in $work/rv-NAME.out.
