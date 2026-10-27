@@ -517,6 +517,7 @@ SHELLS = {"sh", "bash", "zsh", "dash"}
 VALUE_FLAGS = {"-A", "-B", "-C", "-m", "-g", "--glob", "-t", "--type", "--max-count", "--context"}
 NO_PATTERN_FLAGS = {"--files", "--type-list"}
 FILE_FLAGS = {"-f", "--file"}
+ENV_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 ABS_RE = re.compile(r"(?:^|[\s\"'=(:,\[])(/[^\s\"'|;&)\]]*)")
 DOTDOT_RE = re.compile(r"(?:^|[/\s\"'=(])\.\.(?:[/\s\"')]|$)")
 HOME_RE = re.compile(r"(?:^|[\s\"'=(:,/])(?:~|\$HOME|\$\{HOME\})(?:[/\s\"')]|$)")
@@ -589,6 +590,11 @@ def shell_outside(command: str, extra=()):
             skip_next = False
             continue
         if i in scripts:                            # already read as a command of its own
+            continue
+        if start and not redirect and ENV_ASSIGN_RE.match(t):
+            value = t.split("=", 1)[1]              # `LC_ALL=C grep ...`: the program comes after the assignments
+            if _is_outside_path(value, False):
+                return value
             continue
         program = start and not redirect
         if redirect:
