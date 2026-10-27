@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.27.5] - 2026-10-27
+
+### Changed
+
+- OC-12: On-call: fix BD-143: Gauntlet integrity: no inferred side, baselines stay in copy
+
 ## [ship-2026.10.27.4] - 2026-10-27
 
 ### Changed
