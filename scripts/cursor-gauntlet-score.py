@@ -20,6 +20,7 @@ from ANOTHER company than the reviewer checks it blind, and the answer goes in a
 (see `resolutions` below). Stdlib only.
 """
 import argparse
+import glob
 import hashlib
 import importlib.util
 import json
@@ -27,6 +28,7 @@ import math
 import os
 import random
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -497,7 +499,187 @@ def lock_hash(gauntlet_dir: Path, key_file: Path) -> str:
     return h.hexdigest()
 
 
+# --- did a baseline stay inside its copy? ------------------------------------------------------
+# ADVISORY, a tripwire and not a sandbox: it reads the words the saved tool calls name (no $(...) expansion, no symlinks, no
+# paths built at run time) and flags any that is an existing path outside the copy, or a protected name. "Trace ok" is not
+# proof of containment; the copy itself is what contains the baseline. This only makes a visible leak INVALID.
+
+OUTSIDE_WORDS = ("fleet-tools", ".fleet", "gauntlet-key", "answer-key")
+CALL_TYPES = {"tool_use", "command_execution", "file_read", "file_search", "file_list", "mcp_tool_call",
+              "web_search", "tool_call", "function_call"}
+CALL_MARKS = {"input", "command", "arguments", "tool_name"}      # an event of an unknown type that still looks like a call
+SKIP_KEYS = {"id", "type", "status", "exit_code", "tool_use_id", "name", "description", "prompt", "subagent_type"}
+RESULT_KEYS = {"aggregated_output", "output", "result", "content_result"}
+PATH_KEYS = {"file_path", "path", "notebook_path", "cwd", "dir", "directory", "paths", "files", "file", "glob"}
+PATTERN_KEYS = {"pattern", "query", "regex", "old_string", "new_string"}      # searched for, never opened
+SYSTEM_BIN = ("/bin/", "/usr/bin/", "/usr/local/bin/", "/sbin/", "/usr/sbin/")
+STD_STREAMS = ("/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr")
+SHELLS = {"sh", "bash", "zsh", "dash"}
+ENV_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+HOME_PREFIX_RE = re.compile(r"^(?:~|\$HOME|\$\{HOME\})(?=/|$)")
+
+
+def call_strings(ev) -> list:
+    """(key, string) for every string a tool call of this trace event carries (the call itself, never what came back)."""
+    out = []
+
+    def walk(x, in_call, key="", tool=""):
+        if isinstance(x, dict):
+            call = in_call or x.get("type") in CALL_TYPES or bool(CALL_MARKS & set(x))
+            tool = x["name"] if isinstance(x.get("name"), str) else tool
+            for k, v in x.items():
+                if k not in SKIP_KEYS and not (call and k in RESULT_KEYS):
+                    walk(v, call, k, tool)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v, in_call, key, tool)
+        elif isinstance(x, str) and in_call:
+            if tool.lower() == "glob" and key == "pattern":
+                out.append(("glob", x))                  # a Glob pattern names places: it is read as a path
+            elif key not in PATTERN_KEYS:
+                out.append((key, x))
+    walk(ev, False)
+    return out
+
+
+def _word_hit(text: str, extra):
+    low = text.lower()
+    for w in OUTSIDE_WORDS + tuple(extra):
+        if w and w.lower() in low:
+            return w
+    return None
+
+
+def _resolve(cand: str, base):
+    """The absolute path a word stands for, or None when it names no place outside the working directory
+    (a plain relative word). `COPY` is the copy, `~` and $HOME are the home, `..` climbs out of the copy."""
+    home = os.path.expanduser("~")
+    cand = HOME_PREFIX_RE.sub(lambda m: home, cand)
+    if cand == "COPY" or cand.startswith("COPY/"):
+        cand = (base or "/__copy__") + cand[4:]
+    if not cand.startswith("/"):
+        if ".." not in cand.split("/"):
+            return None
+        cand = (base or "/__copy__") + "/" + cand
+    return os.path.normpath(cand)
+
+
+def _outside(cand: str, program: bool, base) -> bool:
+    """Does this word name something that exists on disk outside the copy? No grammar is parsed: a search pattern such
+    as '/charge' that is not a real file never counts, and a real file counts however the command line reads it."""
+    p = _resolve(cand, base)
+    if p is None or p in STD_STREAMS or (program and p.startswith(SYSTEM_BIN)):
+        return False
+    roots = {base, os.path.realpath(base)} if base else set()
+    if any(p == r or p.startswith(r + "/") for r in roots):
+        return False
+    return os.path.lexists(p) or bool(glob.glob(p))
+
+
+def shell_outside(command: str, extra=(), base=None):
+    """The first word of a shell command that names an existing path outside the copy (or a protected name), or None.
+    Every word is a candidate; the command line is never parsed for which word is a pattern and which a place."""
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError:
+        toks = [t.strip("'\"") for t in command.split()]      # unbalanced quotes: still every word
+
+    start, redirect, scripts = True, False, set()
+    for i, t in enumerate(toks):
+        if set(t) <= set("|;&()<>"):
+            if "<" in t or ">" in t:
+                redirect = True                     # the next word is a file, never a program
+            else:
+                start = True
+            continue
+        if i in scripts:                            # already read as a command of its own
+            continue
+        program = start and not redirect
+        if start and not redirect and ENV_ASSIGN_RE.match(t):
+            program = False                         # `LC_ALL=C grep ...`: the program comes after the assignments
+        else:
+            start = False
+        if redirect:
+            redirect = False
+        elif program and t.rsplit("/", 1)[-1] in SHELLS:
+            for j in range(i + 1, len(toks) - 1):   # `bash -lc 'script'`: the script is a command too
+                if toks[j].startswith("-") and "c" in toks[j][1:]:
+                    hit = shell_outside(toks[j + 1], extra, base)
+                    if hit:
+                        return hit
+                    scripts.add(j + 1)
+                    break
+        cands = {t, t.split("=", 1)[-1]}
+        if re.match(r"-[A-Za-z]", t) and t[2:] != "/":
+            cands.add(t[2:])                        # a path glued to a flag: `grep -f/etc/passwd` (`awk -F/` is a separator)
+        for cand in cands:
+            if _outside(cand, program, base):
+                return cand
+        hit = _word_hit(t, extra)
+        if hit:
+            return hit
+    return None
+
+
+def outside_in(key: str, text: str, copies, extra=()):
+    """The first thing in a tool call's text that names a path outside the copy, or None."""
+    base = next((c for c in copies if os.path.isdir(c)), None)
+    for c in sorted(copies, key=len, reverse=True):
+        text = re.sub(re.escape(c) + r"(?=$|[/\s\"')\]:,;|&])", "COPY", text)
+    if key in PATH_KEYS:
+        return text if _outside(text.strip(), False, base) else _word_hit(text, extra)
+    return shell_outside(text, extra, base)
+
+
+def check_trace(path: Path, copies, extra=()):
+    """(status, proof): ok | left (proof is the offending trace line) | missing."""
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "missing", "no trace file"
+    seen = False
+    for line in raw.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        if not isinstance(ev.get("type"), str):
+            continue                                # not an event of a CLI's stream
+        seen = True
+        for key, text in call_strings(ev):
+            hit = outside_in(key, text, copies, extra)
+            if hit:
+                return "left", f"{hit}: {line.strip()[:300]}"
+    return ("ok", "") if seen else ("missing", "the trace has no readable event")
+
+
+def error_lines(text: str) -> str:
+    """The lines of a CLI's output that can be an error: plain text and result/error events, never tool output."""
+    keep = []
+    for line in text.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            keep.append(line)
+            continue
+        if isinstance(ev, dict) and (ev.get("type") in ("result", "error", "turn.failed") or ev.get("is_error")):
+            keep.append(line)
+    return "\n".join(keep) + "\n"
+
+
 def main(argv: list) -> int:
+    if argv[1:2] == ["errors"]:
+        sys.stdout.write(error_lines(sys.stdin.read()))
+        return 0
+    if argv[1:2] == ["trace-check"]:
+        # trace-check TRACE EXTRA_WORDS_CSV COPY...: exit 0 ok, 1 left its copy (proof on stdout), 2 no usable trace
+        st, proof = check_trace(Path(argv[2]), argv[4:], [w for w in argv[3].split(",") if w])
+        print(proof)
+        return {"ok": 0, "left": 1}.get(st, 2)
     if argv[1:2] in (["reply"], ["scrub"], ["review-prompt"]):
         return S.main(argv)
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])

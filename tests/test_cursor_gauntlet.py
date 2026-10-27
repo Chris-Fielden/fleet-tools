@@ -49,6 +49,8 @@ with open(os.path.join(here, name + ".log"), "a") as fh:
     fh.write(json.dumps({{"cwd": os.getcwd(), "args": args, "prompt": prompt, "commits": commits, "words": hit,
                          "resume": "--resume" in args, "has_pkg": os.path.isdir("ledgerline")}}) + "\\n")
 if cfg.get("exit"):
+    for t in cfg.get("reads_before_exit", []):
+        print(json.dumps({{"type": "tool_use", "input": {{"file_path": t}}}}))
     sys.stderr.write(cfg.get("stderr", ""))
     sys.exit(cfg["exit"])
 debrief = "did not meet the bar" in prompt
@@ -60,10 +62,20 @@ else:
     open(counter, "w").write(str(k + 1))
     seq = cfg["review_seq"]
     text = seq[min(k, len(seq) - 1)]
+targets = cfg.get("debrief_reads", cfg.get("reads", ["ledgerline/gateway.py"])) if debrief else cfg.get("reads", ["ledgerline/gateway.py"])
 if name == "claude":
-    print(json.dumps({{"type": "result", "result": text, "session_id": "c-sess"}}))
+    if not cfg.get("no_trace"):
+        for t in targets:
+            print(json.dumps({{"type": "assistant", "message": {{"content": [{{"type": "tool_use", "name": "Read", "input": {{"file_path": t}}}}]}}}}))
+    if not cfg.get("no_trace"):
+        print(json.dumps({{"type": "result", "result": text, "session_id": "c-sess"}}))
 else:
-    print(text)
+    if not cfg.get("no_trace"):
+        for t in targets:
+            print(json.dumps({{"type": "item.completed", "item": {{"type": "command_execution", "command": "cat " + t, "aggregated_output": "/etc/passwd"}}}}))
+        print(json.dumps({{"type": "turn.completed"}}))
+    if "-o" in args:
+        open(args[args.index("-o") + 1], "w").write(text)
 '''
 
 
@@ -685,7 +697,8 @@ def test_a_code_typo_finding_that_cites_the_ticket_is_not_a_ticket_complaint():
 
 
 def test_replacing_a_cursor_attempt_does_not_inherit_the_old_probe_reports(rig):
-    rig.go(cursor={"exit": 1, "stderr": "Error: usage limit reached for this plan"})
+    limit = "Error: usage limit reached for this plan"
+    rig.go(cursor={"review_exit": 1, "review_stderr": limit, "probe_exit": 1, "probe_stderr": limit})
     run = rig.run_dir()
     first = json.loads((run / "cursor-1.json").read_text())["invalid"]
     assert {x["side"] for x in first} == {"ours"} and "probes" in {x["step"] for x in first}
@@ -703,3 +716,217 @@ def test_a_second_finding_on_the_same_line_does_not_borrow_a_neighbouring_entry(
     r = score(twice)
     assert "retry-hides-failure" in r["found"] and "typo-retries" not in r["found"]
     assert r["code_typos"] == 2 and r["usefulness_passed"] is False and r["false_alarms"] == []
+
+
+# --- BD-143: no inferred side; baselines stay inside their copy ---------------------------------------------------------
+
+def probes_entry(run):
+    return [x for x in json.loads((run / "cursor-1.json").read_text())["invalid"] if x["step"] == "probes"][0]
+
+
+def test_an_unfinished_probe_with_no_our_side_evidence_is_theirs_even_when_another_step_failed_on_our_side(rig):
+    rig.go(cursor={"review_exit": 1, "review_stderr": "Error: usage limit reached", "probe_exit": 3})
+    run = rig.run_dir()
+    invalid = json.loads((run / "cursor-1.json").read_text())["invalid"]
+    assert {x["step"]: x["side"] for x in invalid}["review"] == "ours"
+    p = probes_entry(run)
+    assert p["side"] == "theirs" and "did not finish" in p["proof"] and "no sign of our side" in p["reason"]
+
+
+def test_an_unfinished_probe_whose_own_log_shows_a_rate_limit_is_ours_and_says_so(rig):
+    rig.go(cursor={"probe_exit": 1, "probe_stderr": "Error: rate limit exceeded"})
+    p = probes_entry(rig.run_dir())
+    assert p["side"] == "ours" and "rate limit" in p["reason"] and "probe's own log" in p["reason"]
+
+
+def test_a_trace_that_stays_inside_the_copy_scores_normally_and_is_saved(rig):
+    res = rig.go(models="claude-opus codex")
+    assert res.returncode == 0, res.stderr
+    run = rig.run_dir()
+    assert verdicts(run)["claude-opus"] == "GO" and verdicts(run)["codex"] == "GO"
+    for m in ("claude-opus", "codex"):
+        assert "gateway.py" in (run / f"{m}-1.trace.jsonl").read_text()
+    assert not any("--output-format" in a and a == "json" for c in rig.log("claude") for a in c["args"])
+    assert all("stream-json" in c["args"] for c in rig.log("claude"))
+    assert all("--json" in c["args"] for c in rig.log("codex"))
+
+
+@pytest.mark.parametrize("model,cfg_name,target", [
+    ("claude-opus", "claude", "tests/fixtures/gauntlet-key/answer-key.json"),
+    ("codex", "codex", "~/." + "fleet/secrets/cursor-api-key"),
+    ("codex", "codex", "../"),
+    ("claude-opus", "claude", "/home/someone/fleet-tools/CLAUDE.md"),
+])
+def test_a_baseline_that_leaves_its_copy_is_invalid_on_our_side_with_the_line_as_proof(rig, model, cfg_name, target):
+    res = rig.go(models=model, **{cfg_name: {"reads": ["ledgerline/gateway.py", target]}})
+    assert res.returncode == 0, res.stderr
+    run = rig.run_dir()
+    v = verdicts(run)[model]
+    assert v.startswith("INVALID, no verdict (our side:") and "baseline left its copy" in v
+    invalid = json.loads((run / f"{model}-1.json").read_text())["invalid"]
+    assert invalid[0]["side"] == "ours" and target in invalid[0]["proof"]
+    assert not (run / f"{model}-1.md").exists()          # the review is not scored
+
+
+def test_a_leaving_attempt_is_replaced_under_the_one_replacement_rule(rig):
+    rig.go(models="codex", codex={"reads": [".."]})
+    run = rig.run_dir()
+    (rig.others / "codex.json").write_text(json.dumps({"review_seq": [GOOD]}))
+    res = rig.go(models="codex", args=("--replace", str(run), "codex", "1"))
+    assert res.returncode == 0, res.stderr
+    assert json.loads((run / "codex-1.json").read_text())["invalid"] == []
+
+
+@pytest.mark.parametrize("model,cfg_name", [("claude-opus", "claude"), ("codex", "codex")])
+def test_a_missing_trace_is_invalid_on_our_side(rig, model, cfg_name):
+    rig.go(models=model, **{cfg_name: {"no_trace": True}})
+    run = rig.run_dir()
+    invalid = json.loads((run / f"{model}-1.json").read_text())["invalid"]
+    assert invalid and invalid[0]["side"] == "ours" and "no usable trace" in invalid[0]["reason"]
+    assert verdicts(run)[model].startswith("INVALID")
+
+
+def test_traces_are_saved_scrubbed_with_no_key_and_no_email(rig):
+    rig.go(models="claude-opus codex", claude={"reads": ["a.py", "someone@example.com " + KEY]}, codex={"reads": ["a.py", "who@example.com " + KEY]})
+    run = rig.run_dir()
+    for f in run.glob("*.trace.jsonl"):
+        t = f.read_text()
+        assert KEY not in t and "@example.com" not in t
+
+
+def test_agent_rules_off_is_gone_from_the_gauntlet_runner():
+    assert "AGENT_RULES_OFF" not in SCRIPT.read_text()
+
+
+def test_a_debrief_trace_that_leaves_the_copy_is_invalid_too(rig):
+    rig.go(models="codex", codex={"review_seq": [BAD], "debrief_reads": [".."]})
+    run = rig.run_dir()
+    assert (run / "codex-1.md").exists() and not (run / "codex-1.debrief.md").exists()
+    invalid = json.loads((run / "codex-1.json").read_text())["invalid"]
+    assert invalid[0]["step"] == "trace" and invalid[0]["side"] == "ours" and ".." in invalid[0]["proof"]
+
+
+def test_a_model_side_crash_keeps_its_record_when_the_trace_also_left_the_copy(rig):
+    rig.go(models="claude-opus", claude={"exit": 1, "stderr": "Segmentation fault", "reads_before_exit": [".."]})
+    invalid = json.loads((rig.run_dir() / "claude-opus-1.json").read_text())["invalid"]
+    assert {(x["step"], x["side"]) for x in invalid} == {("trace", "ours"), ("review", "theirs")}
+
+
+@pytest.fixture
+def world(tmp_path):
+    """A copy and, beside it, real files outside it (a path only counts when it exists)."""
+    copy = tmp_path / "copy"
+    (copy / "ledgerline").mkdir(parents=True)
+    (copy / "ledgerline" / "gateway.py").write_text("x\n")
+    out = tmp_path / "outside"
+    out.mkdir()
+    (out / "secret").write_text("s\n")
+    return copy, out
+
+
+@pytest.mark.parametrize("call", [
+    "/bin/bash -lc 'git diff HEAD~1 -- ledgerline/gateway.py'",
+    "/usr/bin/git log --oneline",
+    "sed -n '/retry/p' ledgerline/gateway.py",
+    "grep -rn '/etc/ledgerline/service-token' .",
+    "rg --regexp=/charge ledgerline/gateway.py",
+    "rg --max-columns 200 '/charge' ledgerline/gateway.py",
+    "rg --glob=/ledgerline/** token .",
+    "rg --glob '/ledgerline/**' token .",
+    "rg -e token --glob '/ledgerline/**' .",
+    "grep -F token ledgerline/gateway.py",
+    "awk -F/ '{print $1}' ledgerline/gateway.py",
+    "LC_ALL=C grep -n '/charge' ledgerline/gateway.py",
+    "GIT_PAGER=cat /usr/bin/git log",
+    "rg -e /charge -e /refund ledgerline/gateway.py",
+    "grep -e/charge ledgerline/gateway.py",
+    "grep -n \"/charge\" ledgerline/gateway.py 2>/dev/null",
+    "grep -n '/charge",
+    "COPYDIR/ledgerline/gateway.py",
+    "COPYDIR/ledgerline/../ledgerline/gateway.py",
+])
+def test_ordinary_contained_calls_are_not_a_leak(call, world):
+    copy, _ = world
+    assert G.outside_in("command", call.replace("COPYDIR", str(copy)), [str(copy)]) is None
+
+
+@pytest.mark.parametrize("call", [
+    "cat OUT/secret",
+    "/bin/cat OUT/secret",
+    "cat 'OUT/secret'",
+    "cat --file=OUT/secret",
+    "bash -c 'cat OUT/secret'",
+    "/bin/bash -lc \"cat 'OUT/secret'\"",
+    "grep -e token OUT/secret",
+    "grep -f OUT/secret .",
+    "grep -fOUT/secret .",
+    "grep < OUT/secret token",
+    "grep token < OUT/secret",
+    "grep -F token OUT/secret",
+    "rg --glob=x token OUT/secret",
+    "X=OUT/secret cat y",
+    "LC_ALL=C cat OUT/secret",
+    "cat x > OUT/secret",
+    "sed -f OUT/secret x",
+    "grep --file=patterns.txt OUT/secret",
+    "cat ../outside/secret",
+    "cat COPYDIR/../outside/secret",
+    "rg --files OUT",
+    "cat OUT/sec*",
+    "cat /etc/passwd",
+    "grep -n 'x OUT/secret",
+    "cat tests/fixtures/gauntlet-key/answer-key.json",
+    "cat $HOME",
+])
+def test_calls_that_name_a_path_outside_the_copy_are_a_leak(call, world):
+    copy, out = world
+    call = call.replace("COPYDIR", str(copy)).replace("OUT", str(out))
+    assert G.outside_in("command", call, [str(copy)]) is not None
+
+
+def test_a_word_that_is_no_real_file_outside_the_copy_is_never_a_leak(world):
+    copy, out = world
+    for call in (f"cat {out}/nope", "grep /data/secret .", "cat ../nope", "rg -g /x/** y"):
+        assert G.outside_in("command", call, [str(copy)]) is None
+
+
+def test_tool_output_in_a_trace_is_not_read_as_a_path_the_baseline_used():
+    S = G
+    ok = json.dumps({"type": "item.completed", "item": {"type": "command_execution", "command": "cat a.py", "aggregated_output": "/etc/passwd ../x"}})
+    result = json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "content": "/etc/passwd"}]}})
+    import tempfile
+    with tempfile.TemporaryDirectory() as t:
+        f = Path(t) / "trace.jsonl"
+        f.write_text(ok + "\n" + result + "\n")
+        assert S.check_trace(f, ["/work/copy"])[0] == "ok"
+        f.write_text(json.dumps({"type": "tool_use", "input": {"file_path": "/work/copy/a.py", "pattern": "x/y"}}) + "\n")
+        assert S.check_trace(f, ["/work/copy"])[0] == "ok"
+        f.write_text(json.dumps({"type": "tool_use", "input": {"command": "grep -r key $HOME"}}) + "\n")
+        assert S.check_trace(f, ["/work/copy"])[0] == "left"
+
+
+def test_a_search_pattern_field_is_not_a_path_but_a_path_field_is():
+    ev = {"type": "tool_use", "input": {"pattern": "/etc/ledgerline/token", "path": "ledgerline"}}
+    assert [k for k, _ in G.call_strings(ev)] == ["path"]
+    assert G.outside_in("path", "/etc/passwd", ["/work/copy"]) == "/etc/passwd"
+    assert G.outside_in("file_path", "/work/copy/a.py", ["/work/copy"]) is None
+    assert G.outside_in("file_path", "/etc/hostname", ["/etc/ho"]) is not None   # a longer name is not the copy
+    unknown = {"type": "something_new", "input": {"file_path": "/etc/passwd"}}
+    assert G.call_strings(unknown)
+
+
+def test_a_glob_pattern_is_a_place_but_a_grep_pattern_is_not():
+    glob = {"type": "tool_use", "name": "Glob", "input": {"pattern": "/etc/*"}}
+    assert G.call_strings(glob) == [("glob", "/etc/*")]
+    assert G.outside_in("glob", "/etc/*", ["/work/copy"]) is not None
+    assert G.outside_in("glob", "**/*.py", ["/work/copy"]) is None
+    grep = {"type": "tool_use", "name": "Grep", "input": {"pattern": "/etc/*", "path": "."}}
+    assert [k for k, _ in G.call_strings(grep)] == ["path"]
+
+
+def test_a_box_error_inside_a_probe_excerpt_is_still_our_side(tmp_path):
+    f = tmp_path / "probe-all.txt"
+    f.write_text("- c: fail - the run did not finish, so nothing was proved (its own output: {} | bwrap: setting up uid map: Permission denied)\n")
+    out = subprocess.run(["bash", "-c", f'source <(sed -n "/^classify() {{/,/^}}/p" {SCRIPT}); classify 0 {f} no'],
+                         capture_output=True, text=True)
+    assert out.stdout.startswith("ours|the box failed|"), out

@@ -37,6 +37,13 @@ mode = args[args.index("--mode") + 1] if "--mode" in args else "agent"
 model = args[args.index("--model") + 1] if "--model" in args else ""
 if "no-such-model-probe" in args:
     print('{{"type":"result","is_error":true}}'); sys.exit(1)
+is_review = any(a.startswith("You are a code reviewer") for a in args)
+if cfg.get("review_exit") and is_review:     # only the review step fails
+    sys.stderr.write(cfg.get("review_stderr", ""))
+    sys.exit(cfg["review_exit"])
+if cfg.get("probe_exit") and not is_review and "Your review did not meet the bar" not in " ".join(args):
+    sys.stderr.write(cfg.get("probe_stderr", ""))
+    sys.exit(cfg["probe_exit"])
 if cfg.get("exit"):
     sys.stderr.write(cfg.get("stderr", ""))
     sys.exit(cfg["exit"])
