@@ -1052,3 +1052,8 @@ def test_preflight_plan_and_codex_both_bad_show_both_lines(rig):
         {"tool": "claude", "weekly": {"tokens": 5}},
         {"tool": "codex", "five_hour": {"used_percent": 97.0, "stale": False}, "weekly": {"used_percent": 20.0}}]) + "\nEOF\n")
     plan_fails(rig, rig.go(), "Codex five_hour window is 97% used", "Claude weekly plan window is 90% used")
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf"])
+def test_preflight_limit_nonfinite_is_a_fail_line(rig, bad):
+    plan_fails(rig, rig.go(extra_env={"GAUNTLET_MAX_USED": bad}), "GAUNTLET_MAX_USED is not a number")

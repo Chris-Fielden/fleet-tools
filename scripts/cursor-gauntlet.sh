@@ -142,8 +142,8 @@ try:
 except ValueError:
     print("the usage readers gave no readable answer"); sys.exit(1)
 try:
-    mx = float(os.environ["MAXUSED"])
-except ValueError:
+    mx = float(os.environ["MAXUSED"]); assert mx == mx and abs(mx) != float("inf")
+except (ValueError, AssertionError):
     print("GAUNTLET_MAX_USED is not a number"); sys.exit(1)
 bad = []
 for r in data if isinstance(data, list) else []:
@@ -175,8 +175,8 @@ plan_msg="$(MAXUSED="${GAUNTLET_MAX_USED:-80}" python3 -I -c '
 import os, sys
 sys.path.insert(0, sys.argv[1])
 try:
-    mx = float(os.environ["MAXUSED"])
-except ValueError:
+    mx = float(os.environ["MAXUSED"]); assert mx == mx and abs(mx) != float("inf")
+except (ValueError, AssertionError):
     print("GAUNTLET_MAX_USED is not a number: %r" % os.environ["MAXUSED"]); sys.exit(1)
 from fleet import planusage
 d = planusage.load()
