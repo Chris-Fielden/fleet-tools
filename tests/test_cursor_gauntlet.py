@@ -668,6 +668,13 @@ def test_a_short_range_does_not_credit_a_problem_the_finding_never_describes():
     assert r["code_typos"] == 2 and r["usefulness_passed"] is False
 
 
+def test_a_ticket_spelling_complaint_is_a_false_alarm_even_when_it_cites_a_line():
+    r = score(good_review(extra_must=['`TICKET.md`, 11 — the ticket misspells "finnance"; fix the typo']))
+    assert r["usefulness_passed"] is False and "a MUST FIX was about a typo in the ticket" in r["reasons"]
+    legit = score(good_review(extra_should=["`TICKET.md`, 12 — the receipt email requirement is not implemented anywhere"]))
+    assert legit["usefulness_passed"] is True
+
+
 def test_a_second_finding_on_the_same_line_does_not_borrow_a_neighbouring_entry():
     twice = good_review(omit=("retry-hides-failure", "typo-retries"),
                         extra_must=["`ledgerline/gateway.py`, 27 — the broad except swallows a declined card",

@@ -199,7 +199,12 @@ def score_review(text: str, key: dict, model: str = "", resolutions: dict | None
         mentions_ticket = "ticket.md" in t.lower() or any(p.lower() in t.lower() for p in key["ticket_typos"])
         if sec != "must":
             continue
-        if cat == "decoy":
+        low = t.lower()
+        about_spelling = bool(re.search(r"typo|spell|grammar", low)) and (
+            "ticket.md" in low or any(p.lower() in low for p in key["ticket_typos"]))
+        if about_spelling and kind != "flag" and cat != "decoy":      # wherever it was placed: a complaint about the ticket's spelling
+            alarms.append({"why": "MUST FIX over a typo in the ticket", "text": t})
+        elif cat == "decoy":
             alarms.append({"why": f"MUST FIX over a decoy ({eid}): it looks wrong and is correct", "text": t})
         elif kind == "cosmetic":
             alarms.append({"why": "MUST FIX over a cosmetic typo", "text": t})
