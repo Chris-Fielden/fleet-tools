@@ -614,6 +614,8 @@ def shell_outside(command: str, extra=()):
         elif searcher and t in ("-e", "--regexp"):
             skip_next, pattern_cmd = True, False    # the pattern after -e (repeatable); no other pattern follows
             continue
+        elif searcher and t.startswith("--file="):
+            pattern_cmd = False                     # `grep --file=FILE`: patterns come from a file, so every operand is a place
         elif searcher and (t.startswith("--regexp=") or (re.match(r"-e.", t) and not t.startswith("--"))):
             pattern_cmd = False                     # an attached pattern: `--regexp=/charge`, `-e/charge`
             continue
