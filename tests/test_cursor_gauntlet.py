@@ -658,3 +658,11 @@ def test_preflight_a_stale_codex_reading_is_no_reading(rig):
     res = rig.go()
     started_nothing(rig, res)
     assert "Codex usage is unknown" in res.stderr
+
+
+def test_a_short_range_does_not_credit_a_problem_the_finding_never_describes():
+    only_retry = good_review(omit=("retry-hides-failure", "typo-retries"),
+                             extra_must=["`ledgerline/gateway.py`, 24\u201329 — every error is retried and then reported as pending, hiding a declined card"])
+    r = score(only_retry)
+    assert "retry-hides-failure" in r["found"] and "typo-retries" not in r["found"]
+    assert r["code_typos"] == 2 and r["usefulness_passed"] is False

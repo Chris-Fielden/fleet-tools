@@ -42,8 +42,9 @@ is a finding for the human, not an automatic action.
 ## Reading a finding's place
 
 The scorer reads `file`, N / `file:N` / `file`, N-M (any dash) / line N / `(module)` / file only. A finding with a
-line is placed within 3 lines of a key entry. A finding with no line is placed only when exactly one key entry in that
-file shares a keyword with it. A MUST FIX it cannot place is **UNMATCHED**: never counted. A person from another
+line is placed within 3 lines of a key entry. A finding with a short range (15 lines or fewer) also credits another key entry inside the range, but only when its
+words use a keyword of that entry. A finding with no line is placed by the key entry in that file with the most keyword
+hits; a tie is not a placement. All of this is a first pass: spot-check high bug counts by hand. A MUST FIX it cannot place is **UNMATCHED**: never counted. A person from another
 company than the reviewer checks it blind (Claude's items by Codex, Codex's by Claude), and the answer goes in a
 resolutions file (`{"R3#must-4": {"result": "real|extra|false_alarm", "key": "<id>", "checked_by": ["codex"]}}`);
 rerun `scripts/cursor-gauntlet-score.py report --key ... --resolutions FILE RUN_DIR`. A checker of the reviewer's own

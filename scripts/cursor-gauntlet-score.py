@@ -35,7 +35,7 @@ S = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(S)          # the BD-140 scorer: review parser, scrub, reply, prompt
 
 LINE_SLACK = S.LINE_SLACK
-MAX_GROUP_SPAN = 15         # a finding that cites a range this short may credit every key entry inside it
+MAX_GROUP_SPAN = 15         # a finding that cites a range this short may also credit a key entry inside it that its words name
 MIN_BUG_SHARE = 0.75        # BD-140's bar: 6 of 8 planted bugs
 MAX_FALSE_ALARMS = S.MAX_FALSE_ALARMS
 ATTEMPTS = (1, 2, 3)
@@ -168,8 +168,9 @@ def score_review(text: str, key: dict, model: str = "", resolutions: dict | None
             if lo is None or not 0 < hi - lo <= MAX_GROUP_SPAN:
                 continue
             for k in key["items"]:
-                if k["id"] not in taken and any(S.file_matches(name, l["file"]) and lo <= l["line"] <= hi
-                                                for l in k["locations"]):
+                # inside the range AND the finding's own words speak of it (a keyword of that entry)
+                if k["id"] not in taken and kw_hits(items[i][1], k) and any(
+                        S.file_matches(name, l["file"]) and lo <= l["line"] <= hi for l in k["locations"]):
                     taken.add(k["id"])
                     also.setdefault(i, []).append(k["id"])
     for i, cs in cands.items():        # near a key entry that another finding already has: a duplicate
