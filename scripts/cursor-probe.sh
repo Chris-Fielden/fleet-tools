@@ -354,7 +354,7 @@ print("```")
 print("\n".join(words) if words else "(no events)")
 print("```")
 print()
-allowed = [n for n in names("tool-allowed-") if n != "outside"]
+allowed = names("tool-allowed-")
 outside = sorted({w[len("tool-allowed-outside-"):] for w in words if w.startswith("tool-allowed-outside-")})
 print("- tools allowed: " + (", ".join(allowed) or "(none)"))
 print("- tools denied: " + (", ".join(names("tool-denied-")) or "(none)"))

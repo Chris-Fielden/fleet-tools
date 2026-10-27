@@ -113,7 +113,7 @@ def tool_allowed(payload, root: str) -> bool:
 
 def _allowed_outside(payload, root: str) -> bool:
     """Evidence for the probe, apart from the decision: a search tool with a path outside ROOT.
-    If the hook ever allows one, the event says so."""
+    Only a broken tool_allowed lets one through; if that ever happens, the event says so."""
     parts = _tool_parts(payload)
     if parts is None or parts[0] not in SEARCH_TOOLS:
         return False
@@ -170,7 +170,9 @@ def main(argv: list[str]) -> int:
             _event(state_dir, "tool-denied")
             if tool:
                 _event(state_dir, "tool-denied-" + tool)
-                if tool not in ALLOWED_TOOLS:   # a name we do not know: the report lists it
+                parts = _tool_parts(payload)   # the same name the allow decision used
+                if parts is None or parts[0] not in ALLOWED_TOOLS or parts[0] != tool:
+                    # a name we do not know (or one the cleaning changed): the report lists it
                     _event(state_dir, "tool-unknown-" + tool)
         except OSError:
             pass

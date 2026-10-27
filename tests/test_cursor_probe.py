@@ -299,3 +299,11 @@ def test_an_allowed_search_tool_with_an_outside_path_fails_f(rig, env):
     assert "- search tools allowed with a path outside the folder: glob, grep, ls" in \
         one_report(env / "out").read_text()
 
+
+
+def test_hook_logs_a_renamed_lookalike_as_unknown(env):
+    import subprocess as sp
+    hook = ROOT / "fleet" / "cursor_hook.py"
+    sp.run(["python3", "-I", str(hook), "tool", str(env), str(env)], input='{"tool_name":"gr_ep","tool_input":{"path":"/x"}}',
+           text=True, capture_output=True)
+    assert "tool-unknown-grep" in (env / "events.log").read_text().split()
