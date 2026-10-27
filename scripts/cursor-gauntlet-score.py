@@ -528,13 +528,38 @@ def call_strings(ev) -> list:
     return out
 
 
+SYSTEM_BIN = ("/bin/", "/usr/bin/", "/usr/local/bin/", "/sbin/", "/usr/sbin/")
+STD_STREAMS = ("/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr")
+# where a path can only be a path: a quoted or glued token with one of these first parts. Anything else after a quote or
+# an equals sign (a sed or grep pattern such as '/foo/p') is not read as a path.
+KNOWN_ROOTS = ("etc", "home", "root", "usr", "var", "tmp", "opt", "proc", "sys", "mnt", "srv", "boot", "lib", "lib64",
+               "run", "dev", "bin", "sbin", "Users", "COPY")
+COMMAND_LEAD_RE = re.compile(r"(?:^|[|;&(]|\bsh\s+-[a-z]*c|\bbash\s+-[a-z]*c|\bzsh\s+-[a-z]*c)\s*['\"]?$")
+
+
+def abs_outside(text: str):
+    """The first absolute path in a call that is not a system program being run or a standard stream."""
+    for m in ABS_RE.finditer(text):
+        path = m.group(1)
+        lead = text[:m.start(1)]
+        if path in STD_STREAMS:
+            continue
+        if path.startswith(SYSTEM_BIN) and COMMAND_LEAD_RE.search(lead):
+            continue                                    # `/bin/bash -lc ...`, `/usr/bin/git log`: the program, not a file
+        if lead[-1:] not in ("", " ", "\t", "\n"):      # glued to a quote, "=", ":" ...
+            if path.split("/")[1:2] and path.split("/")[1] not in KNOWN_ROOTS:
+                continue                                # looks like a pattern, not a place
+        return path
+    return None
+
+
 def outside_in(text: str, copies, extra=()):
     """The first thing in a tool call's text that names a path outside the copy, or None."""
     for c in sorted(copies, key=len, reverse=True):
-        text = text.replace(c, "COPY")
-    for m in ABS_RE.finditer(text):
-        if m.group(1) != "/dev/null":
-            return m.group(1)
+        text = re.sub(re.escape(c) + r"(?=$|[/\s\"')\]:,;|&])", "COPY", text)
+    hit = abs_outside(text)
+    if hit:
+        return hit
     if DOTDOT_RE.search(text):
         return ".."
     if HOME_RE.search(text):

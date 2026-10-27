@@ -49,6 +49,8 @@ with open(os.path.join(here, name + ".log"), "a") as fh:
     fh.write(json.dumps({{"cwd": os.getcwd(), "args": args, "prompt": prompt, "commits": commits, "words": hit,
                          "resume": "--resume" in args, "has_pkg": os.path.isdir("ledgerline")}}) + "\\n")
 if cfg.get("exit"):
+    for t in cfg.get("reads_before_exit", []):
+        print(json.dumps({{"type": "tool_use", "input": {{"file_path": t}}}}))
     sys.stderr.write(cfg.get("stderr", ""))
     sys.exit(cfg["exit"])
 debrief = "did not meet the bar" in prompt
@@ -60,7 +62,7 @@ else:
     open(counter, "w").write(str(k + 1))
     seq = cfg["review_seq"]
     text = seq[min(k, len(seq) - 1)]
-targets = cfg.get("reads", ["ledgerline/gateway.py"])
+targets = cfg.get("debrief_reads", cfg.get("reads", ["ledgerline/gateway.py"])) if debrief else cfg.get("reads", ["ledgerline/gateway.py"])
 if name == "claude":
     if not cfg.get("no_trace"):
         for t in targets:
@@ -797,10 +799,40 @@ def test_agent_rules_off_is_gone_from_the_gauntlet_runner():
 
 
 def test_a_debrief_trace_that_leaves_the_copy_is_invalid_too(rig):
-    rig.go(models="codex", codex={"review_seq": [BAD], "reads": ["../x"]})
-    # attempt one already left its copy at the review: nothing was scored and no debrief was asked
-    assert verdicts(rig.run_dir())["codex"].startswith("INVALID")
-    assert not (rig.run_dir() / "codex-1.debrief.md").exists()
+    rig.go(models="codex", codex={"review_seq": [BAD], "debrief_reads": ["../x"]})
+    run = rig.run_dir()
+    assert (run / "codex-1.md").exists() and not (run / "codex-1.debrief.md").exists()
+    invalid = json.loads((run / "codex-1.json").read_text())["invalid"]
+    assert invalid[0]["step"] == "trace" and invalid[0]["side"] == "ours" and "../x" in invalid[0]["proof"]
+
+
+def test_a_model_side_crash_keeps_its_record_when_the_trace_also_left_the_copy(rig):
+    rig.go(models="claude-opus", claude={"exit": 1, "stderr": "Segmentation fault", "reads_before_exit": ["../x"]})
+    invalid = json.loads((rig.run_dir() / "claude-opus-1.json").read_text())["invalid"]
+    assert {(x["step"], x["side"]) for x in invalid} == {("trace", "ours"), ("review", "theirs")}
+
+
+@pytest.mark.parametrize("call", [
+    "/bin/bash -lc 'git diff HEAD~1 -- ledgerline/gateway.py'",
+    "/usr/bin/git log --oneline",
+    "sed -n '/retry/p' ledgerline/gateway.py",
+    "grep -n \"/charge\" ledgerline/gateway.py 2>/dev/null",
+    "COPYDIR/ledgerline/gateway.py",
+])
+def test_ordinary_contained_calls_are_not_a_leak(call):
+    assert G.outside_in(call.replace("COPYDIR", "/work/copy"), ["/work/copy"]) is None
+
+
+@pytest.mark.parametrize("call", [
+    "cat /etc/passwd",
+    "/bin/cat /etc/passwd",
+    "cat '/etc/passwd'",
+    "cat --file=/home/x/.ssh/id_ed25519",
+    "cat /work/copy-other/secret",
+    "bash -c 'cat /tmp/x'",
+])
+def test_calls_that_name_a_path_outside_the_copy_are_a_leak(call):
+    assert G.outside_in(call, ["/work/copy"]) is not None
 
 
 def test_tool_output_in_a_trace_is_not_read_as_a_path_the_baseline_used():

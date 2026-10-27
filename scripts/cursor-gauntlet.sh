@@ -529,7 +529,7 @@ other_attempt() {   # other_attempt MODEL N
       ( cd "$d/repo" && timeout --kill-after=10 1800 "$CLAUDE" -p "$other_prompt" --model "${model#claude-}" --output-format stream-json --verbose \
           --allowedTools "Read" "Grep" "Glob" "Bash(git diff *)" "Bash(git log *)" "Bash(git show *)" \
           --disallowedTools "Edit" "Write" "NotebookEdit" </dev/null ) > "$d/out.txt" 2> "$d/err.txt" || rc=$?
-      reply="$(python3 -I "$score" reply < "$d/out.txt")"
+      reply="$(python3 -I "$score" reply < "$d/out.txt")"     # the stream's result event only: no result, no reply
       sid="$(json_field session_id < "$d/out.txt")" ;;
   esac
   # the trace (every tool call), scrubbed, beside the attempt; what it names must stay inside the copy
@@ -538,6 +538,9 @@ other_attempt() {   # other_attempt MODEL N
   cls="$(classify "$rc" "$d/errs.txt" "$([[ -n "${reply//[[:space:]]/}" ]] && echo yes || echo no)")"
   if ! trace_check "$out/$model-$n.trace.jsonl" trace "$inv" "$d/repo" "$([[ -n "$cls" ]] && echo yes || echo no)"; then
     echo "cursor-gauntlet: $model attempt $n: INVALID, no usable trace or it left its copy"
+    # a failure the run already had keeps its own record, so a model-side crash is not turned into "ours" alone
+    if [[ -n "$cls" ]]; then IFS='|' read -r side why proof <<< "$cls"; note_invalid "$inv" review "$side" "$why" "$proof"; fi
+    rm -f "$out/$model-$n.md"
     write_meta "$model" "$n" "$inv" none; return
   fi
   if [[ -n "$cls" ]]; then IFS='|' read -r side why proof <<< "$cls"; note_invalid "$inv" review "$side" "$why" "$proof"
@@ -546,6 +549,7 @@ other_attempt() {   # other_attempt MODEL N
   echo "cursor-gauntlet: $model attempt $n: review done (exit $rc)"
 
   if [[ -f "$out/$model-$n.md" ]] && [[ "$(fully_passed "$model" "$out/$model-$n.md")" == no ]]; then
+    : > "$d/deb.trace"
     local deb rc2=0 fed="Here is the review you wrote of this branch:
 
 $reply
@@ -577,6 +581,11 @@ $DEBRIEF"
     scrub < "$d/deb.trace" > "$out/$model-$n.debrief.trace.jsonl"
     if ! trace_check "$out/$model-$n.debrief.trace.jsonl" trace "$inv" "$d/repo" "$([[ $rc2 -ne 0 || -z "${deb:-}" ]] && echo yes || echo no)"; then
       echo "cursor-gauntlet: $model attempt $n: INVALID, the debrief left no usable trace or left its copy"
+      if [[ $rc2 -ne 0 || -z "${deb:-}" ]]; then
+        { python3 -I "$score" errors < "$d/deb.txt"; cat "$d/deb.err"; } > "$d/deb-errs.txt"
+        cls="$(classify "$rc2" "$d/deb-errs.txt")"; IFS='|' read -r side why proof <<< "${cls:-theirs|its CLI gave no debrief|exit $rc2}"
+        note_invalid "$inv" debrief "$side" "$why" "$proof"
+      fi
       write_meta "$model" "$n" "$inv" "$mode"; return
     fi
     if [[ $rc2 -eq 0 && -n "${deb//[[:space:]]/}" ]]; then printf '%s\n' "$deb" | scrub > "$out/$model-$n.debrief.md"
