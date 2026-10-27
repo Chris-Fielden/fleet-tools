@@ -577,20 +577,26 @@ def shell_outside(command: str, extra=()):
         toks = list(lex)
     except ValueError:
         return abs_outside_loose(command) or _dots_or_home(command) or _word_hit(command, extra)
-    start, pattern_cmd, skip_next, scripts = True, False, False, set()
+    start, pattern_cmd, searcher, skip_next, redirect, scripts = True, False, False, False, False, set()
     for i, t in enumerate(toks):
         if set(t) <= set("|;&()<>"):
-            start, pattern_cmd = True, False
+            if "<" in t or ">" in t:
+                redirect = True                     # the next word is a file, never a program
+            else:
+                start, pattern_cmd, searcher = True, False, False
             continue
         if skip_next:
             skip_next = False
             continue
         if i in scripts:                            # already read as a command of its own
             continue
-        program = start
-        if start:
+        program = start and not redirect
+        if redirect:
+            redirect = False
+        elif start:
             base = t.rsplit("/", 1)[-1]
-            pattern_cmd, start = base in PATTERN_COMMANDS, False
+            pattern_cmd = searcher = base in PATTERN_COMMANDS
+            start = False
             if base in SHELLS:                      # `bash -lc 'script'`: the script is a command too
                 for j in range(i + 1, len(toks) - 1):
                     if toks[j].startswith("-") and "c" in toks[j][1:]:
@@ -599,8 +605,11 @@ def shell_outside(command: str, extra=()):
                             return hit
                         scripts.add(j + 1)
                         break
-        elif pattern_cmd and t in ("-e", "--regexp"):
-            skip_next, pattern_cmd = True, False    # the pattern after -e; no other pattern follows
+        elif searcher and t in ("-e", "--regexp"):
+            skip_next, pattern_cmd = True, False    # the pattern after -e (repeatable); no other pattern follows
+            continue
+        elif searcher and (t.startswith("--regexp=") or (re.match(r"-e.", t) and not t.startswith("--"))):
+            pattern_cmd = False                     # an attached pattern: `--regexp=/charge`, `-e/charge`
             continue
         elif pattern_cmd and t in FILE_FLAGS:
             pattern_cmd = False                     # `grep -f FILE`: the next argument is a file, not the pattern
@@ -659,6 +668,8 @@ def check_trace(path: Path, copies, extra=()):
             continue
         if not isinstance(ev, dict):
             continue
+        if not isinstance(ev.get("type"), str):
+            continue                                # not an event of a CLI's stream
         seen = True
         for key, text in call_strings(ev):
             hit = outside_in(key, text, copies, extra)
