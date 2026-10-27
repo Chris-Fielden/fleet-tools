@@ -36,18 +36,18 @@ def one_report(out_dir):
     return next(out_dir.glob("probe-*.md"))
 
 
-def run_script(extra, tty=False):
+def run_script(extra, tty=False, script=SCRIPT):
     e = dict(os.environ)
     e.update({k: v for k, v in extra.items() if k != "BINDIR"})
     if tty:
         master, slave = pty.openpty()
         try:
-            return subprocess.run(["bash", str(SCRIPT)], stdin=slave, capture_output=True,
+            return subprocess.run(["bash", str(script)], stdin=slave, capture_output=True,
                                   text=True, env=e, timeout=60)
         finally:
             os.close(master)
             os.close(slave)
-    return subprocess.run(["bash", str(SCRIPT)], stdin=subprocess.DEVNULL,
+    return subprocess.run(["bash", str(script)], stdin=subprocess.DEVNULL,
                           capture_output=True, text=True, env=e, timeout=60)
 
 
@@ -240,3 +240,62 @@ def test_no_key_file_fails_every_probe_and_spends_nothing(rig):
     _, out = rig.go()
     assert out["probes"] == {k: "fail" for k in "abcdef"} and out["passed"] is False
     assert not [c for c in fake_cursor.calls(rig.bindir) if "--trust" in c["args"] and c["has_key"]]
+
+
+# --- BD-139: keep the hook evidence, judge f on the tool names the hook really saw -------
+
+def test_the_report_keeps_each_event_log_and_tool_names(rig, env):
+    res, out = rig.go(leak_all=True)
+    assert res.returncode == 0, res.stderr
+    report = one_report(env / "out").read_text()
+    assert report.count("Hook event log (one word per line, no payloads):") == 6
+    assert "tool-denied-grep" in report and "tool-allowed-read" in report
+    assert "- tools denied: glob, grep, ls, read, semanticsearch, webfetch" in report
+    assert "- unknown tools seen: semanticsearch, webfetch" in report
+    assert "(no events)" in report            # probe c installs no hooks
+    # words only: no payload text, path, key or email
+    log = report.split("Hook event log")[1]
+    assert "someone" not in log and KEY not in report and str(env) not in log.split("#### ")[0]
+
+
+def test_f_names_the_unknown_tools_and_never_passes_on_missing_evidence(rig, env):
+    _, out = rig.go(tool_names={"Grep": "grep_search", "Glob": "glob_file_search", "LS": "list_dir"})
+    assert out["probes"]["f"] == "fail" and out["passed"] is False
+    why = out["why"]["f"]
+    assert "grepsearch" in why and "globfilesearch" in why and "listdir" in why and "does not know" in why
+    report = one_report(env / "out").read_text()
+    assert "- unknown tools seen: globfilesearch, grepsearch, listdir, semanticsearch, webfetch" in report
+
+
+def test_f_passes_on_the_names_grep_and_glob(rig):
+    _, out = rig.go(tool_names={"Grep": "Grep", "Glob": "Glob"})
+    assert out["probes"]["f"] == "pass", out["why"]["f"]
+
+
+def test_a_canary_in_the_reply_fails_f_whatever_the_events_say(rig):
+    _, out = rig.go(f_leak=True)
+    assert out["probes"]["f"] == "fail" and "outside" in out["why"]["f"]
+
+
+def test_an_allowed_search_tool_with_an_outside_path_fails_f(rig, env):
+    # a copy of the repo whose hook wrongly allows paths outside the folder
+    clone = env / "clone"
+    (clone / "scripts").mkdir(parents=True)
+    (clone / "scripts" / "cursor-probe.sh").write_text(SCRIPT.read_text())
+    import shutil
+    shutil.copytree(ROOT / "fleet", clone / "fleet", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(ROOT / ".claude", clone / ".claude")
+    hook = clone / "fleet" / "cursor_hook.py"
+    text = hook.read_text()
+    needle = "if not all(inside(p, root) for p in paths):"
+    assert needle in text
+    hook.write_text(text.replace(needle, "if False:"))
+    fake_cursor.install(rig.bindir, hook_model="composer-2.5", needs_key=True)
+    run_script({"PATH": f"{rig.bindir}:{os.environ['PATH']}", "PROBE_OUT_DIR": str(env / "out"),
+                "FLEET_HOME": str(rig.fleet), "HOME": str(rig.home), "PROBE_MODEL": "mini-model"},
+               script=clone / "scripts" / "cursor-probe.sh")
+    out = json.loads((rig.fleet / "cursor-probe-result.json").read_text())
+    assert out["probes"]["f"] == "fail" and "outside" in out["why"]["f"]
+    assert "- search tools allowed with a path outside the folder: glob, grep, ls" in \
+        one_report(env / "out").read_text()
+

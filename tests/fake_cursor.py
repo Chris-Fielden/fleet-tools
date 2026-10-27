@@ -93,6 +93,7 @@ if "GREP-OUTSIDE=" in prompt:
              ("Glob", {{"glob_pattern": target}}), ("LS", {{"target_directory": os.path.dirname(target)}}),
              ("SemanticSearch", {{"query": "OUTSIDE"}}), ("WebFetch", {{"url": "file://" + target}})]
     for name, args in ([] if cfg.get("no_tools") else tools):
+        name = cfg.get("tool_names", {{}}).get(name, name)   # e.g. Cursor's real names may differ
         if hook("preToolUse", {{"tool_name": name, "tool_input": args, "model": payload_model}}) or cfg.get("f_leak"):
             out.append(open(target).read())
 if "GREP-INSIDE" in prompt:
