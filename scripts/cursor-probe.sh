@@ -348,6 +348,9 @@ for path in sys.argv[1:]:
         continue
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     hit = next((l for l in lines if ERR.search(l)), "")      # an error line wins over start-up chatter
+    if hit:
+        m = ERR.search(hit)
+        hit = hit[max(0, m.start() - 60):m.start() + 90]     # keep the words around the match, not the line start
     bits.append((hit or " ".join(lines))[:150])
 print(" | ".join(b for b in bits if b))' "$work/rv-$1.out" "$work/rv-$1.err" 2>/dev/null)"
   echo "the run did not finish, so nothing was proved (its own output: ${own:-nothing})"

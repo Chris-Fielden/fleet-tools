@@ -614,7 +614,12 @@ def shell_outside(command: str, extra=()):
         elif pattern_cmd and not t.startswith("-"):
             pattern_cmd = False                     # the pattern: searched for, never opened
             continue
-        for cand in {t, t.split("=", 1)[-1]}:
+        cands = {t, t.split("=", 1)[-1]}
+        if re.match(r"-[A-Za-z]", t) and len(t) > 2:
+            cands.add(t[2:])                        # a value glued to a short flag: `-f/etc/passwd`
+            if pattern_cmd and t[1] == "f":
+                pattern_cmd = False                 # `grep -fFILE`: a file, so the first plain argument is a path
+        for cand in cands:
             if _is_outside_path(cand, program):
                 return cand
         hit = _dots_or_home(t) or _word_hit(t, extra)    # operands only: a search pattern may say '../'
