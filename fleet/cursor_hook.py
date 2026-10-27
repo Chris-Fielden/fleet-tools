@@ -111,9 +111,10 @@ def tool_allowed(payload, root: str) -> bool:
     return bool(paths) or name == "read"
 
 
-def _allowed_outside(payload, root: str) -> bool:
-    """Evidence for the probe, apart from the decision: a search tool with a path outside ROOT.
-    Only a broken tool_allowed lets one through; if that ever happens, the event says so."""
+def _search_outside(payload, root: str) -> bool:
+    """Evidence for the probe, apart from the decision: a search tool (by its exact name) with a
+    path outside ROOT. Allowed, it can only be a broken tool_allowed; denied, it is the proof the
+    probe wants: a known search tool really aimed outside the folder and refused."""
     parts = _tool_parts(payload)
     if parts is None or parts[0] not in SEARCH_TOOLS:
         return False
@@ -160,7 +161,7 @@ def main(argv: list[str]) -> int:
             try:
                 if tool:
                     _event(state_dir, "tool-allowed-" + tool)
-                    if _allowed_outside(payload, root):
+                    if _search_outside(payload, root) and _tool_parts(payload)[0] == tool:
                         _event(state_dir, "tool-allowed-outside-" + tool)
             except OSError:
                 pass
@@ -170,6 +171,8 @@ def main(argv: list[str]) -> int:
             _event(state_dir, "tool-denied")
             if tool:
                 _event(state_dir, "tool-denied-" + tool)
+                if _search_outside(payload, root) and _tool_parts(payload)[0] == tool:
+                    _event(state_dir, "tool-refused-outside-" + tool)
                 parts = _tool_parts(payload)   # the same name the allow decision used
                 if parts is None or parts[0] not in ALLOWED_TOOLS or parts[0] != tool:
                     # a name we do not know (or one the cleaning changed): the report lists it

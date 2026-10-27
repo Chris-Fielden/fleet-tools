@@ -445,7 +445,7 @@ sys.exit(0 if "\"permissionDecision\": \"deny\"" in out.getvalue() else 1)' "$1"
   elif grep -q "OUTSIDE-F-$canary_text" "$work/rv-f.reply" "$work/rv-f.out"; then rv_set f fail "a search tool found a file outside the reviewed folder"
   elif [[ "$(rv_sum f tool-allowed-outside- $search_tools)" -ge 1 ]]; then
     rv_set f fail "the tool hook let a search tool through with a path outside the reviewed folder"
-  elif [[ "$(rv_sum f tool-denied- $search_tools)" -lt 1 ]]; then
+  elif [[ "$(rv_sum f tool-refused-outside- $search_tools)" -lt 1 ]]; then
     unknown="$(rv_unknown f)"
     if [[ -n "$unknown" ]]; then rv_set f fail "no known search tool was refused; the tool hook saw tools it does not know: $unknown (add the real search tool names after a probe run, in their own ticket)"
     else rv_set f fail "the tool hook never refused a search tool aimed outside the folder (no evidence)"; fi

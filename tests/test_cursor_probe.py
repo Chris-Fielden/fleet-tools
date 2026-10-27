@@ -301,9 +301,25 @@ def test_an_allowed_search_tool_with_an_outside_path_fails_f(rig, env):
 
 
 
-def test_hook_logs_a_renamed_lookalike_as_unknown(env):
-    import subprocess as sp
+def _hook_events(env, payload):
     hook = ROOT / "fleet" / "cursor_hook.py"
-    sp.run(["python3", "-I", str(hook), "tool", str(env), str(env)], input='{"tool_name":"gr_ep","tool_input":{"path":"/x"}}',
-           text=True, capture_output=True)
-    assert "tool-unknown-grep" in (env / "events.log").read_text().split()
+    (env / "events.log").unlink(missing_ok=True)
+    r = subprocess.run(["python3", "-I", str(hook), "tool", str(env), str(env)], input=json.dumps(payload),
+                       text=True, capture_output=True)
+    assert r.returncode in (0, 2) and '"permission"' in r.stdout
+    return (env / "events.log").read_text().split()
+
+
+def test_hook_logs_a_renamed_lookalike_as_unknown(env):
+    ev = _hook_events(env, {"tool_name": "gr_ep", "tool_input": {"path": "/x"}})
+    assert "tool-unknown-grep" in ev and "tool-refused-outside-grep" not in ev
+
+
+def test_only_a_search_tool_aimed_outside_is_proof_of_an_outside_refusal(env):
+    assert "tool-refused-outside-grep" in _hook_events(env, {"tool_name": "Grep", "tool_input": {"path": "/x"}})
+    # no path at all: refused, but not proof about the outside
+    ev = _hook_events(env, {"tool_name": "Grep", "tool_input": {"pattern": "x"}})
+    assert "tool-denied-grep" in ev and "tool-refused-outside-grep" not in ev
+    # inside the folder: allowed, no outside event
+    ev = _hook_events(env, {"tool_name": "Grep", "tool_input": {"path": str(env)}})
+    assert "tool-allowed-grep" in ev and not [w for w in ev if "outside" in w]
