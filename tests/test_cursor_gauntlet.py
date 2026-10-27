@@ -817,6 +817,7 @@ def test_a_model_side_crash_keeps_its_record_when_the_trace_also_left_the_copy(r
     "/usr/bin/git log --oneline",
     "sed -n '/retry/p' ledgerline/gateway.py",
     "grep -rn '/etc/ledgerline/service-token' .",
+    "grep -n '../' ledgerline/gateway.py",
     "grep -e /etc/x -n ledgerline/gateway.py",
     "grep -n \"/charge\" ledgerline/gateway.py 2>/dev/null",
     "COPYDIR/ledgerline/gateway.py",
@@ -836,6 +837,9 @@ def test_ordinary_contained_calls_are_not_a_leak(call):
     "/bin/bash -lc \"cat '/data/secret'\"",
     "grep -n x /srv2/file",
     "grep -e token /etc/passwd",
+    "grep -f /etc/passwd .",
+    "sed -f /tmp/script.sed x",
+    "cat ../x",
     "rg --files /etc",
     "grep -A 3 foo /etc/passwd",
 ])
@@ -875,3 +879,11 @@ def test_a_glob_pattern_is_a_place_but_a_grep_pattern_is_not():
     assert G.outside_in("glob", "**/*.py", ["/work/copy"]) is None
     grep = {"type": "tool_use", "name": "Grep", "input": {"pattern": "/etc/*", "path": "."}}
     assert [k for k, _ in G.call_strings(grep)] == ["path"]
+
+
+def test_a_box_error_inside_a_probe_excerpt_is_still_our_side(tmp_path):
+    f = tmp_path / "probe-all.txt"
+    f.write_text("- c: fail - the run did not finish, so nothing was proved (its own output: {} | bwrap: setting up uid map: Permission denied)\n")
+    out = subprocess.run(["bash", "-c", f'source <(sed -n "/^classify() {{/,/^}}/p" {SCRIPT}); classify 0 {f} no'],
+                         capture_output=True, text=True)
+    assert out.stdout.startswith("ours|the box failed|"), out

@@ -288,7 +288,7 @@ classify() {
   line="$(LC_ALL=C grep -aiEm1 'could not resolve|connection refused|ENOTFOUND|network is unreachable|ETIMEDOUT|EAI_AGAIN|ECONNRESET|name resolution' "$f" 2>/dev/null)" \
     && { echo "ours|the network failed|${line:0:300}"; return; }
   line="$(LC_ALL=C grep -aiEm1 'no space left' "$f" 2>/dev/null)" && { echo "ours|the disk is full|${line:0:300}"; return; }
-  line="$(LC_ALL=C grep -aiEm1 '^bwrap:|cursor-stress: the cursor cli would not start' "$f" 2>/dev/null)" \
+  line="$(LC_ALL=C grep -aiEm1 '^bwrap:|its own output: (.*\| )?bwrap:|cursor-stress: the cursor cli would not start' "$f" 2>/dev/null)" \
     && { echo "ours|the box failed|${line:0:300}"; return; }
   [[ $rc -eq 124 || $rc -eq 137 ]] && { echo "theirs|its CLI hung (killed at the time limit, exit $rc)|exit $rc"; return; }
   [[ $rc -ne 0 ]] && { echo "theirs|its CLI exited $rc|$(head -c 300 "$f" 2>/dev/null | tr '\n' ' ')"; return; }

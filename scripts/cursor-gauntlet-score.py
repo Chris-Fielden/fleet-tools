@@ -499,6 +499,8 @@ def lock_hash(gauntlet_dir: Path, key_file: Path) -> str:
 
 
 # --- did a baseline stay inside its copy? ------------------------------------------------------
+# A tripwire, not a sandbox: it reads the paths the saved tool calls name (no $(...) expansion, no symlinks). The copy itself
+# is what contains the baseline; this makes a leak visible and the attempt INVALID.
 
 OUTSIDE_WORDS = ("fleet-tools", ".fleet", "gauntlet-key", "answer-key")
 CALL_TYPES = {"tool_use", "command_execution", "file_read", "file_search", "file_list", "mcp_tool_call",
@@ -514,6 +516,7 @@ PATTERN_COMMANDS = {"grep", "egrep", "fgrep", "rg", "ag", "sed", "awk", "gawk"} 
 SHELLS = {"sh", "bash", "zsh", "dash"}
 VALUE_FLAGS = {"-A", "-B", "-C", "-m", "-g", "--glob", "-t", "--type", "--max-count", "--context"}
 NO_PATTERN_FLAGS = {"--files", "--type-list"}
+FILE_FLAGS = {"-f", "--file"}
 ABS_RE = re.compile(r"(?:^|[\s\"'=(:,\[])(/[^\s\"'|;&)\]]*)")
 DOTDOT_RE = re.compile(r"(?:^|[/\s\"'=(])\.\.(?:[/\s\"')]|$)")
 HOME_RE = re.compile(r"(?:^|[\s\"'=(:,/])(?:~|\$HOME|\$\{HOME\})(?:[/\s\"')]|$)")
@@ -565,7 +568,7 @@ def _is_outside_path(p: str, program: bool):
     return p.startswith("/") and not (p == "COPY" or p.startswith("COPY/"))
 
 
-def shell_outside(command: str):
+def shell_outside(command: str, extra=()):
     """The first outside path a shell command names, or None. Quotes are understood, so a quoted path counts and a
     search pattern (the first plain argument of grep, sed, awk ...) does not."""
     try:
@@ -573,7 +576,7 @@ def shell_outside(command: str):
         lex.whitespace_split = True
         toks = list(lex)
     except ValueError:
-        return abs_outside_loose(command)
+        return abs_outside_loose(command) or _dots_or_home(command) or _word_hit(command, extra)
     start, pattern_cmd, skip_next, scripts = True, False, False, set()
     for i, t in enumerate(toks):
         if set(t) <= set("|;&()<>"):
@@ -591,13 +594,16 @@ def shell_outside(command: str):
             if base in SHELLS:                      # `bash -lc 'script'`: the script is a command too
                 for j in range(i + 1, len(toks) - 1):
                     if toks[j].startswith("-") and "c" in toks[j][1:]:
-                        hit = shell_outside(toks[j + 1])
+                        hit = shell_outside(toks[j + 1], extra)
                         if hit:
                             return hit
                         scripts.add(j + 1)
                         break
         elif pattern_cmd and t in ("-e", "--regexp"):
             skip_next, pattern_cmd = True, False    # the pattern after -e; no other pattern follows
+            continue
+        elif pattern_cmd and t in FILE_FLAGS:
+            pattern_cmd = False                     # `grep -f FILE`: the next argument is a file, not the pattern
             continue
         elif pattern_cmd and t in VALUE_FLAGS:
             skip_next = True                        # a number or a glob, not a path
@@ -611,6 +617,9 @@ def shell_outside(command: str):
         for cand in {t, t.split("=", 1)[-1]}:
             if _is_outside_path(cand, program):
                 return cand
+        hit = _dots_or_home(t) or _word_hit(t, extra)    # operands only: a search pattern may say '../'
+        if hit:
+            return hit
     return None
 
 
@@ -627,10 +636,8 @@ def outside_in(key: str, text: str, copies, extra=()):
     for c in sorted(copies, key=len, reverse=True):
         text = re.sub(re.escape(c) + r"(?=$|[/\s\"')\]:,;|&])", "COPY", text)
     if key in PATH_KEYS:
-        hit = text if _is_outside_path(text.strip(), False) else None
-    else:
-        hit = shell_outside(text)
-    return hit or _dots_or_home(text) or _word_hit(text, extra)
+        return text if _is_outside_path(text.strip(), False) else _dots_or_home(text) or _word_hit(text, extra)
+    return shell_outside(text, extra)
 
 
 def check_trace(path: Path, copies, extra=()):
