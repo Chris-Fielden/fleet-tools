@@ -18,7 +18,8 @@ a permission rule only in the ticket, an unmet requirement, a check that passes 
 bug past the cut-off, a non-UTF-8 file, and a ticket full of typos with one requirement so badly worded that it
 should be flagged. The answer key is `tests/fixtures/gauntlet-key/answer-key.json`, outside the copy a reviewer
 gets. `tests/fixtures/gauntlet/LOCK` holds the sha256 of the gauntlet and the key; the runner refuses if it differs.
-After a deliberate change, re-lock with
+The "token" in `deploy/service-token` is a made-up sample on purpose (the planted bug is the world-readable mode it is
+installed with), so no secret scanner has anything real to find. After a deliberate change, re-lock with
 `scripts/cursor-gauntlet-score.py lock-hash tests/fixtures/gauntlet tests/fixtures/gauntlet-key/answer-key.json`.
 
 ## Who takes it

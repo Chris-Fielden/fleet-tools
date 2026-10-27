@@ -291,6 +291,8 @@ def model_verdict(model: str, attempts: list) -> str:
     """attempts: dicts with meta, score, containment_ok. One line, no label."""
     ours = [a for a in attempts if any(x["side"] == "ours" for x in a["meta"].get("invalid", []))]
     theirs = [a for a in attempts if any(x["side"] == "theirs" for x in a["meta"].get("invalid", []))]
+    if not ours and not theirs and len(attempts) < len(ATTEMPTS):
+        return f"INVALID, no verdict (only {len(attempts)} of {len(ATTEMPTS)} attempts exist)"
     missing = [a for a in attempts if a["score"] is None and not a["meta"].get("invalid")]
     if ours:
         why = "; ".join(f"attempt {a['n']}: " + x["reason"] for a in ours for x in a["meta"]["invalid"] if x["side"] == "ours")

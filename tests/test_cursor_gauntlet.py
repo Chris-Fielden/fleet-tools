@@ -133,7 +133,7 @@ def rig(env):
                   "GAUNTLET_BOXES": "bwrap", "GAUNTLET_OUT_DIR": str(r.out), "GAUNTLET_MODELS": models,
                   "GAUNTLET_CODEX": str(others / "codex"), "GAUNTLET_CLAUDE": str(others / "claude"),
                   "GAUNTLET_USAGE_CMD": str(usage), "GAUNTLET_NET_CMD": "true", "GAUNTLET_CONFIRM": "y",
-                  "GAUNTLET_MIN_FREE_MB": "1"})
+                  "GAUNTLET_MIN_FREE_MB": "1", "GAUNTLET_ALLOW_STUB": "1"})
         e.update(extra_env or {})
         return subprocess.run(["bash", str(SCRIPT), *args], stdin=subprocess.DEVNULL, capture_output=True,
                               text=True, env=e, timeout=600)
@@ -464,6 +464,36 @@ def test_one_replacement_run_after_an_our_side_failure_and_no_second(rig):
     res = rig.go(models="codex", args=("--replace", str(run), "codex", "1"))
     assert res.returncode == 0
     assert verdicts(run)["codex"] == "GO"
+
+
+def test_a_review_that_talks_about_billing_and_rate_limits_is_not_an_error(rig):
+    text = good_review(extra_should=["`ledgerline/gateway.py`, 27 — billing may hit a rate limit or quota; a 429 is retried"])
+    res = rig.go(models="codex claude-sonnet", codex={"review_seq": [text]}, claude={"review_seq": [text]})
+    assert res.returncode == 0, res.stderr
+    assert verdicts(rig.run_dir()) == {"claude-sonnet": "GO", "codex": "GO"}
+
+
+def test_replacing_one_model_leaves_cursors_containment_evidence_alone(rig):
+    rig.go(models="cursor codex")
+    run = rig.run_dir()
+    cont = (run / "cursor-3.containment.json").read_text()
+    meta = json.loads((run / "codex-3.json").read_text())
+    meta["invalid"] = [{"step": "review", "side": "ours", "reason": "the network failed", "proof": "x"}]
+    (run / "codex-3.json").write_text(json.dumps(meta))
+    res = rig.go(models="codex", args=("--replace", str(run), "codex", "3"))
+    assert res.returncode == 0, res.stderr
+    assert (run / "cursor-3.containment.json").read_text() == cont and (run / "cursor-3.fullpower.md").exists()
+    assert verdicts(run) == {"cursor": "GO", "codex": "GO"}
+
+
+def test_a_model_with_fewer_than_three_attempts_gets_no_go_or_2_of_3():
+    one = [{"n": 1, "meta": {}, "score": {"usefulness_passed": True, "pending": []}, "containment_ok": True}]
+    assert G.model_verdict("codex", one).startswith("INVALID, no verdict (only 1 of 3 attempts exist")
+
+
+def test_the_test_double_is_recognised_only_when_a_test_says_so(rig):
+    res = rig.go(extra_env={"GAUNTLET_ALLOW_STUB": ""})
+    assert res.returncode == 3 and not rig.started()
 
 
 def test_a_replacement_of_a_model_side_failure_is_not_allowed(rig):
