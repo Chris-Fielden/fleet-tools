@@ -408,6 +408,9 @@ def build(run: Path, key: dict, resolutions: dict | None = None):
                         f"  - log proof: {x.get('proof', '(none)')}"]
             out.append("")
             continue
+        for x in meta.get("invalid", []):       # a later step (debrief, probes, full power) can fail after a saved review
+            out += [f"- INVALID ({'our' if x['side'] == 'ours' else 'its own'} side) at step {x['step']}: {x['reason']}",
+                    f"  - log proof: {x.get('proof', '(none)')}"]
         out += ["- found: " + (", ".join(f"{k} ({by_id[k]['kind']})" for k in sc["found"]) or "(nothing)"),
                 "- missed: " + (", ".join(k["id"] for k in key["items"] if k["id"] not in sc["found"]) or "(nothing)")]
         out += [f"- false alarm: {a['why']}: {a['text'][:200]}" for a in sc["false_alarms"]]

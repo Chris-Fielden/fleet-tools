@@ -625,3 +625,14 @@ def test_the_gauntlet_holds_what_the_ticket_asks_for():
 def test_the_scripts_are_executable():
     for name in ("cursor-gauntlet.sh", "cursor-gauntlet-score.py"):
         assert os.access(ROOT / "scripts" / name, os.X_OK)
+
+
+def test_a_probe_that_did_not_finish_is_invalid_not_a_failed_probe(rig):
+    res = rig.go(cursor={"exit": 3})
+    assert res.returncode in (0, 5), res.stderr
+    run = rig.run_dir()
+    invalid = json.loads((run / "cursor-1.json").read_text())["invalid"]
+    assert {"review", "probes"} <= {x["step"] for x in invalid}
+    probes = [x for x in invalid if x["step"] == "probes"][0]
+    assert probes["side"] == "theirs" and "did not finish" in probes["proof"]
+    assert verdicts(run)["cursor"].startswith("NO-GO (its own side failed")
