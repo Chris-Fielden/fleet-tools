@@ -64,7 +64,10 @@ empty "Overseer's analysis".
 ## Preflight (nothing starts unless all of it holds)
 
 The lock matches; the key file exists, is not empty and is mode 600; Claude and Codex usage is left (the fleet
-readers); the network reaches the model services; the box starts the Cursor CLI; free disk; and the human says y/N that
+readers); Claude's plan usage, as saved by the status line (`$FLEET_HOME/plan-usage.json`), is known and fresh (under
+5 hours old; if not, open Claude Code and send any prompt) and neither its weekly nor its 5-hour window is at or above
+`GAUNTLET_MAX_USED` percent (default 80, the same limit Codex uses; a window whose reset time has passed is not a
+block); the network reaches the model services; the box starts the Cursor CLI; free disk; and the human says y/N that
 Cursor usage is left (the CLI has no readout).
 
 ## INVALID, and the report
