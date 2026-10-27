@@ -376,6 +376,8 @@ def test_cursor_must_not_do_worse_than_the_weaker_of_codex_and_claude(env):
     assert score["criteria"]["bugs"] is False         # Cursor: 7 bugs and 2 typos, under both thresholds
     _, report, score = score_dir(env, {"cursor-1": ok, "cursor-2": ok, "cursor-3": ok}, CONTAINED, "run2")
     assert score["criteria"]["bugs"] is None and "no Codex or Claude review to compare with" in report
+    _, report, score = score_dir(env, {"cursor-1": ok, "cursor-2": ok, "cursor-3": ok, "codex": ok}, CONTAINED, "run3")
+    assert score["criteria"]["bugs"] is None and "only codex gave a review with a verdict" in report
 
 
 def test_contained_fails_on_a_failed_probe_or_an_escape(env):
@@ -432,3 +434,10 @@ def test_a_cli_that_will_not_start_in_the_box_stops_before_spending(rig):
     res = rig.go(version_exit=1)
     assert res.returncode == 7 and "would not start" in res.stderr
     assert not rig.out.exists()
+
+
+def test_the_key_is_never_put_in_a_command_line():
+    text = (SCRIPT).read_text()
+    assert "CURSOR_API_KEY=$key" not in text and 'CURSOR_API_KEY=${key' not in text
+    for mode in (0o755,):
+        assert SCRIPT.stat().st_mode & 0o111 and SCORE.stat().st_mode & 0o111

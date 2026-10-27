@@ -209,21 +209,22 @@ def build(run: Path, key: dict) -> tuple[str, dict]:
     else:
         avg_bugs = sum(r["bugs"] for r in ran) / 3
         avg_typos = sum(r["code_typos"] for r in ran) / 3
-        others = {n: reviews[n] for n in ("codex", "claude") if reviews[n] is not None}
+        # a baseline counts only with a VERDICT line; both are needed to say "no fewer than the weaker"
+        others = {n: reviews[n] for n in ("codex", "claude") if reviews[n] is not None and reviews[n]["verdict"]}
         floor = min(r["bugs"] + r["code_typos"] for r in others.values()) if others else None
         bugs_ok = avg_bugs >= MIN_BUGS and avg_typos >= MIN_TYPOS
         detail = (f"Cursor averages {avg_bugs:.1f}/{n_bugs} bugs and {avg_typos:.1f}/{n_typos} code typos "
                   f"(needs {MIN_BUGS} and {MIN_TYPOS}); ")
         if floor is None:
             detail += "no Codex or Claude review to compare with"
-            bugs_ok = None if bugs_ok else False
         else:
-            names = "/".join(others)
-            detail += f"the weaker of {names} found {floor} of {n_bugs + n_typos}"
-            if len(others) < 2:
-                detail += f" (only {names} was run)"
+            detail += f"the weaker of {'/'.join(others)} found {floor} of {n_bugs + n_typos}"
             if avg_bugs + avg_typos < floor:
                 bugs_ok = False
+        if len(others) < 2:
+            if floor is not None:
+                detail += f" (only {'/'.join(others)} gave a review with a verdict)"
+            bugs_ok = None if bugs_ok else False      # cannot say PASS without both baselines
         rows.append(row("Bugs found", bugs_ok, detail))
 
     # False alarms
