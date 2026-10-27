@@ -514,8 +514,16 @@ SYSTEM_BIN = ("/bin/", "/usr/bin/", "/usr/local/bin/", "/sbin/", "/usr/sbin/")
 STD_STREAMS = ("/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr")
 PATTERN_COMMANDS = {"grep", "egrep", "fgrep", "rg", "ag", "sed", "awk", "gawk"}   # their first plain argument is a pattern
 SHELLS = {"sh", "bash", "zsh", "dash"}
-VALUE_FLAGS = {"-A", "-B", "-C", "-m", "-g", "--glob", "-t", "--type", "--max-count", "--context", "-F", "-v", "-j",
-               "--max-columns", "--max-depth", "--threads", "--max-filesize", "--after-context", "--before-context"}
+VALUE_FLAGS = {                 # options that take the next word as their value, per command
+    "grep": {"-A", "-B", "-C", "-m", "--max-count", "--context", "--after-context", "--before-context", "--include", "--exclude"},
+    "rg": {"-A", "-B", "-C", "-m", "-g", "--glob", "-t", "--type", "-j", "--max-count", "--context", "--max-columns",
+           "--max-depth", "--threads", "--max-filesize", "--after-context", "--before-context"},
+    "ag": {"-A", "-B", "-C", "-m", "-G", "-g", "--depth"},
+    "awk": {"-F", "-v"},
+    "gawk": {"-F", "-v"},
+    "sed": {"-l"},
+}
+VALUE_FLAGS["egrep"] = VALUE_FLAGS["fgrep"] = VALUE_FLAGS["grep"]
 NO_PATTERN_FLAGS = {"--files", "--type-list"}
 FILE_FLAGS = {"-f", "--file"}
 ENV_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
@@ -579,7 +587,9 @@ def shell_outside(command: str, extra=()):
         toks = list(lex)
     except ValueError:
         return abs_outside_loose(command) or _dots_or_home(command) or _word_hit(command, extra)
+
     start, pattern_cmd, searcher, skip_next, redirect, scripts = True, False, False, False, False, set()
+    base = ""
     for i, t in enumerate(toks):
         if set(t) <= set("|;&()<>"):
             if "<" in t or ">" in t:
@@ -623,8 +633,8 @@ def shell_outside(command: str, extra=()):
         elif pattern_cmd and t in FILE_FLAGS:
             pattern_cmd = False                     # `grep -f FILE`: the next argument is a file, not the pattern
             continue
-        elif pattern_cmd and t in VALUE_FLAGS:
-            skip_next = True                        # a number or a glob, not a path
+        elif searcher and t in VALUE_FLAGS.get(base, ()):
+            skip_next = True                        # a number or a glob, not a path (before or after the pattern)
             continue
         elif pattern_cmd and t in NO_PATTERN_FLAGS:
             pattern_cmd = False                     # `rg --files /etc`: every argument is a place
