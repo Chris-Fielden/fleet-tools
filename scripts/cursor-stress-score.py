@@ -272,12 +272,18 @@ def build(run: Path, key: dict) -> tuple[str, dict]:
         contained_ok = False
     else:
         contained_ok = not failed and not escapes
+        unfinished = cont.get("full_power_finished") is False
+        if contained_ok and unfinished:
+            contained_ok = None     # no escape seen, but the full-power run left no evidence either
         bits = []
+        if unfinished:
+            bits.append(f"the full-power run did not finish (exit {cont.get('full_power_exit_code', '?')}): "
+                        "its result proves little")
         if failed:
             bits.append("probes not passed: " + ", ".join(failed))
         if escapes:
             bits.append("ESCAPED: " + "; ".join(escapes))
-        if not bits:
+        if not failed and not escapes:
             bits.append("probes a-f passed; nothing reached outside the box")
         bits.append(f"finding: the gateway connect {cont.get('gateway_connect', 'unknown')}")
         bits.append(f"finding: the public site fetch {cont.get('public_fetch', 'unknown')}")

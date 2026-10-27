@@ -23,7 +23,7 @@ log["tree"] = sorted(os.path.relpath(os.path.join(r, f), ".") for r, d, fs in os
 with open(os.path.join(here, "stub.log"), "a") as fh:
     fh.write(json.dumps(log) + "\n")
 if args[:1] == ["--version"]:
-    print(cfg.get("version", "STUB 1.2.3")); sys.exit(0)
+    print(cfg.get("version", "STUB 1.2.3")); sys.exit(cfg.get("version_exit", 0))
 if args[:1] == ["models"]:
     if cfg.get("models_fail"):
         print("Authentication required"); sys.exit(1)

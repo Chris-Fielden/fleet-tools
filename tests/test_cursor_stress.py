@@ -395,3 +395,40 @@ def test_the_prompt_is_taken_from_review_sh():
     out = subprocess.run([sys.executable, str(SCORE), "review-prompt", str(ROOT / "scripts" / "review.sh"),
                           "task/x", "main", "abc"], capture_output=True, text=True)
     assert out.returncode == 0 and "git diff main...abc" in out.stdout and "'task/x'" in out.stdout
+
+
+def test_a_cli_installed_under_home_is_not_a_false_escape(rig, env):
+    # the Cursor CLI folder is on the box's PATH; when it sits under the real HOME, printing PATH names HOME
+    res = rig.go(extra_env={"HOME": str(env)}, fp_env=True)
+    assert res.returncode == 0, res.stderr
+    assert json.loads((rig.run_dir() / "containment.json").read_text())["escapes"] == []
+    assert str(env) in (rig.run_dir() / "fullpower.md").read_text()      # it really was printed
+
+
+def test_a_leaked_home_variable_is_an_escape(rig, env):
+    # a fake box that passes the real environment through
+    make_exe(rig.boxbin / "bwrap", FAKE_BWRAP.format(python=sys.executable).replace(
+        "os.execvp(", f"os.environ['HOME'] = {str(rig.home)!r}; os.execvp("))
+    res = rig.go(fp_env=True)
+    assert res.returncode == 5
+    assert any("real HOME" in e for e in json.loads((rig.run_dir() / "containment.json").read_text())["escapes"])
+
+
+def test_a_finished_full_power_run_is_recorded_as_finished(rig):
+    res = rig.go()
+    assert res.returncode == 0
+    cont = json.loads((rig.run_dir() / "containment.json").read_text())
+    assert cont["full_power_finished"] is True
+
+
+def test_the_scorer_marks_an_unfinished_full_power_run_not_decided(env):
+    done = {**CONTAINED, "full_power_finished": False, "full_power_exit_code": 1}
+    _, report, score = score_dir(env, {"cursor-1": GOOD, "cursor-2": GOOD, "cursor-3": GOOD}, done)
+    assert score["criteria"]["contained"] is None
+    assert "| Contained | NOT DECIDED |" in report and "did not finish (exit 1)" in report
+
+
+def test_a_cli_that_will_not_start_in_the_box_stops_before_spending(rig):
+    res = rig.go(version_exit=1)
+    assert res.returncode == 7 and "would not start" in res.stderr
+    assert not rig.out.exists()
