@@ -20,6 +20,7 @@ from ANOTHER company than the reviewer checks it blind, and the answer goes in a
 (see `resolutions` below). Stdlib only.
 """
 import argparse
+import glob
 import hashlib
 import importlib.util
 import json
@@ -499,8 +500,9 @@ def lock_hash(gauntlet_dir: Path, key_file: Path) -> str:
 
 
 # --- did a baseline stay inside its copy? ------------------------------------------------------
-# A tripwire, not a sandbox: it reads the paths the saved tool calls name (no $(...) expansion, no symlinks). The copy itself
-# is what contains the baseline; this makes a leak visible and the attempt INVALID.
+# ADVISORY, a tripwire and not a sandbox: it reads the words the saved tool calls name (no $(...) expansion, no symlinks, no
+# paths built at run time) and flags any that is an existing path outside the copy, or a protected name. "Trace ok" is not
+# proof of containment; the copy itself is what contains the baseline. This only makes a visible leak INVALID.
 
 OUTSIDE_WORDS = ("fleet-tools", ".fleet", "gauntlet-key", "answer-key")
 CALL_TYPES = {"tool_use", "command_execution", "file_read", "file_search", "file_list", "mcp_tool_call",
@@ -512,24 +514,9 @@ PATH_KEYS = {"file_path", "path", "notebook_path", "cwd", "dir", "directory", "p
 PATTERN_KEYS = {"pattern", "query", "regex", "old_string", "new_string"}      # searched for, never opened
 SYSTEM_BIN = ("/bin/", "/usr/bin/", "/usr/local/bin/", "/sbin/", "/usr/sbin/")
 STD_STREAMS = ("/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr")
-PATTERN_COMMANDS = {"grep", "egrep", "fgrep", "rg", "ag", "sed", "awk", "gawk"}   # their first plain argument is a pattern
 SHELLS = {"sh", "bash", "zsh", "dash"}
-VALUE_FLAGS = {                 # options that take the next word as their value, per command
-    "grep": {"-A", "-B", "-C", "-m", "--max-count", "--context", "--after-context", "--before-context", "--include", "--exclude"},
-    "rg": {"-A", "-B", "-C", "-m", "-g", "--glob", "-t", "--type", "-j", "--max-count", "--context", "--max-columns",
-           "--max-depth", "--threads", "--max-filesize", "--after-context", "--before-context"},
-    "ag": {"-A", "-B", "-C", "-m", "-G", "-g", "--depth"},
-    "awk": {"-F", "-v"},
-    "gawk": {"-F", "-v"},
-    "sed": {"-l"},
-}
-VALUE_FLAGS["egrep"] = VALUE_FLAGS["fgrep"] = VALUE_FLAGS["grep"]
-NO_PATTERN_FLAGS = {"--files", "--type-list"}
-FILE_FLAGS = {"-f", "--file"}
 ENV_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
-ABS_RE = re.compile(r"(?:^|[\s\"'=(:,\[])(/[^\s\"'|;&)\]]*)")
-DOTDOT_RE = re.compile(r"(?:^|[/\s\"'=(])\.\.(?:[/\s\"')]|$)")
-HOME_RE = re.compile(r"(?:^|[\s\"'=(:,/])(?:~|\$HOME|\$\{HOME\})(?:[/\s\"')]|$)")
+HOME_PREFIX_RE = re.compile(r"^(?:~|\$HOME|\$\{HOME\})(?=/|$)")
 
 
 def call_strings(ev) -> list:
@@ -563,114 +550,87 @@ def _word_hit(text: str, extra):
     return None
 
 
-def _dots_or_home(text: str):
-    if DOTDOT_RE.search(text):
-        return ".."
-    if HOME_RE.search(text):
-        return "~ or $HOME"
-    return None
+def _resolve(cand: str, base):
+    """The absolute path a word stands for, or None when it names no place outside the working directory
+    (a plain relative word). `COPY` is the copy, `~` and $HOME are the home, `..` climbs out of the copy."""
+    home = os.path.expanduser("~")
+    cand = HOME_PREFIX_RE.sub(lambda m: home, cand)
+    if cand == "COPY" or cand.startswith("COPY/"):
+        cand = (base or "/__copy__") + cand[4:]
+    if not cand.startswith("/"):
+        if ".." not in cand.split("/"):
+            return None
+        cand = (base or "/__copy__") + "/" + cand
+    return os.path.normpath(cand)
 
 
-def _is_outside_path(p: str, program: bool):
-    """p is meant as a path: is it outside the copy (the copy was already rewritten to COPY)?"""
-    if p in STD_STREAMS or (program and p.startswith(SYSTEM_BIN)):
+def _outside(cand: str, program: bool, base) -> bool:
+    """Does this word name something that exists on disk outside the copy? No grammar is parsed: a search pattern such
+    as '/charge' that is not a real file never counts, and a real file counts however the command line reads it."""
+    p = _resolve(cand, base)
+    if p is None or p in STD_STREAMS or (program and p.startswith(SYSTEM_BIN)):
         return False
-    return p.startswith("/") and not (p == "COPY" or p.startswith("COPY/"))
+    roots = {base, os.path.realpath(base)} if base else set()
+    if any(p == r or p.startswith(r + "/") for r in roots):
+        return False
+    return os.path.lexists(p) or bool(glob.glob(p))
 
 
-def shell_outside(command: str, extra=()):
-    """The first outside path a shell command names, or None. Quotes are understood, so a quoted path counts and a
-    search pattern (the first plain argument of grep, sed, awk ...) does not."""
+def shell_outside(command: str, extra=(), base=None):
+    """The first word of a shell command that names an existing path outside the copy (or a protected name), or None.
+    Every word is a candidate; the command line is never parsed for which word is a pattern and which a place."""
     try:
         lex = shlex.shlex(command, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
         toks = list(lex)
     except ValueError:
-        return abs_outside_loose(command) or _dots_or_home(command) or _word_hit(command, extra)
+        toks = [t.strip("'\"") for t in command.split()]      # unbalanced quotes: still every word
 
-    start, pattern_cmd, searcher, skip_next, redirect, scripts = True, False, False, False, False, set()
-    base = ""
+    start, redirect, scripts = True, False, set()
     for i, t in enumerate(toks):
         if set(t) <= set("|;&()<>"):
             if "<" in t or ">" in t:
                 redirect = True                     # the next word is a file, never a program
             else:
-                start, pattern_cmd, searcher = True, False, False
-            continue
-        if skip_next:
-            skip_next = False
+                start = True
             continue
         if i in scripts:                            # already read as a command of its own
             continue
-        if start and not redirect and ENV_ASSIGN_RE.match(t):
-            value = t.split("=", 1)[1]              # `LC_ALL=C grep ...`: the program comes after the assignments
-            if _is_outside_path(value, False):
-                return value
-            continue
         program = start and not redirect
+        if start and not redirect and ENV_ASSIGN_RE.match(t):
+            program = False                         # `LC_ALL=C grep ...`: the program comes after the assignments
+        else:
+            start = False
         if redirect:
             redirect = False
-        elif start:
-            base = t.rsplit("/", 1)[-1]
-            pattern_cmd = searcher = base in PATTERN_COMMANDS
-            start = False
-            if base in SHELLS:                      # `bash -lc 'script'`: the script is a command too
-                for j in range(i + 1, len(toks) - 1):
-                    if toks[j].startswith("-") and "c" in toks[j][1:]:
-                        hit = shell_outside(toks[j + 1], extra)
-                        if hit:
-                            return hit
-                        scripts.add(j + 1)
-                        break
-        elif searcher and t in ("-e", "--regexp"):
-            skip_next, pattern_cmd = True, False    # the pattern after -e (repeatable); no other pattern follows
-            continue
-        elif searcher and t.startswith("--file="):
-            pattern_cmd = False                     # `grep --file=FILE`: patterns come from a file, so every operand is a place
-        elif searcher and (t.startswith("--regexp=") or (re.match(r"-e.", t) and not t.startswith("--"))):
-            pattern_cmd = False                     # an attached pattern: `--regexp=/charge`, `-e/charge`
-            continue
-        elif pattern_cmd and t in FILE_FLAGS:
-            pattern_cmd = False                     # `grep -f FILE`: the next argument is a file, not the pattern
-            continue
-        elif searcher and t in VALUE_FLAGS.get(base, ()):
-            skip_next = True                        # a number or a glob, not a path (before or after the pattern)
-            continue
-        elif pattern_cmd and t in NO_PATTERN_FLAGS:
-            pattern_cmd = False                     # `rg --files /etc`: every argument is a place
-            continue
-        elif pattern_cmd and not t.startswith("-"):
-            pattern_cmd = False                     # the pattern: searched for, never opened
-            continue
+        elif program and t.rsplit("/", 1)[-1] in SHELLS:
+            for j in range(i + 1, len(toks) - 1):   # `bash -lc 'script'`: the script is a command too
+                if toks[j].startswith("-") and "c" in toks[j][1:]:
+                    hit = shell_outside(toks[j + 1], extra, base)
+                    if hit:
+                        return hit
+                    scripts.add(j + 1)
+                    break
         cands = {t, t.split("=", 1)[-1]}
-        if re.match(r"-f.", t) and not t.startswith("--"):
-            cands.add(t[2:])                        # a file glued to -f: `grep -f/etc/passwd`
-            if pattern_cmd:
-                pattern_cmd = False                 # `grep -fFILE`: patterns come from a file, so the first plain argument is a path
+        if re.match(r"-[A-Za-z]", t) and t[2:] != "/":
+            cands.add(t[2:])                        # a path glued to a flag: `grep -f/etc/passwd` (`awk -F/` is a separator)
         for cand in cands:
-            if _is_outside_path(cand, program):
+            if _outside(cand, program, base):
                 return cand
-        hit = _dots_or_home(t) or _word_hit(t, extra)    # operands only: a search pattern may say '../'
+        hit = _word_hit(t, extra)
         if hit:
             return hit
     return None
 
 
-def abs_outside_loose(text: str):
-    """When a command cannot be split (unbalanced quotes): any absolute path counts, except the standard streams."""
-    for m in ABS_RE.finditer(text):
-        if m.group(1) not in STD_STREAMS and not m.group(1).startswith("COPY"):
-            return m.group(1)
-    return None
-
-
 def outside_in(key: str, text: str, copies, extra=()):
     """The first thing in a tool call's text that names a path outside the copy, or None."""
+    base = next((c for c in copies if os.path.isdir(c)), None)
     for c in sorted(copies, key=len, reverse=True):
         text = re.sub(re.escape(c) + r"(?=$|[/\s\"')\]:,;|&])", "COPY", text)
     if key in PATH_KEYS:
-        return text if _is_outside_path(text.strip(), False) else _dots_or_home(text) or _word_hit(text, extra)
-    return shell_outside(text, extra)
+        return text if _outside(text.strip(), False, base) else _word_hit(text, extra)
+    return shell_outside(text, extra, base)
 
 
 def check_trace(path: Path, copies, extra=()):

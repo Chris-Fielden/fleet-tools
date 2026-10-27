@@ -754,7 +754,7 @@ def test_a_trace_that_stays_inside_the_copy_scores_normally_and_is_saved(rig):
 @pytest.mark.parametrize("model,cfg_name,target", [
     ("claude-opus", "claude", "tests/fixtures/gauntlet-key/answer-key.json"),
     ("codex", "codex", "~/." + "fleet/secrets/cursor-api-key"),
-    ("codex", "codex", "../outside.txt"),
+    ("codex", "codex", "../"),
     ("claude-opus", "claude", "/home/someone/fleet-tools/CLAUDE.md"),
 ])
 def test_a_baseline_that_leaves_its_copy_is_invalid_on_our_side_with_the_line_as_proof(rig, model, cfg_name, target):
@@ -769,7 +769,7 @@ def test_a_baseline_that_leaves_its_copy_is_invalid_on_our_side_with_the_line_as
 
 
 def test_a_leaving_attempt_is_replaced_under_the_one_replacement_rule(rig):
-    rig.go(models="codex", codex={"reads": ["../x"]})
+    rig.go(models="codex", codex={"reads": [".."]})
     run = rig.run_dir()
     (rig.others / "codex.json").write_text(json.dumps({"review_seq": [GOOD]}))
     res = rig.go(models="codex", args=("--replace", str(run), "codex", "1"))
@@ -799,17 +799,29 @@ def test_agent_rules_off_is_gone_from_the_gauntlet_runner():
 
 
 def test_a_debrief_trace_that_leaves_the_copy_is_invalid_too(rig):
-    rig.go(models="codex", codex={"review_seq": [BAD], "debrief_reads": ["../x"]})
+    rig.go(models="codex", codex={"review_seq": [BAD], "debrief_reads": [".."]})
     run = rig.run_dir()
     assert (run / "codex-1.md").exists() and not (run / "codex-1.debrief.md").exists()
     invalid = json.loads((run / "codex-1.json").read_text())["invalid"]
-    assert invalid[0]["step"] == "trace" and invalid[0]["side"] == "ours" and "../x" in invalid[0]["proof"]
+    assert invalid[0]["step"] == "trace" and invalid[0]["side"] == "ours" and ".." in invalid[0]["proof"]
 
 
 def test_a_model_side_crash_keeps_its_record_when_the_trace_also_left_the_copy(rig):
-    rig.go(models="claude-opus", claude={"exit": 1, "stderr": "Segmentation fault", "reads_before_exit": ["../x"]})
+    rig.go(models="claude-opus", claude={"exit": 1, "stderr": "Segmentation fault", "reads_before_exit": [".."]})
     invalid = json.loads((rig.run_dir() / "claude-opus-1.json").read_text())["invalid"]
     assert {(x["step"], x["side"]) for x in invalid} == {("trace", "ours"), ("review", "theirs")}
+
+
+@pytest.fixture
+def world(tmp_path):
+    """A copy and, beside it, real files outside it (a path only counts when it exists)."""
+    copy = tmp_path / "copy"
+    (copy / "ledgerline").mkdir(parents=True)
+    (copy / "ledgerline" / "gateway.py").write_text("x\n")
+    out = tmp_path / "outside"
+    out.mkdir()
+    (out / "secret").write_text("s\n")
+    return copy, out
 
 
 @pytest.mark.parametrize("call", [
@@ -817,57 +829,65 @@ def test_a_model_side_crash_keeps_its_record_when_the_trace_also_left_the_copy(r
     "/usr/bin/git log --oneline",
     "sed -n '/retry/p' ledgerline/gateway.py",
     "grep -rn '/etc/ledgerline/service-token' .",
-    "grep -n '../' ledgerline/gateway.py",
     "rg --regexp=/charge ledgerline/gateway.py",
     "rg --max-columns 200 '/charge' ledgerline/gateway.py",
+    "rg --glob=/ledgerline/** token .",
+    "rg --glob '/ledgerline/**' token .",
     "rg -e token --glob '/ledgerline/**' .",
     "grep -F token ledgerline/gateway.py",
     "awk -F/ '{print $1}' ledgerline/gateway.py",
-    "awk -F / '{print $1}' ledgerline/gateway.py",
     "LC_ALL=C grep -n '/charge' ledgerline/gateway.py",
     "GIT_PAGER=cat /usr/bin/git log",
     "rg -e /charge -e /refund ledgerline/gateway.py",
     "grep -e/charge ledgerline/gateway.py",
-    "grep -e /etc/x -n ledgerline/gateway.py",
     "grep -n \"/charge\" ledgerline/gateway.py 2>/dev/null",
+    "grep -n '/charge",
     "COPYDIR/ledgerline/gateway.py",
+    "COPYDIR/ledgerline/../ledgerline/gateway.py",
 ])
-def test_ordinary_contained_calls_are_not_a_leak(call):
-    assert G.outside_in("command", call.replace("COPYDIR", "/work/copy"), ["/work/copy"]) is None
+def test_ordinary_contained_calls_are_not_a_leak(call, world):
+    copy, _ = world
+    assert G.outside_in("command", call.replace("COPYDIR", str(copy)), [str(copy)]) is None
 
 
 @pytest.mark.parametrize("call", [
+    "cat OUT/secret",
+    "/bin/cat OUT/secret",
+    "cat 'OUT/secret'",
+    "cat --file=OUT/secret",
+    "bash -c 'cat OUT/secret'",
+    "/bin/bash -lc \"cat 'OUT/secret'\"",
+    "grep -e token OUT/secret",
+    "grep -f OUT/secret .",
+    "grep -fOUT/secret .",
+    "grep < OUT/secret token",
+    "grep token < OUT/secret",
+    "grep -F token OUT/secret",
+    "rg --glob=x token OUT/secret",
+    "X=OUT/secret cat y",
+    "LC_ALL=C cat OUT/secret",
+    "cat x > OUT/secret",
+    "sed -f OUT/secret x",
+    "grep --file=patterns.txt OUT/secret",
+    "cat ../outside/secret",
+    "cat COPYDIR/../outside/secret",
+    "rg --files OUT",
+    "cat OUT/sec*",
     "cat /etc/passwd",
-    "/bin/cat /etc/passwd",
-    "cat '/etc/passwd'",
-    "cat --file=/home/x/.ssh/id_ed25519",
-    "cat /work/copy-other/secret",
-    "bash -c 'cat /tmp/x'",
-    'cat "/data/secret"',
-    "/bin/bash -lc \"cat '/data/secret'\"",
-    "grep -n x /srv2/file",
-    "grep -e token /etc/passwd",
-    "grep -f /etc/passwd .",
-    "grep -f/etc/passwd .",
-    "grep -F token /etc/passwd",
-    "grep -v token /etc/passwd",
-    "rg -F token /etc/passwd",
-    "X=/etc/passwd cat y",
-    "LC_ALL=C cat /etc/passwd",
-    "cat x > /usr/bin/evil",
-    "rg -e /charge /etc/passwd",
-    "sed -f/tmp/script.sed file",
-    "grep --file=/etc/passwd .",
-    "grep --file=patterns.txt /etc/passwd",
-    "grep -f patterns.txt /etc/passwd",
-    "grep -fpatterns.txt /etc/passwd",
-    "sed -f /tmp/script.sed x",
-    "cat ../x",
-    "rg --files /etc",
-    "grep -A 3 foo /etc/passwd",
+    "grep -n 'x OUT/secret",
+    "cat tests/fixtures/gauntlet-key/answer-key.json",
+    "cat $HOME",
 ])
-def test_calls_that_name_a_path_outside_the_copy_are_a_leak(call):
-    assert G.outside_in("command", call, ["/work/copy"]) is not None
+def test_calls_that_name_a_path_outside_the_copy_are_a_leak(call, world):
+    copy, out = world
+    call = call.replace("COPYDIR", str(copy)).replace("OUT", str(out))
+    assert G.outside_in("command", call, [str(copy)]) is not None
+
+
+def test_a_word_that_is_no_real_file_outside_the_copy_is_never_a_leak(world):
+    copy, out = world
+    for call in (f"cat {out}/nope", "grep /data/secret .", "cat ../nope", "rg -g /x/** y"):
+        assert G.outside_in("command", call, [str(copy)]) is None
 
 
 def test_tool_output_in_a_trace_is_not_read_as_a_path_the_baseline_used():
@@ -888,9 +908,9 @@ def test_tool_output_in_a_trace_is_not_read_as_a_path_the_baseline_used():
 def test_a_search_pattern_field_is_not_a_path_but_a_path_field_is():
     ev = {"type": "tool_use", "input": {"pattern": "/etc/ledgerline/token", "path": "ledgerline"}}
     assert [k for k, _ in G.call_strings(ev)] == ["path"]
-    assert G.outside_in("path", "/data/secret", ["/work/copy"]) == "/data/secret"
+    assert G.outside_in("path", "/etc/passwd", ["/work/copy"]) == "/etc/passwd"
     assert G.outside_in("file_path", "/work/copy/a.py", ["/work/copy"]) is None
-    assert G.outside_in("file_path", "/work/copy-other/a.py", ["/work/copy"]) is not None
+    assert G.outside_in("file_path", "/etc/hostname", ["/etc/ho"]) is not None   # a longer name is not the copy
     unknown = {"type": "something_new", "input": {"file_path": "/etc/passwd"}}
     assert G.call_strings(unknown)
 
