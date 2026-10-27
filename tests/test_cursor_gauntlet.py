@@ -675,6 +675,27 @@ def test_a_ticket_spelling_complaint_is_a_false_alarm_even_when_it_cites_a_line(
     assert legit["usefulness_passed"] is True
 
 
+def test_a_code_typo_finding_that_cites_the_ticket_is_not_a_ticket_complaint():
+    cites = good_review(omit=("typo-late-fee",), extra_must=[
+        "`ledgerline/invoices.py`, 47 — typo `late_fee_percnt` means the late fee from TICKET.md item 10 is never applied"])
+    r = score(cites)
+    assert "typo-late-fee" in r["found"] and r["false_alarms"] == [] and r["usefulness_passed"] is True
+    unplaced = score(good_review(extra_must=["`TICKET.md`, 3 — the requirement list has no owner"]))
+    assert unplaced["false_alarms"] == [] and len(unplaced["pending"]) == 1
+
+
+def test_replacing_a_cursor_attempt_does_not_inherit_the_old_probe_reports(rig):
+    rig.go(cursor={"exit": 1, "stderr": "Error: usage limit reached for this plan"})
+    run = rig.run_dir()
+    first = json.loads((run / "cursor-1.json").read_text())["invalid"]
+    assert {x["side"] for x in first} == {"ours"} and "probes" in {x["step"] for x in first}
+    res = rig.go(args=("--replace", str(run), "cursor", "1"))
+    assert res.returncode == 0, res.stderr
+    assert json.loads((run / "cursor-1.json").read_text())["invalid"] == []
+    assert "replacement preflight (cursor attempt 1)" in (run / "preflight.txt").read_text()
+    assert (run / "cursor-1.containment.json").exists()
+
+
 def test_a_second_finding_on_the_same_line_does_not_borrow_a_neighbouring_entry():
     twice = good_review(omit=("retry-hides-failure", "typo-retries"),
                         extra_must=["`ledgerline/gateway.py`, 27 — the broad except swallows a declined card",

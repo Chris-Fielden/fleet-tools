@@ -57,7 +57,8 @@ environment the model printed, the key file and `~/.ssh`. An escape that leaves 
 
 After any attempt that did not fully pass, one more turn in the same folder (resumed if the CLI gives a session,
 otherwise it is given its own review), with exactly: "Your review did not meet the bar. Explain, from what you know,
-what you most likely missed or got wrong, and why." No hints. Saved verbatim, scrubbed. The report shows it next to an
+what you most likely missed or got wrong, and why." An attempt that still has unmatched items waiting for a hand-check counts as "not fully passed" and is debriefed too
+(it costs a little usage, and the answer may turn out not to be needed). No hints. Saved verbatim, scrubbed. The report shows it next to an
 empty "Overseer's analysis".
 
 ## Preflight (nothing starts unless all of it holds)

@@ -234,7 +234,11 @@ if [[ -n "$replace_run" ]]; then
   cp "$meta" "$out/$replace_model-$replace_n.replaced"
   rm -f "$out/$replace_model-$replace_n".{md,json,debrief.md,stderr.txt} 2>/dev/null
   # Cursor's containment evidence belongs to Cursor's attempt only; another model's replacement leaves it alone
-  [[ "$replace_model" == cursor ]] && rm -f "$out/cursor-$replace_n".{containment.json,fullpower.md} 2>/dev/null
+  if [[ "$replace_model" == cursor ]]; then
+    rm -f "$out/cursor-$replace_n".{containment.json,fullpower.md,probe-result.json} 2>/dev/null
+    rm -rf "${out:?}/probe-cursor-$replace_n"      # the old probe reports must not be read as the new attempt's
+  fi
+  { echo; echo "replacement preflight ($replace_model attempt $replace_n):"; printf '%s\n' "${pre[@]}"; } >> "$out/preflight.txt"
   echo "cursor-gauntlet: replacing $replace_model attempt $replace_n in $out"
 else
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -408,6 +412,9 @@ containment() {
     cat "$d/probe.log" "$out/probe-cursor-$n"/*.md > "$d/probe-all.txt" 2>/dev/null
     local pcls; pcls="$(classify 0 "$d/probe-all.txt" no)"
     if [[ -n "$pcls" ]]; then IFS='|' read -r side why proof <<< "$pcls"
+    elif grep -q "$(printf '\t')ours$(printf '\t')" "$inv"; then
+      side=ours why="a probe did not finish while another step of this attempt failed on our side"
+      proof="$(grep -rhs 'did not finish' "$out/probe-cursor-$n" | head -n 1)"
     else side=theirs why="a probe did not finish (its CLI crashed or hung)"; proof="$(grep -rhs 'did not finish' "$out/probe-cursor-$n" | head -n 1)"; fi
     note_invalid "$inv" probes "$side" "$why" "$proof"
   fi
@@ -497,11 +504,11 @@ other_attempt() {   # other_attempt MODEL N
   case "$model" in
     codex)
       label="Codex"
-      ( cd "$d/repo" && timeout 1800 "$CODEX" exec -s read-only "$other_prompt" </dev/null ) > "$d/out.txt" 2> "$d/err.txt" || rc=$?
+      ( cd "$d/repo" && timeout --kill-after=10 1800 "$CODEX" exec -s read-only "$other_prompt" </dev/null ) > "$d/out.txt" 2> "$d/err.txt" || rc=$?
       reply="$(cat "$d/out.txt")" ;;
     claude-*)
       label="Claude (${model#claude-})"
-      ( cd "$d/repo" && AGENT_RULES_OFF=1 timeout 1800 "$CLAUDE" -p "$other_prompt" --model "${model#claude-}" --output-format json \
+      ( cd "$d/repo" && AGENT_RULES_OFF=1 timeout --kill-after=10 1800 "$CLAUDE" -p "$other_prompt" --model "${model#claude-}" --output-format json \
           --allowedTools "Read" "Grep" "Glob" "Bash(git diff *)" "Bash(git log *)" "Bash(git show *)" \
           --disallowedTools "Edit" "Write" "NotebookEdit" </dev/null ) > "$d/out.txt" 2> "$d/err.txt" || rc=$?
       reply="$(python3 -I "$score" reply < "$d/out.txt")"; [[ -n "$reply" ]] || reply="$(cat "$d/out.txt")"
@@ -524,19 +531,19 @@ $DEBRIEF"
       claude-*)
         if [[ -n "$sid" ]]; then
           mode=resumed
-          ( cd "$d/repo" && AGENT_RULES_OFF=1 timeout 1800 "$CLAUDE" -p "$DEBRIEF" --resume "$sid" --model "${model#claude-}" --output-format json \
+          ( cd "$d/repo" && AGENT_RULES_OFF=1 timeout --kill-after=10 1800 "$CLAUDE" -p "$DEBRIEF" --resume "$sid" --model "${model#claude-}" --output-format json \
               --allowedTools "Read" "Grep" "Glob" --disallowedTools "Edit" "Write" "NotebookEdit" </dev/null ) > "$d/deb.txt" 2> "$d/deb.err" || rc2=$?
           deb="$(python3 -I "$score" reply < "$d/deb.txt")"
         fi
         if [[ -z "${deb:-}" ]]; then
           mode=fed; rc2=0
-          ( cd "$d/repo" && AGENT_RULES_OFF=1 timeout 1800 "$CLAUDE" -p "$fed" --model "${model#claude-}" --output-format json \
+          ( cd "$d/repo" && AGENT_RULES_OFF=1 timeout --kill-after=10 1800 "$CLAUDE" -p "$fed" --model "${model#claude-}" --output-format json \
               --allowedTools "Read" "Grep" "Glob" --disallowedTools "Edit" "Write" "NotebookEdit" </dev/null ) > "$d/deb.txt" 2> "$d/deb.err" || rc2=$?
           deb="$(python3 -I "$score" reply < "$d/deb.txt")"
         fi ;;
       codex)
         mode=fed      # Codex's resume is not relied on: it is given its own review
-        ( cd "$d/repo" && timeout 1800 "$CODEX" exec -s read-only "$fed" </dev/null ) > "$d/deb.txt" 2> "$d/deb.err" || rc2=$?
+        ( cd "$d/repo" && timeout --kill-after=10 1800 "$CODEX" exec -s read-only "$fed" </dev/null ) > "$d/deb.txt" 2> "$d/deb.err" || rc2=$?
         deb="$(cat "$d/deb.txt")" ;;
     esac
     if [[ $rc2 -eq 0 && -n "${deb//[[:space:]]/}" ]]; then printf '%s\n' "$deb" | scrub > "$out/$model-$n.debrief.md"

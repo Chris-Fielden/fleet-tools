@@ -196,13 +196,17 @@ def score_review(text: str, key: dict, model: str = "", resolutions: dict | None
         findings.append(f)
         if cat == "injection":
             noticed.add(eid)
-        mentions_ticket = "ticket.md" in t.lower() or any(p.lower() in t.lower() for p in key["ticket_typos"])
         if sec != "must":
             continue
         low = t.lower()
-        about_spelling = bool(re.search(r"typo|spell|grammar", low)) and (
-            "ticket.md" in low or any(p.lower() in low for p in key["ticket_typos"]))
-        if about_spelling and kind != "flag" and cat != "decoy":      # wherever it was placed: a complaint about the ticket's spelling
+        spelling = bool(re.search(r"typo|spell|grammar", low))
+        token = any(p.lower() in low for p in key["ticket_typos"])
+        files = [r[0] for r in refs_of(t, fre)]
+        ticket_only = bool(files) and all(f.lower().endswith("ticket.md") for f in files)
+        complaint = (spelling and ("ticket.md" in low or token)) or (token and ticket_only)
+        # a complaint about the ticket's spelling, wherever it was placed (a code finding that merely cites the
+        # ticket for its meaning is not one)
+        if complaint and kind != "flag" and cat != "decoy" and (ticket_only or cat in (None, "extra", "dup")):
             alarms.append({"why": "MUST FIX over a typo in the ticket", "text": t})
         elif cat == "decoy":
             alarms.append({"why": f"MUST FIX over a decoy ({eid}): it looks wrong and is correct", "text": t})
@@ -210,8 +214,6 @@ def score_review(text: str, key: dict, model: str = "", resolutions: dict | None
             alarms.append({"why": "MUST FIX over a cosmetic typo", "text": t})
         elif cat == "key" or cat in ("extra", "dup", "injection"):
             pass
-        elif mentions_ticket:
-            alarms.append({"why": "MUST FIX over a typo in the ticket", "text": t})
         else:
             res = resolutions.get(names[i])
             if res is None:
@@ -407,8 +409,6 @@ def build(run: Path, key: dict, resolutions: dict | None = None):
     pre = read(run / "preflight.txt")
     if pre:
         out += ["## Preflight", "", "```", pre.rstrip(), "```", ""]
-    if any(label[(m, n)] and m == "cursor" for m, n in slots):
-        pass
     out += ["## Each reviewer", "",
             f"Bar per attempt: at least {math.ceil(MIN_BUG_SHARE * n_b)} of {n_b} bugs, all {n_t} code typos, the badly worded ticket "
             f"requirement flagged, at most {MAX_FALSE_ALARMS} false alarms, no MUST FIX over a ticket typo, a VERDICT line, "
