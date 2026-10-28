@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.28.1] - 2026-10-28
+
+### Changed
+
+- FX-52: Gauntlet preflight checks Claude plan usage
+
 ## [ship-2026.10.27.5] - 2026-10-27
 
 ### Changed
