@@ -209,7 +209,27 @@ full_sha="$(git -C "$src" rev-parse HEAD)"
 
 # --- Part A: usefulness ------------------------------------------------------------------------------
 
-cursor_prompt="$(PYTHONPATH="$here" python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from fleet import cursor_review; print(cursor_review._prompt(sys.argv[2]))' "$here" "$branch")"
+review_prompt() {   # review_prompt BRANCH: the prompt a review is given
+  cat <<PROMPT
+You are a code reviewer. The commit under review is the folder you are in; the changes
+of branch '$1' against the base are in .fleet-review/changes.diff. You are read-only: shell and
+writes are blocked, do not try them. Read the diff and the files it touches.
+
+Check for: bugs, missing error handling, security problems, secrets in the code, tests that were
+weakened or skipped, and anything that breaks the rules in the repository's rules file if present.
+Do not ask questions: you cannot get an answer. Always finish with the verdict.
+
+MUST FIX is only: (1) SECURITY, (2) DATA LOSS, (3) WRONG BEHAVIOR in normal operation, (4) TESTS
+failing or weakened. Everything else is SHOULD FIX.
+
+Reply in this format:
+VERDICT: PASS or FAIL
+MUST FIX: numbered list (empty if none): file, line, problem, fix, reason.
+SHOULD FIX: numbered list of smaller suggestions.
+SUMMARY: two or three sentences.
+PROMPT
+}
+cursor_prompt="$(review_prompt "$branch")"
 
 cursor_review() {   # cursor_review N: one fleet-style Cursor review in a fresh box
   local n="$1" d="$work/cursor-$n" code

@@ -1057,3 +1057,31 @@ def test_preflight_plan_and_codex_both_bad_show_both_lines(rig):
 @pytest.mark.parametrize("bad", ["nan", "inf"])
 def test_preflight_limit_nonfinite_is_a_fail_line(rig, bad):
     plan_fails(rig, rig.go(extra_env={"GAUNTLET_MAX_USED": bad}), "GAUNTLET_MAX_USED is not a number")
+
+
+# BD-145: Cursor is optional; a run without it needs no Cursor key file and no Cursor CLI
+
+def test_the_default_models_do_not_include_cursor():
+    assert 'MODELS="${GAUNTLET_MODELS:-claude-opus claude-sonnet codex}"' in SCRIPT.read_text()
+
+
+def test_a_run_without_cursor_starts_with_no_key_file_and_no_cursor_cli(rig):
+    rig.go(models="codex", codex={"exit": 1, "stderr": "rate limit exceeded"})
+    run = rig.run_dir()
+    rig.keyfile.unlink()
+    bare = f"{rig.boxbin}:{rig.others}:/usr/bin:/bin"
+    res = rig.go(models="codex", extra_env={"PATH": bare}, args=("--replace", str(run), "codex", "1"))
+    assert res.returncode == 0, res.stderr
+    assert "Cursor" not in res.stderr and "key file" not in res.stderr
+
+
+def test_a_run_with_cursor_still_checks_the_key_and_asks_about_usage(rig):
+    rig.keyfile.unlink()
+    res = rig.go(models="cursor")
+    started_nothing(rig, res)
+    assert "the Cursor key file is missing" in res.stderr
+    rig.keyfile.write_text(KEY + "\n")
+    rig.keyfile.chmod(0o600)
+    res = rig.go(models="cursor", extra_env={"GAUNTLET_CONFIRM": "n"})
+    started_nothing(rig, res)
+    assert "did not confirm Cursor usage" in res.stderr

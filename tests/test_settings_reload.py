@@ -173,3 +173,11 @@ def test_the_oncall_cap_counts_the_local_day():
     # Before the change (PDT: midnight is 07:00 UTC).
     assert dp.oncall_today([{"oncall": True, "created_at": "2026-10-31T06:30:00Z"}], utc(2026, 10, 31, 5, 0)) == 1
     assert dp.oncall_today([{"oncall": True, "created_at": "2026-10-31T06:30:00Z"}], utc(2026, 10, 31, 8, 0)) == 0
+
+
+def test_a_leftover_cursor_review_setting_is_ignored_with_one_warning(projects, env, capsys):
+    write_settings(env, projects, cursor_review=False)
+    settings = dp.load_settings()
+    assert "cursor_review" not in settings
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1 and "cursor_review" in err[0] and "delete" in err[0]

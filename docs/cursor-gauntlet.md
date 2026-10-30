@@ -82,3 +82,7 @@ was found in a saved file (removed); 7 the box could not start the CLI; 8 prefli
 its LOCK; 10 bad arguments or a replacement that is not allowed.
 
 Tests use fakes (`tests/fake_cursor.py`, a fake `bwrap`, fake Claude and Codex); no real model, no network.
+
+## Cursor is optional (BD-145)
+
+Cursor failed this gauntlet and was removed from the fleet review and voting code. The runner stays, because other models still take the same test. GAUNTLET_MODELS now defaults to claude-opus claude-sonnet codex. Only when cursor is in the list does the preflight check the Cursor key file, the Cursor CLI, api2.cursor.sh and the box self-test, and ask the human about Cursor usage. A run without cursor needs no key file and no Cursor CLI.

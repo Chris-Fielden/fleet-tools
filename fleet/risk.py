@@ -221,30 +221,21 @@ def level_for_branch(tickets: list[dict], branch: str, rules: dict | None = None
 VERDICT_RE = re.compile(r"^[\s*#>_`-]*VERDICT[\s*_`]*:[\s*_`]*(PASS|FAIL)\b", re.I)
 STRONG_CLAUDE_RE = re.compile(r"opus|fable", re.I)
 
-# Every reviewer that can vote, with the company behind it. A Cursor review counts only when
-# its own header says "Counted: yes" (BD-136: the fleet process writes that after a passing
-# probe result for the installed CLI version and a Cursor model seen by the read hook);
-# otherwise it is saved and shown but never decides a verdict or the merge gate.
+# Every reviewer that can vote, with the company behind it.
 VOTERS = {
     "codex": {"company": "openai", "counted": True},
     "claude": {"company": "anthropic", "counted": True},
-    "cursor": {"company": "cursor", "counted": True},
 }
 
 
-ALWAYS_REVIEW = ("codex", "claude")   # reviewers every commit gets; Cursor reviews only a passing tip
+ALWAYS_REVIEW = ("codex", "claude")   # reviewers every commit gets
 
 
 def counted(kind: str, info: dict | None = None) -> bool:
     """Does a review of this kind count towards a verdict and the merge gate? `info` is a parsed
-    review (parse_review) or a stored verdict entry. A Cursor review counts only when it says so
-    explicitly (`counted` True): a stored Cursor vote from before BD-136 has no such flag and was
-    advisory, so it stays advisory."""
-    if not VOTERS.get(kind, {}).get("counted"):
-        return False
-    if kind == "cursor":
-        return bool(info) and info.get("counted") is True
-    return True
+    review (parse_review) or a stored verdict entry. A kind that is not a voter (a stored
+    "cursor" entry from before Cursor was removed) never counts."""
+    return bool(VOTERS.get(kind, {}).get("counted"))
 
 
 VOTE_PASSES_NEEDED = 2   # distinct companies that must PASS (of the 3 voters)
@@ -281,42 +272,10 @@ def vote_passes(reviews: dict) -> bool:
 
 
 def voter_kind(reviewer: str) -> str | None:
-    """The voter a reviewer string such as 'Codex gpt-5' or 'Cursor (composer-2.5)' belongs to.
+    """The voter a reviewer string such as 'Codex gpt-5' or 'Claude opus' belongs to.
     The one place that decides it."""
     m = re.match(r"[a-z]+", (reviewer or "").strip().lower())
     return m.group(0) if m and m.group(0) in VOTERS else None
-
-
-def all_composer(models: str) -> bool:
-    """Every model the review hook saw (comma separated) is a Cursor (composer) model."""
-    names = [m.strip().lower() for m in models.split(",") if m.strip()]
-    return bool(names) and all(m.startswith("composer") for m in names)
-
-
-def _proof_dir() -> Path:
-    return Path(os.environ.get("FLEET_HOME") or Path.home() / ".fleet") / "cursor-proof"
-
-
-def _proof_path(text: str) -> Path:
-    return _proof_dir() / hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def write_cursor_proof(text: str, commit: str) -> None:
-    """The fleet process, when it saves a COUNTED Cursor review: a record in the fleet store (which
-    agents cannot read or write) bound to the exact text of the review file and its commit. A
-    review file an agent wrote or edited has no such record, so it can never count."""
-    d = _proof_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    tmp = _proof_path(text).with_suffix(".tmp")
-    tmp.write_text(json.dumps({"commit": commit}), encoding="utf-8")
-    os.replace(tmp, _proof_path(text))
-
-
-def cursor_proven(text: str, commit: str | None) -> bool:
-    try:
-        return bool(commit) and json.loads(_proof_path(text).read_text(encoding="utf-8")).get("commit") == commit
-    except (OSError, ValueError, AttributeError):
-        return False
 
 
 def parse_review(text: str) -> dict:
@@ -339,12 +298,8 @@ def parse_review(text: str) -> dict:
             break
     reviewer = head.get("reviewer", "")
     kind = voter_kind(reviewer)
-    ok = True
-    if kind == "cursor":   # counts only if the fleet process said so, a Cursor model was seen AND the fleet store has its proof
-        ok = (head.get("counted", "").lower() == "yes" and all_composer(head.get("model", ""))
-              and cursor_proven(text, head.get("commit")))
     return {"kind": kind, "reviewer": reviewer, "commit": head.get("commit"), "verdict": verdict,
-            "counted": ok, "model": head.get("model")}
+            "counted": kind is not None, "model": head.get("model")}
 
 
 SECTION_RE = re.compile(

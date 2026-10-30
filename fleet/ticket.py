@@ -53,7 +53,8 @@ CLOSE_NOTE_MAX = 500
 REVIEW_COMMITS_KEPT = 100   # review_commits keeps the newest this many
 FAIL_COMMITS_MAX = 50   # fail_commits keeps the newest this many (the going-in-circles threshold is far lower)
 NOTE_MAX = 4000
-REVIEW_KINDS = tuple(rk.VOTERS)   # codex, claude, cursor; AGENTS and CREATORS stay without cursor
+REVIEW_KINDS = tuple(rk.VOTERS)   # codex, claude
+STORED_KINDS = REVIEW_KINDS + ("cursor",)   # a stored "cursor" entry from before its removal still loads; it never counts
 VERDICT_RESULTS = ("PASS", "FAIL")
 REVIEWER_MAX = 80
 NOTES_LIMIT = 50  # notes per ticket
@@ -387,7 +388,7 @@ def _check_verdict(v) -> list[str]:
           and re.fullmatch(r"[0-9a-f]{40}", v["commit"]) and _is_str(v["reviewer"])
           and 1 <= len(v["reviewer"]) <= REVIEWER_MAX and _is_time(v["at"])
           and isinstance(v["reviews"], dict) and v["reviews"]
-          and all(k in REVIEW_KINDS and isinstance(r, dict) and set(r) in ({"result", "reviewer"}, {"result", "reviewer", "counted"})
+          and all(k in STORED_KINDS and isinstance(r, dict) and set(r) in ({"result", "reviewer"}, {"result", "reviewer", "counted"})
                   and r["result"] in VERDICT_RESULTS and _is_str(r["reviewer"])
                   and 1 <= len(r["reviewer"]) <= REVIEWER_MAX
                   for k, r in v["reviews"].items())
@@ -1131,7 +1132,7 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
     Information only: the merge gate reads the saved review itself. Reviews of
     the same commit by the counted reviewers are combined (FAIL wins); a review of
     a different commit replaces the old verdict. A review that is not counted (`counted` False:
-    a Cursor review without a passing probe) is never recorded: it changes nothing. Proposed tickets are
+    a review that is not from a voter) is never recorded: it changes nothing. Proposed tickets are
     skipped on purpose: nothing reviews a ticket that has not been approved, so a
     stray review of its branch is dropped rather than stored. A failed ticket still takes the verdicts of its branch: that is how a new passing tip can revive it. Returns the tickets changed."""
     errors = []
@@ -1157,22 +1158,13 @@ def record_verdict(branch: str, repo: str, result: str, commit: str, reviewer: s
                 continue
             old = t["verdict"]
             same = bool(old) and old["commit"] == commit
-            if kind == "cursor" and not same:
-                continue   # Cursor reviews a tip that already has a verdict; it never starts one
             reviews = dict(old["reviews"]) if same else {}
             reviews[kind] = {"result": result, "reviewer": reviewer}
-            if kind == "cursor":
-                reviews[kind]["counted"] = True   # the proof flag; absent = an advisory vote from before BD-136
             now = _now()
             failed = any(r["result"] == "FAIL" for k, r in reviews.items() if rk.counted(k, r))
             result_now = "FAIL" if failed else "PASS"
-            if kind == "cursor" and same and old["result"] == result_now:
-                # A late Cursor vote that changes nothing keeps the verdict's time and reviewer, so
-                # the author's summary written after that verdict stays "after the review".
-                t["verdict"] = {**old, "reviews": reviews}
-            else:
-                t["verdict"] = {"result": result_now,
-                                "commit": commit, "reviewer": reviewer, "at": now, "reviews": reviews}
+            t["verdict"] = {"result": result_now,
+                            "commit": commit, "reviewer": reviewer, "at": now, "reviews": reviews}
             # A round counts only while the majority of voting companies failed the commit; a
             # later PASS that makes it a split vote takes the round back.
             if rk.majority_failed(reviews):

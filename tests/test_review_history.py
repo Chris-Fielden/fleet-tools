@@ -6,6 +6,7 @@ import threading
 import pytest
 
 from fleet import review_history as rh
+from fleet import risk as rk
 from fleet import ticket as tk
 from test_dispatch import herdr_log, mk, projects  # noqa: F401
 from test_review_watch import rig  # noqa: F401
@@ -145,17 +146,20 @@ def test_symlinked_reviews_dir_is_ignored(repo, tmp_path):
     assert rh.review_history(repo, wt, "HEAD", "HEAD") == []
 
 
-def test_uncounted_cursor_review_is_never_recorded(rig):
-    tk.record_verdict("task/demo", "app", "FAIL", A, "Cursor (composer-2.5)", counted=False)
+def test_a_cursor_review_is_never_recorded(rig):
+    with pytest.raises(tk.TicketInvalid):
+        tk.record_verdict("task/demo", "app", "FAIL", A, "Cursor (composer-2.5)")
     assert rig.get()["verdict"] is None
     tk.record_verdict("task/demo", "app", "PASS", A, "Codex")
-    tk.record_verdict("task/demo", "app", "FAIL", A, "Cursor (composer-2.5)", counted=False)
+    with pytest.raises(tk.TicketInvalid):
+        tk.record_verdict("task/demo", "app", "FAIL", A, "Cursor (composer-2.5)")
     v = rig.get()["verdict"]
     assert v["result"] == "PASS" and "cursor" not in v["reviews"]
 
 
-def test_counted_cursor_vote_is_recorded(rig):
+def test_a_stored_cursor_review_loads_and_does_not_count(rig):
     tk.record_verdict("task/demo", "app", "PASS", A, "Codex")
-    tk.record_verdict("task/demo", "app", "FAIL", A, "Cursor (composer-2.5)")
-    v = rig.get()["verdict"]
-    assert v["result"] == "FAIL" and v["reviews"]["cursor"]["result"] == "FAIL"
+    t = rig.get()
+    t["verdict"]["reviews"]["cursor"] = {"result": "FAIL", "reviewer": "Cursor (composer-2.5)", "counted": True}
+    assert tk._check_verdict(t["verdict"]) == []
+    assert not rk.majority_failed(t["verdict"]["reviews"])
