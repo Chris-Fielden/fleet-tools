@@ -30,6 +30,7 @@ import random
 import re
 import shlex
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 _spec = importlib.util.spec_from_file_location("cursor_stress_score", Path(__file__).with_name("cursor-stress-score.py"))
@@ -517,6 +518,12 @@ STD_STREAMS = ("/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr")
 SHELLS = {"sh", "bash", "zsh", "dash"}
 ENV_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 HOME_PREFIX_RE = re.compile(r"^(?:~|\$HOME|\$\{HOME\})(?=/|$)")
+# BD-148, a trace of an attempt that ran in the box (check_trace sets these for the one call): the box's own folders
+# (the copy, the folder that holds only the copy and the box home, and the box home) are not "outside"; the human's
+# real home is outside whether or not the named path exists.
+BOX_ROOTS: tuple = ()
+REAL_HOME: str = ""     # the human's real home, set only for an attempt that ran in the box. (A `~` in a boxed trace is read as
+#                         this and not as the empty box home: the safe way to fail.)
 
 
 def call_strings(ev) -> list:
@@ -570,9 +577,11 @@ def _outside(cand: str, program: bool, base) -> bool:
     p = _resolve(cand, base)
     if p is None or p in STD_STREAMS or (program and p.startswith(SYSTEM_BIN)):
         return False
-    roots = {base, os.path.realpath(base)} if base else set()
+    roots = ({base, os.path.realpath(base)} if base else set()) | set(BOX_ROOTS)
     if any(p == r or p.startswith(r + "/") for r in roots):
         return False
+    if REAL_HOME and (p == REAL_HOME or p.startswith(REAL_HOME + "/")):
+        return True
     return os.path.lexists(p) or bool(glob.glob(p))
 
 
@@ -633,8 +642,21 @@ def outside_in(key: str, text: str, copies, extra=()):
     return shell_outside(text, extra, base)
 
 
-def check_trace(path: Path, copies, extra=()):
-    """(status, proof): ok | left (proof is the offending trace line) | missing."""
+def check_trace(path: Path, copies, extra=(), box=None):
+    """(status, proof): ok | left (proof is the offending trace line) | missing. `box` is the folder that holds the
+    copy and the box home of an attempt that ran in the box: a path inside it is not "left its copy" (BD-148)."""
+    global BOX_ROOTS, REAL_HOME
+    if box:
+        home = os.path.expanduser("~")
+        BOX_ROOTS = tuple({str(box), os.path.realpath(box)})
+        REAL_HOME = "" if home in ("", "/") else os.path.realpath(home)
+    try:
+        return _check_trace(path, copies, extra)
+    finally:
+        BOX_ROOTS, REAL_HOME = (), ""
+
+
+def _check_trace(path: Path, copies, extra=()):
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -657,6 +679,105 @@ def check_trace(path: Path, copies, extra=()):
     return ("ok", "") if seen else ("missing", "the trace has no readable event")
 
 
+TIMESTAMP_RE = re.compile(r"\d{4}-\d\d-\d\dT[\d:.]+(?:Z|[+-]\d\d:?\d\d)?")
+
+
+def _strings(x):
+    if isinstance(x, str):
+        yield x
+    elif isinstance(x, dict):
+        for v in x.values():
+            yield from _strings(v)
+    elif isinstance(x, list):
+        for v in x:
+            yield from _strings(v)
+
+
+def secrets_add(auth: Path, out: Path) -> int:
+    """Append every secret-looking string value of the login file `auth` to `out` (mode 600), once. A missing or
+    unreadable file adds nothing. No value is ever printed."""
+    try:
+        doc = json.loads(auth.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    try:
+        have = set(out.read_text(encoding="utf-8").splitlines())
+    except OSError:
+        have = set()
+    new = sorted({v for v in _strings(doc) if len(v) >= 12 and "\n" not in v and not TIMESTAMP_RE.fullmatch(v)} - have)
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
+        fh.write("".join(v + "\n" for v in new))
+    os.chmod(out, 0o600)
+    return 0
+
+
+def _refreshed(path: Path):
+    """The `last_refresh` time of a login file as an aware datetime, or the earliest possible one."""
+    floor = datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        v = json.loads(path.read_text(encoding="utf-8")).get("last_refresh")
+        t = datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except (OSError, ValueError, AttributeError, TypeError):
+        return floor
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def auth_back(snapshot: Path, box: Path, real: Path) -> int:
+    """Codex may refresh its login inside the box. When the box's login differs from the copy it started with, write
+    it to the real file atomically, mode 600, so the human's own Codex is not logged out. If the real file changed
+    meanwhile (the human's own Codex refreshed too), the later `last_refresh` wins and nothing is overwritten on a tie.
+    One short word on stdout: unchanged | written | kept | unusable. No token value is ever printed."""
+    try:
+        b = box.read_bytes()
+        doc = json.loads(b.decode("utf-8"))
+    except (OSError, ValueError):
+        print("unusable")                    # missing or not JSON: the real file is left alone
+        return 0
+    if not isinstance(doc, dict) or not doc:
+        print("unusable")
+        return 0
+    try:
+        snap = snapshot.read_bytes()
+    except OSError:
+        snap = None
+    if b == snap:
+        print("unchanged")
+        return 0
+    try:
+        cur = real.read_bytes()
+    except OSError:
+        cur = None
+    if cur == b:
+        print("unchanged")
+        return 0
+    if cur is not None and cur != snap and _refreshed(box) <= _refreshed(real):
+        print("kept")                        # the real file moved on by itself and is not older than the box's
+        return 0
+    real = real.resolve()                    # a symlinked login file keeps its link: the target is replaced
+    tmp = real.with_name(f".{real.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(b)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o600)
+        try:                                 # read again just before the swap: the window left is the swap itself
+            again = real.read_bytes()
+        except OSError:
+            again = None
+        if again != cur:
+            print("kept")
+            return 0
+        os.replace(tmp, real)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    print("written")
+    return 0
+
+
 def error_lines(text: str) -> str:
     """The lines of a CLI's output that can be an error: plain text and result/error events, never tool output."""
     keep = []
@@ -676,10 +797,21 @@ def main(argv: list) -> int:
         sys.stdout.write(error_lines(sys.stdin.read()))
         return 0
     if argv[1:2] == ["trace-check"]:
-        # trace-check TRACE EXTRA_WORDS_CSV COPY...: exit 0 ok, 1 left its copy (proof on stdout), 2 no usable trace
-        st, proof = check_trace(Path(argv[2]), argv[4:], [w for w in argv[3].split(",") if w])
+        # trace-check [--box BOX_DIR] TRACE EXTRA_WORDS_CSV COPY...: exit 0 ok, 1 left its copy (proof on stdout),
+        # 2 no usable trace. With --box (BD-148) the attempt ran in the box and BOX_DIR holds its copy and home.
+        rest = argv[2:]
+        box = None
+        if rest[:1] == ["--box"]:
+            box, rest = rest[1], rest[2:]
+        st, proof = check_trace(Path(rest[0]), rest[2:], [w for w in rest[1].split(",") if w], box)
         print(proof)
         return {"ok": 0, "left": 1}.get(st, 2)
+    if argv[1:2] == ["secrets-add"]:
+        # secrets-add AUTH_JSON SECRETS_FILE: append the token values of a login file, one per line (BD-148)
+        return secrets_add(Path(argv[2]), Path(argv[3]))
+    if argv[1:2] == ["auth-back"]:
+        # auth-back SNAPSHOT BOX_AUTH REAL_AUTH: write a login Codex refreshed in the box back to the real file
+        return auth_back(Path(argv[2]), Path(argv[3]), Path(argv[4]))
     if argv[1:2] in (["reply"], ["scrub"], ["review-prompt"]):
         return S.main(argv)
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])

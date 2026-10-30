@@ -42,9 +42,21 @@ LINES_RE = re.compile(r":(\d+)(?:\s*[-–]\s*(\d+))?|\b(?:lines?|L)\.?\s*(\d+)(?
 EMPTY_RE = re.compile(r"^[\s(\[]*(none|empty|n/?a|nothing|no issues?|-)[\s.)\]]*$", re.I)
 
 
+def secret_values() -> list:
+    """Every line of the file named by env PSECRETS_FILE (BD-148: the values of a login file, one per line)."""
+    path = os.environ.get("PSECRETS_FILE", "")
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines() if path else []
+    except OSError:
+        return []
+    return sorted({x for x in lines if len(x) >= 8}, key=len, reverse=True)
+
+
 def scrub(text: str, key: str = "") -> str:
     if key:
         text = text.replace(key, "[key removed]")
+    for secret in secret_values():
+        text = text.replace(secret, "[token removed]")
     return EMAIL_RE.sub("[email removed]", text)
 
 

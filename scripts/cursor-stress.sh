@@ -59,24 +59,65 @@ if [[ -z "$box_tool" ]]; then
   exit 4
 fi
 
+# The Cursor CLI is needed by every mode except --box-run, which runs whatever program it is given (BD-148).
 agent_path="$(command -v "$AGENT" 2>/dev/null || true)"
-if [[ -z "$agent_path" ]]; then
+if [[ -z "$agent_path" && "${1:-}" != "--box-run" ]]; then
   echo "cursor-stress: '$AGENT' not found on PATH" >&2
   exit 2
 fi
-agent_real="$(readlink -f "$agent_path")"
-agent_dir="$(dirname "$agent_real")"
+agent_real=""; [[ -n "$agent_path" ]] && agent_real="$(readlink -f "$agent_path")"
+
+# prog_dirs PROGRAM: the folders the program needs to start, one per line, each to be bound read-only: the folder
+# of the program itself (symlinks resolved) and, when it is a script, the install prefix of its interpreter (for
+# node under nvm, the folder above bin/). Anything under /usr, /bin or /lib is in the box already.
+prog_dirs() {
+  local p r interp ir sb pre a
+  p="$1"; [[ "$p" == */* ]] || p="$(command -v "$p" 2>/dev/null || true)"
+  [[ -n "$p" && -e "$p" ]] || return 0
+  r="$(readlink -f "$p")"
+  safe_dir "$(dirname "$r")"
+  if [[ "$(head -c 2 "$r" 2>/dev/null)" == "#!" ]]; then
+    sb="$(head -n 1 "$r" | cut -c3-)"
+    set -- $sb
+    interp="$1"
+    if [[ "${interp##*/}" == env ]]; then       # `#!/usr/bin/env [-S] [options] NAME`: the first word that is no option
+      interp=""; shift
+      for a in "$@"; do [[ "$a" == -* || "$a" == *=* ]] || { interp="$a"; break; }; done
+    fi
+    [[ "$interp" == */* ]] || interp="$(command -v "$interp" 2>/dev/null || true)"
+    if [[ -n "$interp" && -e "$interp" ]]; then
+      ir="$(readlink -f "$interp")"
+      safe_dir "$(dirname "$ir")"
+      pre="$(dirname "$(dirname "$ir")")"
+      [[ "${ir%/*}" == */bin ]] && safe_dir "$pre"
+    fi
+  fi
+}
+
+# safe_dir DIR: print DIR if it may be bound into the box. Never the system's own folders (already in the box, and a docker
+# or podman image must keep its own), never / and never a folder that is or holds the real home, the fleet's home or this
+# repository: binding one of those would show the box what the empty home is there to hide.
+safe_dir() {
+  local d="$1" x
+  case "$d" in ""|/|/usr|/usr/*|/bin|/bin/*|/sbin|/sbin/*|/lib|/lib/*|/lib32|/lib32/*|/lib64|/lib64/*) return 0 ;; esac
+  for x in "$HOME" "$fleet_home" "$here"; do
+    [[ -n "$x" && ( "$x" == "$d" || "$x" == "$d"/* ) ]] && return 0
+  done
+  echo "$d"
+}
 
 # box_cmd USE_KEY CWD HOME [EXTRA_RW_DIR...]: set BOXCMD to the command prefix; the program to run
 # (an absolute path or a name found in the box) follows it. Read-write: CWD, HOME and the extras.
+# Read-only, besides the system: the folders in BOX_RO (set by box_run from the program, see prog_dirs).
 box_cmd() {
   local usekey="$1" cwd="$2" home="$3"; shift 3
-  local d l f
+  local d l f ro_path=""
+  for d in "${BOX_RO[@]:-}"; do [[ -n "$d" ]] && ro_path="$ro_path$d:"; done
   case "$box_name" in
     bwrap)
       # a clean environment: --clearenv, then only these. The key is NOT here: box_run feeds it on file
       # descriptor 4 (--args), so it is in no command line, not even for an instant.
-      BOXCMD=("$box_bin" --clearenv --setenv HOME "$home" --setenv PATH "$agent_dir:/usr/local/bin:/usr/bin:/bin"
+      BOXCMD=("$box_bin" --clearenv --setenv HOME "$home" --setenv PATH "${ro_path}/usr/local/bin:/usr/bin:/bin"
               --setenv LANG C.UTF-8 --setenv XDG_CONFIG_HOME "$home/.config" --setenv XDG_DATA_HOME "$home/.local/share"
               --setenv XDG_CACHE_HOME "$home/.cache" --args 4
               --unshare-all --share-net --die-with-parent --new-session
@@ -90,7 +131,7 @@ box_cmd() {
       done
       [[ -e /etc/resolv.conf ]] && BOXCMD+=(--ro-bind "$(readlink -f /etc/resolv.conf)" /etc/resolv.conf)
       BOXCMD+=(--ro-bind-data 3 /etc/passwd)   # a made-up one-line passwd, fed on file descriptor 3
-      BOXCMD+=(--ro-bind "$agent_dir" "$agent_dir")
+      for d in "${BOX_RO[@]:-}"; do [[ -n "$d" ]] && BOXCMD+=(--ro-bind "$d" "$d"); done
       BOXCMD+=(--bind "$cwd" "$cwd" --bind "$home" "$home")
       for d in "$@"; do BOXCMD+=(--bind "$d" "$d"); done
       BOXCMD+=(--chdir "$cwd" --)
@@ -100,9 +141,10 @@ box_cmd() {
                --tmpfs /tmp --pids-limit 1024 --user "$(id -u):$(id -g)")
       [[ "$box_name" == podman ]] && BOXCMD+=(--userns=keep-id)
       [[ "$usekey" == 1 ]] && BOXCMD+=(-e CURSOR_API_KEY)
-      BOXCMD+=(-e "HOME=$home" -e "PATH=$agent_dir:/usr/local/bin:/usr/bin:/bin" -e LANG=C.UTF-8
+      BOXCMD+=(-e "HOME=$home" -e "PATH=${ro_path}/usr/local/bin:/usr/bin:/bin" -e LANG=C.UTF-8
                -e "XDG_CONFIG_HOME=$home/.config" -e "XDG_DATA_HOME=$home/.local/share" -e "XDG_CACHE_HOME=$home/.cache"
-               -v "$agent_dir:$agent_dir:ro" -v "$cwd:$cwd" -v "$home:$home")
+               -v "$cwd:$cwd" -v "$home:$home")
+      for d in "${BOX_RO[@]:-}"; do [[ -n "$d" ]] && BOXCMD+=(-v "$d:$d:ro"); done
       for d in "$@"; do BOXCMD+=(-v "$d:$d"); done
       BOXCMD+=(-w "$cwd" "${STRESS_IMAGE:-docker.io/library/python:3-slim}")
       ;;
@@ -116,6 +158,8 @@ box_cmd() {
 # docker and podman pass it on by name (-e CURSOR_API_KEY) from this subshell's environment.
 box_run() {
   local usekey="$1" cwd="$2" home="$3" secs="$4"; shift 4
+  mapfile -t BOX_RO < <(prog_dirs "$1" | awk '!seen[$0]++')
+  [[ "$1" == */* && -e "$1" ]] && set -- "$(readlink -f "$1")" "${@:2}"     # a symlinked install: run the real file
   box_cmd "$usekey" "$cwd" "$home" ${BOX_EXTRA:+"$BOX_EXTRA"}
   (
     if [[ "$box_name" == bwrap ]]; then
@@ -131,7 +175,9 @@ box_run() {
 }
 
 # Box mode, used by scripts/cursor-gauntlet.sh (BD-141): `--box-run USE_KEY CWD HOME SECONDS PROGRAM [ARGS...]`
-# runs one program in this same box (the key, if USE_KEY is 1, is read from the key file as usual).
+# runs one program in this same box (the key, if USE_KEY is 1, is read from the key file as usual). The program
+# can be anything (the Cursor CLI, Codex): the box binds read-only what it needs to start, and the Cursor CLI
+# need not be installed (BD-148).
 if [[ "${1:-}" == "--box-run" ]]; then
   shift
   [[ $# -ge 5 && -d "$2" && -d "$3" ]] || { echo "cursor-stress: --box-run needs USE_KEY CWD HOME SECONDS PROGRAM" >&2; exit 7; }

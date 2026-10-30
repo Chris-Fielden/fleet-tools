@@ -24,6 +24,8 @@ GAUNTLET = ROOT / "tests" / "fixtures" / "gauntlet"
 KEYFILE = ROOT / "tests" / "fixtures" / "gauntlet-key" / "answer-key.json"
 PRACTICE = ROOT / "tests" / "fixtures" / "practice-reviews"
 KEY = "fake-key-aaaa-bbbb"
+AUTH = {"OPENAI_API_KEY": None, "tokens": {"id_token": "fake-id-token-0123456789", "access_token": "fake-access-token-9876543210",
+        "refresh_token": "fake-refresh-token-abcdefghij", "account_id": "acct-00000000-1111"}, "last_refresh": "2026-10-30T01:00:00Z"}
 DEBRIEF = "Your review did not meet the bar. Explain, from what you know, what you most likely missed or got wrong, and why."
 
 _spec = importlib.util.spec_from_file_location("gauntlet_score", SCORE)
@@ -37,7 +39,26 @@ here = os.path.dirname(os.path.abspath(__file__))
 name = os.path.basename(__file__)
 cfg = json.load(open(os.path.join(here, name + ".json")))
 args = sys.argv[1:]
+if args[:1] == ["--version"]:
+    print("fake-" + name + " 1.0")
+    sys.exit(0)
+if name == "codex" and args[:1] == ["sandbox"]:       # `codex sandbox -- CMD...`: Codex's own sandbox runs CMD
+    if cfg.get("sandbox_fail"):
+        sys.stderr.write("bwrap: No permissions to create new namespace\\n")
+        sys.exit(1)
+    cmd = args[args.index("--") + 1:] if "--" in args else args[1:]
+    if args[1:2] == ["linux"]:                        # codex-cli 0.160.0 has no such word: it tries to run a program "linux"
+        sys.stderr.write("Failed to execvp linux: No such file or directory\\n")
+        sys.exit(101)
+    sys.exit(subprocess.run(cmd).returncode)
 prompt = args[args.index("-p") + 1] if "-p" in args else args[-1]
+home = os.environ.get("HOME", "")
+home_files = sorted(os.path.relpath(os.path.join(r, f), home) for r, d, fs in os.walk(home) for f in fs) if home else []
+auth_path = os.path.join(home, ".codex", "auth.json")
+auth_seen = open(auth_path).read() if os.path.exists(auth_path) else None
+auth_mode = oct(os.stat(auth_path).st_mode & 0o777) if auth_seen is not None else None
+if cfg.get("rotate") and auth_seen is not None:
+    open(auth_path, "w").write(cfg["rotate"])
 words = ("fixture", "gauntlet", "planted", "stress", "answer")
 hit = []
 for r, d, fs in os.walk("."):
@@ -48,7 +69,9 @@ for r, d, fs in os.walk("."):
 commits = subprocess.run(["git", "rev-list", "--all", "--count"], capture_output=True, text=True).stdout.strip()
 with open(os.path.join(here, name + ".log"), "a") as fh:
     fh.write(json.dumps({{"cwd": os.getcwd(), "args": args, "prompt": prompt, "commits": commits, "words": hit,
-                         "resume": "--resume" in args, "has_pkg": os.path.isdir("ledgerline")}}) + "\\n")
+                         "resume": "--resume" in args, "has_pkg": os.path.isdir("ledgerline"), "home": home,
+                         "home_files": home_files, "auth_seen": auth_seen, "auth_mode": auth_mode,
+                         "env_keys": sorted(os.environ)}}) + "\\n")
 if cfg.get("exit"):
     for t in cfg.get("reads_before_exit", []):
         print(json.dumps({{"type": "tool_use", "input": {{"file_path": t}}}}))
@@ -74,6 +97,8 @@ else:
     if not cfg.get("no_trace"):
         for t in targets:
             print(json.dumps({{"type": "item.completed", "item": {{"type": "command_execution", "command": "cat " + t, "aggregated_output": "/etc/passwd"}}}}))
+        for t in cfg.get("plant", []):
+            print(json.dumps({{"type": "item.completed", "item": {{"type": "agent_message", "text": t}}}}))
         print(json.dumps({{"type": "turn.completed"}}))
     if "-o" in args:
         open(args[args.index("-o") + 1], "w").write(text)
@@ -118,6 +143,9 @@ def rig(env):
     kf = fleet / "secrets" / "cursor-api-key"
     kf.write_text(KEY + "\n")
     kf.chmod(0o600)
+    (home / ".codex").mkdir()
+    (home / ".codex" / "auth.json").write_text(json.dumps(AUTH))
+    (home / ".codex" / "auth.json").chmod(0o600)
     boxbin = env / "boxbin"
     boxbin.mkdir()
     make_exe(boxbin / "bwrap", FAKE_BWRAP.format(python=sys.executable))
@@ -774,7 +802,7 @@ def test_a_trace_that_stays_inside_the_copy_scores_normally_and_is_saved(rig):
 @pytest.mark.parametrize("model,cfg_name,target", [
     ("claude-opus", "claude", "tests/fixtures/gauntlet-key/answer-key.json"),
     ("codex", "codex", "~/." + "fleet/secrets/cursor-api-key"),
-    ("codex", "codex", "../"),
+    ("codex", "codex", "../.."),
     ("claude-opus", "claude", "/home/someone/fleet-tools/CLAUDE.md"),
 ])
 def test_a_baseline_that_leaves_its_copy_is_invalid_on_our_side_with_the_line_as_proof(rig, model, cfg_name, target):
@@ -789,7 +817,7 @@ def test_a_baseline_that_leaves_its_copy_is_invalid_on_our_side_with_the_line_as
 
 
 def test_a_leaving_attempt_is_replaced_under_the_one_replacement_rule(rig):
-    rig.go(models="codex", codex={"reads": [".."]})
+    rig.go(models="codex", codex={"reads": ["../.."]})
     run = rig.run_dir()
     (rig.others / "codex.json").write_text(json.dumps({"review_seq": [GOOD]}))
     res = rig.go(models="codex", args=("--replace", str(run), "codex", "1"))
@@ -819,11 +847,11 @@ def test_agent_rules_off_is_gone_from_the_gauntlet_runner():
 
 
 def test_a_debrief_trace_that_leaves_the_copy_is_invalid_too(rig):
-    rig.go(models="codex", codex={"review_seq": [BAD], "debrief_reads": [".."]})
+    rig.go(models="codex", codex={"review_seq": [BAD], "debrief_reads": ["../.."]})
     run = rig.run_dir()
     assert (run / "codex-1.md").exists() and not (run / "codex-1.debrief.md").exists()
     invalid = json.loads((run / "codex-1.json").read_text())["invalid"]
-    assert invalid[0]["step"] == "trace" and invalid[0]["side"] == "ours" and ".." in invalid[0]["proof"]
+    assert invalid[0]["step"] == "trace" and invalid[0]["side"] == "ours" and "../.." in invalid[0]["proof"]
 
 
 def test_a_model_side_crash_keeps_its_record_when_the_trace_also_left_the_copy(rig):
