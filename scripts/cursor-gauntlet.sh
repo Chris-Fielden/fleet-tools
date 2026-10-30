@@ -242,9 +242,10 @@ fi
 
 # a terminal, and the human's word on Cursor usage (the CLI cannot read it out)
 stub_version=""     # the test double is recognised only when a test says so (GAUNTLET_ALLOW_STUB=1)
-[[ -n "$agent_path" && "${GAUNTLET_ALLOW_STUB:-}" == 1 ]] && stub_version="$("$agent_path" --version 2>/dev/null | head -n 1)"
-# a run without Cursor has no Cursor CLI to recognise: the test switch alone then stands for the test double
-[[ -z "$agent_path" ]] && ! want cursor && [[ "${GAUNTLET_ALLOW_STUB:-}" == 1 ]] && stub_version="STUB"
+if [[ "${GAUNTLET_ALLOW_STUB:-}" == 1 ]]; then
+  if want cursor; then [[ -n "$agent_path" ]] && stub_version="$("$agent_path" --version 2>/dev/null | head -n 1)"
+  else stub_version="STUB"; fi   # a run without Cursor never touches the Cursor CLI: the test switch alone stands for the double
+fi
 if [[ ! -t 0 && "$stub_version" != *STUB* ]]; then
   echo "cursor-gauntlet: refusing to run: stdin is not a terminal. This spends money and is for the human to run by hand." >&2
   exit 3

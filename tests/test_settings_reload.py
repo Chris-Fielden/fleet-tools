@@ -177,7 +177,10 @@ def test_the_oncall_cap_counts_the_local_day():
 
 def test_a_leftover_cursor_review_setting_is_ignored_with_one_warning(projects, env, capsys):
     write_settings(env, projects, cursor_review=False)
+    from fleet import settings as st
+    st._WARNED.clear()
     settings = dp.load_settings()
+    dp.load_settings()   # a second load in the same process stays quiet
     assert "cursor_review" not in settings
     err = capsys.readouterr().err.strip().splitlines()
     assert len(err) == 1 and "cursor_review" in err[0] and "delete" in err[0]

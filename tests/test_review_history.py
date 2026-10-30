@@ -176,3 +176,12 @@ def test_a_legacy_ticket_failed_only_by_cursor_loads_as_pass(rig):
     loaded = tk.load_ticket(t["id"])
     assert loaded["verdict"]["result"] == "PASS" and loaded["verdict"]["reviews"]["cursor"]["result"] == "FAIL"
     assert [x["id"] for x in tk.list_tickets()] == [t["id"]]
+
+
+def test_a_legacy_verdict_with_only_a_cursor_vote_is_not_normalized_away(rig):
+    tk.record_verdict("task/demo", "app", "PASS", A, "Codex")
+    t = rig.get()
+    t["verdict"]["reviews"] = {"cursor": {"result": "FAIL", "reviewer": "Cursor", "counted": True}}
+    t["verdict"]["result"] = "FAIL"
+    tk._normalize_legacy_verdict(t)
+    assert t["verdict"]["result"] == "FAIL"   # no counted vote to recompute from; validation rejects it as before

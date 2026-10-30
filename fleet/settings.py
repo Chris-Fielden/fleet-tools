@@ -21,6 +21,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import ticket as tk
 
+_WARNED: set = set()
+
 DEFAULTS = {
     # Dispatcher
     "builder": "claude",
@@ -149,7 +151,9 @@ def _merge(settings: dict, given, path: Path) -> None:
         raise SettingsError(f"{path} must contain a JSON object")
     if "cursor_review" in given:   # Cursor was removed from the fleet: accept the old key, ignore it
         given = {k: v for k, v in given.items() if k != "cursor_review"}
-        print(f"warning: {path}: cursor_review is no longer used; you can delete it", file=sys.stderr)
+        if path not in _WARNED:
+            _WARNED.add(path)   # once per process: load_settings() runs every watch cycle
+            print(f"warning: {path}: cursor_review is no longer used; you can delete it", file=sys.stderr)
     unknown = sorted(set(given) - set(DEFAULTS))
     if unknown:
         raise SettingsError(f"{path}: unknown setting(s): {', '.join(unknown)}")

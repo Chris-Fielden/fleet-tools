@@ -17,8 +17,8 @@
 #
 # BD-136 adds review probes a-e, BD-137 adds f (see "the review probes" below). They write the result file
 # $FLEET_HOME/cursor-probe-result.json (CLI version + pass/fail per probe; no payloads, no email,
-# no key). The fleet counts a Cursor review as a vote only while that file passes for the
-# installed CLI version. The key is read from $FLEET_HOME/secrets/cursor-api-key.
+# no key). Nothing in the fleet reads that file since Cursor was removed as a reviewer (BD-145); the
+# gauntlet still uses the probes as evidence. The key is read from $FLEET_HOME/secrets/cursor-api-key.
 #
 # PROBE_WORK_DIR: make the throwaway folder inside this one. PROBE_REVIEW_ONLY=1: only probes a-f.
 #         PROBE_RESULT_FILE: where the result file goes (the stress test keeps its own copy).
