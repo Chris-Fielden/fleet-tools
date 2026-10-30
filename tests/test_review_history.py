@@ -163,3 +163,16 @@ def test_a_stored_cursor_review_loads_and_does_not_count(rig):
     t["verdict"]["reviews"]["cursor"] = {"result": "FAIL", "reviewer": "Cursor (composer-2.5)", "counted": True}
     assert tk._check_verdict(t["verdict"]) == []
     assert not rk.majority_failed(t["verdict"]["reviews"])
+
+
+def test_a_legacy_ticket_failed_only_by_cursor_loads_as_pass(rig):
+    tk.record_verdict("task/demo", "app", "PASS", A, "Codex")
+    tk.record_verdict("task/demo", "app", "PASS", A, "Claude (opus)")
+    t = rig.get()
+    t["verdict"]["reviews"]["cursor"] = {"result": "FAIL", "reviewer": "Cursor (composer-2.5)", "counted": True}
+    t["verdict"]["result"] = "FAIL"   # how it was stored while Cursor's vote counted
+    path = tk._ticket_path(t["id"])
+    path.write_text(json.dumps(t))
+    loaded = tk.load_ticket(t["id"])
+    assert loaded["verdict"]["result"] == "PASS" and loaded["verdict"]["reviews"]["cursor"]["result"] == "FAIL"
+    assert [x["id"] for x in tk.list_tickets()] == [t["id"]]

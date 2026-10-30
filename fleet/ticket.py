@@ -535,6 +535,18 @@ def _warn_unknown(filename: str, names: list[str]) -> None:
                   "(written by newer code?); keeping and ignoring it", file=sys.stderr)
 
 
+def _normalize_legacy_verdict(data) -> None:
+    """A verdict stored while Cursor could vote may be FAIL only because of a Cursor FAIL, which no
+    longer counts. Recompute its result from the counted votes; the Cursor entry stays as history."""
+    v = data.get("verdict") if isinstance(data, dict) else None
+    reviews = v.get("reviews") if isinstance(v, dict) else None
+    if not isinstance(reviews, dict) or "cursor" not in reviews:
+        return
+    votes = [r for k, r in reviews.items() if isinstance(r, dict) and rk.counted(k, r)]
+    if votes:
+        v["result"] = "FAIL" if any(r.get("result") == "FAIL" for r in votes) else "PASS"
+
+
 def _load_path(path: Path, label: str) -> dict:
     try:
         raw = path.read_text(encoding="utf-8")
@@ -546,6 +558,7 @@ def _load_path(path: Path, label: str) -> dict:
         data = json.loads(raw)
     except ValueError as exc:
         raise TicketError(f"ticket file {path.name} is not valid JSON: {exc}") from None
+    _normalize_legacy_verdict(data)
     problems = validate_stored(data, allow_unknown=True)
     if problems:
         raise TicketError(f"ticket file {path.name} is invalid: " + "; ".join(problems))

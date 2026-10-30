@@ -238,7 +238,7 @@ def counted(kind: str, info: dict | None = None) -> bool:
     return bool(VOTERS.get(kind, {}).get("counted"))
 
 
-VOTE_PASSES_NEEDED = 2   # distinct companies that must PASS (of the 3 voters)
+VOTE_PASSES_NEEDED = 2   # distinct companies that must PASS (both of the 2 voters)
 
 
 def vote_tally(reviews: dict) -> dict:
