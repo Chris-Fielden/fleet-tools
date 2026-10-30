@@ -37,10 +37,23 @@
 # the attempt's copy, or is missing, makes the attempt INVALID on our side ("baseline left its copy"); it is replaced
 # under the one-replacement rule. Claude runs with its rules left on.
 #
+# CODEX IN THE BOX (BD-148): Codex runs `codex exec --json -s read-only` in the same box Cursor uses (scripts/cursor-stress.sh
+# --box-run), with the copy as its working folder and a fresh empty home per attempt: so it cannot read the human's
+# ~/.agents or search above its copy. The box has no Cursor key and does not need the Cursor CLI. Its login: only
+# ~/.codex/auth.json is copied into the box home's .codex/ (mode 600). If Codex refreshed the login in the box, it is written
+# back atomically (mode 600) so the human's own Codex is not logged out, and the box home is deleted. Codex's own read-only
+# sandbox stays on; if it cannot start in the box, the preflight fails and nothing is spent. No login token value is kept in
+# any saved file: they are scrubbed like the Cursor key, and a file that still holds one is removed.
+# Trace rule for an attempt that ran in the box: a path inside the box's own folders (the copy, the folder above it that
+# holds only the copy and the box home, and the box home) is not "left its copy"; the human's real home (or ~ resolved to
+# it), fleet-tools, .fleet, gauntlet-key, answer-key or any other existing path outside the box is INVALID, our side.
+# Runs not in the box (Claude) keep the old rule.
+#
 # Settings (tests use them with fakes): GAUNTLET_AGENT, GAUNTLET_CODEX, GAUNTLET_CLAUDE, GAUNTLET_BOXES,
 # GAUNTLET_IMAGE, GAUNTLET_MODEL, GAUNTLET_MODELS (default "claude-opus claude-sonnet codex"; add cursor to test Cursor),
 # GAUNTLET_OUT_DIR, GAUNTLET_DIR, GAUNTLET_KEY, GAUNTLET_RESOLUTIONS, GAUNTLET_USAGE_CMD, GAUNTLET_NET_CMD,
-# GAUNTLET_MIN_FREE_MB, GAUNTLET_MAX_USED, CURSOR_KEY_FILE (default $FLEET_HOME/secrets/cursor-api-key).
+# GAUNTLET_MIN_FREE_MB, GAUNTLET_MAX_USED, GAUNTLET_CODEX_AUTH (default ~/.codex/auth.json),
+# CURSOR_KEY_FILE (default $FLEET_HOME/secrets/cursor-api-key).
 #
 # Exit: 0 done; 2 CLI or key missing; 3 not a terminal; 4 no box tool; 5 something got out of the box; 6 the key
 # was found in a saved file (removed); 7 the box could not start the CLI; 8 preflight failed (nothing was
@@ -59,6 +72,7 @@ MODEL="${GAUNTLET_MODEL:-composer-2.5}"
 MODELS="${GAUNTLET_MODELS:-claude-opus claude-sonnet codex}"
 fleet_home="${FLEET_HOME:-$HOME/.fleet}"
 key_file="${CURSOR_KEY_FILE:-$fleet_home/secrets/cursor-api-key}"
+CODEX_AUTH="${GAUNTLET_CODEX_AUTH:-$HOME/.codex/auth.json}"
 EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
 BRANCH="task/ledger-31"
 BLIND_WORDS='fixture|gauntlet|planted|stress|answer'
@@ -86,6 +100,13 @@ scrub_file() { scrub < "$1" > "$1.scrubbed" && mv -f "$1.scrubbed" "$1"; }
 work=""
 cleanup() { [[ -n "$work" ]] && rm -rf "${work:?}"; }
 trap cleanup EXIT
+# make_work: the work folder, and the file that lists the login tokens to scrub (mode 600, inside the work folder)
+make_work() {
+  [[ -n "$work" ]] && return 0
+  work="$(mktemp -d)" || return 1
+  : > "$work/secrets"; chmod 600 "$work/secrets"
+  export PSECRETS_FILE="$work/secrets"
+}
 
 # --- 0/1. PREFLIGHT: nothing is started unless all of it holds ------------------------------------------
 
@@ -120,13 +141,18 @@ agent_path="$(command -v "$AGENT" 2>/dev/null || true)"
 if want cursor; then
   [[ -n "$agent_path" ]] && ok_line "Cursor CLI found" || bad_line "'$AGENT' not found on PATH"
 fi
-if want codex; then command -v "$CODEX" >/dev/null 2>&1 && ok_line "Codex found" || bad_line "'$CODEX' not found"; fi
+if want codex; then
+  command -v "$CODEX" >/dev/null 2>&1 && ok_line "Codex found" || bad_line "'$CODEX' not found"
+  if python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d, dict) and d else 1)' "$CODEX_AUTH" 2>/dev/null; then
+    ok_line "the Codex login file exists and is readable"
+  else bad_line "the Codex login file ($CODEX_AUTH) is missing or unreadable; log in to Codex first"; fi
+fi
 if want claude-opus || want claude-sonnet; then command -v "$CLAUDE" >/dev/null 2>&1 && ok_line "Claude found" || bad_line "'$CLAUDE' not found"; fi
 
 # the box
 box_found=""
 for t in $STRESS_BOXES; do command -v "$t" >/dev/null 2>&1 && { box_found="$t"; break; }; done
-if want cursor; then
+if want cursor || want codex; then
   if [[ -z "$box_found" ]]; then
     echo "cursor-gauntlet: no box tool found (looked for: $STRESS_BOXES). Nothing was started." >&2
     echo "Install one, for example:  sudo apt install bubblewrap" >&2
@@ -231,13 +257,32 @@ done
 # the box starts the Cursor CLI (nothing is spent)
 version_raw=""
 if want cursor && [[ -n "$box_found" && -n "$agent_path" && -n "$key" ]]; then
-  work="$(mktemp -d)" || exit 1
+  make_work || exit 1
   mkdir -p "$work/selftest"
   version_all="$(bash "$stress" --box-run 0 "$work/selftest" "$work/selftest" 60 "$(readlink -f "$agent_path")" --version 2>&1)"
   version_rc=$?
   version_raw="$(printf '%s\n' "$version_all" | head -n 1)"
   if [[ $version_rc -ne 0 || -z "$version_raw" ]]; then bad_line "the Cursor CLI would not start inside the $box_found box"
   else ok_line "box self-test: $box_found runs the Cursor CLI ($version_raw)"; fi
+fi
+
+# the box starts Codex, and Codex's own read-only sandbox starts inside it (nothing is spent): `codex --version`, then
+# `codex sandbox -- sh -c 'echo ...'` (Codex's own command that runs a command in its Linux sandbox)
+codex_real=""
+if want codex && [[ -n "$box_found" ]] && command -v "$CODEX" >/dev/null 2>&1; then
+  codex_real="$(readlink -f "$(command -v "$CODEX")")"
+  make_work || exit 1
+  mkdir -p "$work/selftest-codex"
+  cv_out="$(bash "$stress" --box-run 0 "$work/selftest-codex" "$work/selftest-codex" 60 "$codex_real" --version 2>"$work/selftest-codex.err")"
+  cv_rc=$?
+  cv_line="$(printf '%s\n' "$cv_out" | head -n 1)"
+  if [[ $cv_rc -ne 0 || -z "$cv_line" ]]; then bad_line "Codex would not start inside the $box_found box ($(head -n 1 "$work/selftest-codex.err" | cut -c1-200))"
+  else
+    cs_out="$(bash "$stress" --box-run 0 "$work/selftest-codex" "$work/selftest-codex" 60 "$codex_real" sandbox -- /bin/sh -c 'echo SANDBOX-STARTED' 2>"$work/selftest-codex.err")"
+    cs_rc=$?
+    if [[ $cs_rc -eq 0 && "$cs_out" == *SANDBOX-STARTED* ]]; then ok_line "box self-test: $box_found runs Codex ($cv_line) and Codex's own sandbox starts inside it (codex sandbox)"
+    else bad_line "Codex's own read-only sandbox would not start inside the $box_found box (exit $cs_rc: $(grep -v '^WARNING' "$work/selftest-codex.err" | head -n 1 | cut -c1-200))"; fi
+  fi
 fi
 
 # a terminal, and the human's word on Cursor usage (the CLI cannot read it out)
@@ -261,7 +306,8 @@ if [[ ${#bad[@]} -gt 0 ]]; then
   printf '  - %s\n' "${bad[@]}" >&2
   exit 8
 fi
-[[ -n "$work" ]] || { work="$(mktemp -d)" || exit 1; }
+make_work || exit 1
+want codex && python3 -I "$score" secrets-add "$CODEX_AUTH" "$work/secrets"
 case "$work" in "$here"/*) echo "cursor-gauntlet: the work folder is inside fleet-tools" >&2; exit 1 ;; esac
 
 # --- the run folder ---------------------------------------------------------------------------------------------
@@ -555,12 +601,13 @@ PY
   if [[ ${#escapes[@]} -gt 0 ]]; then escaped_any=1; printf '  - attempt %s: %s\n' "$n" "${escapes[@]}" >> "$work/escapes.txt"; fi
 }
 
-# trace_check TRACE STEP INV COPY FAILED: a baseline's saved trace must exist and name no path outside its copy. Returns 1
+# trace_check TRACE STEP INV COPY FAILED [BOX_DIR]: a baseline's saved trace must exist and name no path outside its copy
+# (or, for an attempt that ran in the box, outside BOX_DIR, the folder that holds the copy and the box home). Returns 1
 # (and notes the attempt INVALID, our side) when it does not. A step that FAILED already has its own INVALID record, so
 # for it a missing trace adds nothing; a trace that left the copy always counts.
 trace_check() {
-  local trace="$1" step="$2" inv="$3" copy="$4" failed="${5:-no}" proof rc=0
-  proof="$(python3 -I "$score" trace-check "$trace" "" "$copy" "$(readlink -f "$copy")")" || rc=$?
+  local trace="$1" step="$2" inv="$3" copy="$4" failed="${5:-no}" boxdir="${6:-}" proof rc=0
+  proof="$(python3 -I "$score" trace-check ${boxdir:+--box "$boxdir"} "$trace" "" "$copy" "$(readlink -f "$copy")")" || rc=$?
   case $rc in
     0) return 0 ;;
     1) note_invalid "$inv" "$step" ours "baseline left its copy" "$proof" ;;
@@ -572,19 +619,52 @@ trace_check() {
 
 # --- Claude and Codex: read-only, from a folder outside fleet-tools ----------------------------------------------------
 
-other_attempt() {   # other_attempt MODEL N
+# codex_box_start HOME: a fresh empty home holding only the login file (mode 600); the copy it started with is kept
+# for the write-back, and its token values go on the scrub list
+codex_box_start() {   # codex_box_start HOME SNAPSHOT_FILE
+  local home="$1" snap="$2"
+  mkdir -p "$home/.codex"; chmod 700 "$home/.codex"
+  ( umask 077; cat "$CODEX_AUTH" > "$home/.codex/auth.json" ) && chmod 600 "$home/.codex/auth.json" || return 1
+  ( umask 077; cat "$CODEX_AUTH" > "$snap" )
+}
+
+# codex_box_done HOME: after a Codex run in the box. Its login tokens go on the scrub list first (a refreshed one too), then a
+# login Codex refreshed in the box is written back to the real file, atomically, mode 600.
+codex_box_done() {   # codex_box_done HOME SNAPSHOT_FILE
+  local home="$1" snap="$2"
+  python3 -I "$score" secrets-add "$home/.codex/auth.json" "$work/secrets"
+  python3 -I "$score" auth-back "$snap" "$home/.codex/auth.json" "$CODEX_AUTH" > "$snap.back" 2>/dev/null
+  # the next run in this home (the debrief) starts from what is now the real login
+  ( umask 077; cat "$CODEX_AUTH" > "$snap"; cat "$CODEX_AUTH" > "$home/.codex/auth.json" ) 2>/dev/null
+  [[ "$(cat "$snap.back" 2>/dev/null)" == written ]] && echo "cursor-gauntlet: Codex refreshed its login in the box: written back to the real login file"
+  rm -f "$snap.back"
+}
+
+other_attempt() {   # other_attempt MODEL N: the attempt, then the box home (with its login) is deleted
+  local rcx=0
+  other_attempt_run "$@" || rcx=$?
+  rm -rf "${work:?}/$1-$2/box/home" "${work:?}/$1-$2/auth.snapshot" "${work:?}/$1-$2/auth.snapshot.back"
+  return $rcx
+}
+
+other_attempt_run() {   # other_attempt_run MODEL N
   local model="$1" n="$2" d="$work/$1-$2" inv="$work/$1-$2.invalid" rc=0 cls reply sid mode=none label
+  local repo="$d/repo" home="" boxdir=""
+  [[ "$model" == codex ]] && { boxdir="$d/box"; repo="$boxdir/repo"; home="$boxdir/home"; }
   : > "$inv"
   mkdir -p "$d"
-  if ! make_blind "$d/repo"; then note_invalid "$inv" blind ours "the blind copy gave something away or has more than one commit" "see make_blind"; write_meta "$model" "$n" "$inv" none; return; fi
+  if ! make_blind "$repo"; then note_invalid "$inv" blind ours "the blind copy gave something away or has more than one commit" "see make_blind"; write_meta "$model" "$n" "$inv" none; return; fi
   case "$model" in
     codex)
       label="Codex"
-      ( cd "$d/repo" && timeout --kill-after=10 1800 "$CODEX" exec --json -s read-only -o "$d/last.txt" "$other_prompt" </dev/null ) > "$d/out.txt" 2> "$d/err.txt" || rc=$?
-      reply="$(cat "$d/last.txt" 2>/dev/null)" ;;
+      mkdir -p "$home"
+      if ! codex_box_start "$home" "$d/auth.snapshot"; then note_invalid "$inv" review ours "the Codex login could not be put in the box home" "see codex_box_start"; write_meta "$model" "$n" "$inv" none; return; fi
+      box 0 "$repo" "$home" 1800 "$codex_real" exec --json -s read-only -o "$home/last.txt" "$other_prompt" > "$d/out.txt" 2> "$d/err.txt" || rc=$?
+      reply="$(cat "$home/last.txt" 2>/dev/null)"; rm -f "$home/last.txt"
+      codex_box_done "$home" "$d/auth.snapshot" ;;
     claude-*)
       label="Claude (${model#claude-})"
-      ( cd "$d/repo" && timeout --kill-after=10 1800 "$CLAUDE" -p "$other_prompt" --model "${model#claude-}" --output-format stream-json --verbose \
+      ( cd "$repo" && timeout --kill-after=10 1800 "$CLAUDE" -p "$other_prompt" --model "${model#claude-}" --output-format stream-json --verbose \
           --allowedTools "Read" "Grep" "Glob" "Bash(git diff *)" "Bash(git log *)" "Bash(git show *)" \
           --disallowedTools "Edit" "Write" "NotebookEdit" </dev/null ) > "$d/out.txt" 2> "$d/err.txt" || rc=$?
       reply="$(python3 -I "$score" reply < "$d/out.txt")"     # the stream's result event only: no result, no reply
@@ -594,7 +674,7 @@ other_attempt() {   # other_attempt MODEL N
   scrub < "$d/out.txt" > "$out/$model-$n.trace.jsonl"
   { python3 -I "$score" errors < "$d/out.txt"; cat "$d/err.txt"; } > "$d/errs.txt"
   cls="$(classify "$rc" "$d/errs.txt" "$([[ -n "${reply//[[:space:]]/}" ]] && echo yes || echo no)")"
-  if ! trace_check "$out/$model-$n.trace.jsonl" trace "$inv" "$d/repo" "$([[ -n "$cls" ]] && echo yes || echo no)"; then
+  if ! trace_check "$out/$model-$n.trace.jsonl" trace "$inv" "$repo" "$([[ -n "$cls" ]] && echo yes || echo no)" "$boxdir"; then
     echo "cursor-gauntlet: $model attempt $n: INVALID, no usable trace or it left its copy"
     # a failure the run already had keeps its own record, so a model-side crash is not turned into "ours" alone
     if [[ -n "$cls" ]]; then IFS='|' read -r side why proof <<< "$cls"; note_invalid "$inv" review "$side" "$why" "$proof"; fi
@@ -617,27 +697,28 @@ $DEBRIEF"
       claude-*)
         if [[ -n "$sid" ]]; then
           mode=resumed
-          ( cd "$d/repo" && timeout --kill-after=10 1800 "$CLAUDE" -p "$DEBRIEF" --resume "$sid" --model "${model#claude-}" --output-format stream-json --verbose \
+          ( cd "$repo" && timeout --kill-after=10 1800 "$CLAUDE" -p "$DEBRIEF" --resume "$sid" --model "${model#claude-}" --output-format stream-json --verbose \
               --allowedTools "Read" "Grep" "Glob" --disallowedTools "Edit" "Write" "NotebookEdit" </dev/null ) > "$d/deb.txt" 2> "$d/deb.err" || rc2=$?
           cat "$d/deb.txt" >> "$d/deb.trace"
           deb="$(python3 -I "$score" reply < "$d/deb.txt")"
         fi
         if [[ -z "${deb:-}" ]]; then
           mode=fed; rc2=0
-          ( cd "$d/repo" && timeout --kill-after=10 1800 "$CLAUDE" -p "$fed" --model "${model#claude-}" --output-format stream-json --verbose \
+          ( cd "$repo" && timeout --kill-after=10 1800 "$CLAUDE" -p "$fed" --model "${model#claude-}" --output-format stream-json --verbose \
               --allowedTools "Read" "Grep" "Glob" --disallowedTools "Edit" "Write" "NotebookEdit" </dev/null ) > "$d/deb.txt" 2> "$d/deb.err" || rc2=$?
           cat "$d/deb.txt" >> "$d/deb.trace"
           deb="$(python3 -I "$score" reply < "$d/deb.txt")"
         fi ;;
       codex)
         mode=fed      # Codex's resume is not relied on: it is given its own review
-        ( cd "$d/repo" && timeout --kill-after=10 1800 "$CODEX" exec --json -s read-only -o "$d/deb-last.txt" "$fed" </dev/null ) > "$d/deb.txt" 2> "$d/deb.err" || rc2=$?
+        box 0 "$repo" "$home" 1800 "$codex_real" exec --json -s read-only -o "$home/deb-last.txt" "$fed" > "$d/deb.txt" 2> "$d/deb.err" || rc2=$?
         cp "$d/deb.txt" "$d/deb.trace"
-        deb="$(cat "$d/deb-last.txt" 2>/dev/null)" ;;
+        deb="$(cat "$home/deb-last.txt" 2>/dev/null)"; rm -f "$home/deb-last.txt"
+        codex_box_done "$home" "$d/auth.snapshot" ;;
     esac
     touch "$d/deb.trace"
     scrub < "$d/deb.trace" > "$out/$model-$n.debrief.trace.jsonl"
-    if ! trace_check "$out/$model-$n.debrief.trace.jsonl" trace "$inv" "$d/repo" "$([[ $rc2 -ne 0 || -z "${deb:-}" ]] && echo yes || echo no)"; then
+    if ! trace_check "$out/$model-$n.debrief.trace.jsonl" trace "$inv" "$repo" "$([[ $rc2 -ne 0 || -z "${deb:-}" ]] && echo yes || echo no)" "$boxdir"; then
       echo "cursor-gauntlet: $model attempt $n: INVALID, the debrief left no usable trace or left its copy"
       if [[ $rc2 -ne 0 || -z "${deb:-}" ]]; then
         { python3 -I "$score" errors < "$d/deb.txt"; cat "$d/deb.err"; } > "$d/deb-errs.txt"
@@ -685,6 +766,12 @@ if [[ -n "$key" ]]; then
     echo "cursor-gauntlet: the API key was found in $f: removing it" >&2
     rm -f "$f"; status=6
   done < <(grep -rlF -- "$key" "$out" 2>/dev/null)
+fi
+if [[ -s "$work/secrets" ]]; then
+  while IFS= read -r f; do
+    echo "cursor-gauntlet: a Codex login token was found in $f: removing it" >&2
+    rm -f "$f"; status=6
+  done < <(grep -rlF -f "$work/secrets" "$out" 2>/dev/null)
 fi
 if [[ $escaped_any -eq 1 ]]; then
   echo "cursor-gauntlet: SOMETHING GOT OUT OF THE BOX:" >&2
