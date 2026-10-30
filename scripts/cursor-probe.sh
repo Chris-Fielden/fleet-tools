@@ -17,8 +17,8 @@
 #
 # BD-136 adds review probes a-e, BD-137 adds f (see "the review probes" below). They write the result file
 # $FLEET_HOME/cursor-probe-result.json (CLI version + pass/fail per probe; no payloads, no email,
-# no key). The fleet counts a Cursor review as a vote only while that file passes for the
-# installed CLI version. The key is read from $FLEET_HOME/secrets/cursor-api-key.
+# no key). Nothing in the fleet reads that file since Cursor was removed as a reviewer (BD-145); the
+# gauntlet still uses the probes as evidence. The key is read from $FLEET_HOME/secrets/cursor-api-key.
 #
 # PROBE_WORK_DIR: make the throwaway folder inside this one. PROBE_REVIEW_ONLY=1: only probes a-f.
 #         PROBE_RESULT_FILE: where the result file goes (the stress test keeps its own copy).
@@ -288,8 +288,8 @@ record P12c "bad model name" "$?" "$work/P12c.out" "$work/P12c.err" json
 
 fi   # PROBE_REVIEW_ONLY
 
-### BD-136: the review probes a-e. They decide whether a Cursor review COUNTS as a vote.
-# They run the way a fleet review runs (fleet/cursor_review.py): the key from the key file in
+### BD-136: the review probes a-e. Since BD-145 they are diagnostic evidence only (no review counts).
+# They run the way a fleet review runs (the way a read-only review runs): the key from the key file in
 # the command's environment only, an empty throwaway HOME, the fleet's own hook file
 # (fleet/cursor_hook.py). The result file holds the CLI version and pass/fail per probe: no hook
 # payloads, no email, no key. Any probe that could not prove its point is a fail.

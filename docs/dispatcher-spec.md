@@ -352,7 +352,7 @@ Each watch cycle moves a `failed` build or fix ticket back to `claimed` (a trans
 the dispatcher can make) when ALL hold: the dispatcher failed it (close note starts
 "Failed: "; a ticket a human closed stays closed); its branch tip carries a verdict of that
 exact commit that PASSES the vote (at least 2 distinct counted companies PASS, no counted
-FAIL; advisory voters such as Cursor never count) and the merge gate of its real risk level
+FAIL) and the merge gate of its real risk level
 (so never below the high-risk rule); and the tip is not already in main, by its own merge
 or through another ticket's. Verdicts keep being recorded on a failed ticket's branch for
 this. The ticket gets a note, its close note is cleared and the normal flow moves it to In
