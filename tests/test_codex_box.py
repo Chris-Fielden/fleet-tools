@@ -135,7 +135,6 @@ def test_a_login_refreshed_in_the_box_is_written_back_atomically_mode_600(rig):
 
 
 def test_an_unchanged_login_leaves_the_real_file_untouched(rig):
-    before = real_auth(rig).stat()
     text = real_auth(rig).read_text()
     os.utime(real_auth(rig), (1_000_000_000, 1_000_000_000))
     before = real_auth(rig).stat()
@@ -239,4 +238,35 @@ def test_claude_still_runs_outside_the_box_with_its_own_home(rig):
     c = rig.log("claude")[0]
     assert c["home"] == str(rig.home) and c["cwd"].endswith("/claude-opus-1/repo") and "/box/" not in c["cwd"]
     assert verdicts(rig.run_dir())["claude-opus"] == "GO"
-    assert not [x for x in (rig.boxbin / "bwrap.log").read_text().splitlines() if "claude" in x] if (rig.boxbin / "bwrap.log").exists() else True
+    log = rig.boxbin / "bwrap.log"
+    if log.exists():
+        assert not [x for x in log.read_text().splitlines() if "claude" in x]
+
+
+def test_a_program_folder_that_holds_the_real_home_is_never_bound(rig, tmp_path):
+    prog = make_exe(rig.home / "prog", "#!/bin/sh\necho ok\n")      # the program sits directly in the home
+    work = tmp_path / "w"
+    (work / "cwd").mkdir(parents=True)
+    (work / "home").mkdir()
+    e = dict(os.environ, PATH=f"{rig.boxbin}:{os.environ['PATH']}", STRESS_BOXES="bwrap", HOME=str(rig.home), FLEET_HOME=str(rig.fleet))
+    subprocess.run(["bash", str(STRESS), "--box-run", "0", str(work / "cwd"), str(work / "home"), "30", str(prog)],
+                   stdin=subprocess.DEVNULL, capture_output=True, text=True, env=e, timeout=60)
+    log = [json.loads(x) for x in (rig.boxbin / "bwrap.log").read_text().splitlines()][-1]["box"]
+    assert str(rig.home) not in [log[i + 1] for i, a in enumerate(log) if a in ("--ro-bind", "--bind")]
+
+
+def test_an_env_shebang_with_options_still_finds_its_interpreter(rig, tmp_path):
+    inst = tmp_path / "inst2" / "bin"
+    inst.mkdir(parents=True)
+    make_exe(inst / "fakenode", "#!/bin/sh\necho interp\n")
+    script = tmp_path / "scripts2" / "tool"
+    script.parent.mkdir()
+    make_exe(script, "#!/usr/bin/env -S fakenode --flag\n")
+    work = tmp_path / "w"
+    (work / "cwd").mkdir(parents=True)
+    (work / "home").mkdir()
+    e = dict(os.environ, PATH=f"{inst}:{rig.boxbin}:{os.environ['PATH']}", STRESS_BOXES="bwrap")
+    subprocess.run(["bash", str(STRESS), "--box-run", "0", str(work / "cwd"), str(work / "home"), "30", str(script)],
+                   stdin=subprocess.DEVNULL, capture_output=True, text=True, env=e, timeout=60)
+    log = [json.loads(x) for x in (rig.boxbin / "bwrap.log").read_text().splitlines()][-1]["box"]
+    assert str(inst.parent) in [log[i + 1] for i, a in enumerate(log) if a == "--ro-bind"]

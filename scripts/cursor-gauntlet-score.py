@@ -30,6 +30,7 @@ import random
 import re
 import shlex
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 _spec = importlib.util.spec_from_file_location("cursor_stress_score", Path(__file__).with_name("cursor-stress-score.py"))
@@ -521,7 +522,8 @@ HOME_PREFIX_RE = re.compile(r"^(?:~|\$HOME|\$\{HOME\})(?=/|$)")
 # (the copy, the folder that holds only the copy and the box home, and the box home) are not "outside"; the human's
 # real home is outside whether or not the named path exists.
 BOX_ROOTS: tuple = ()
-BOX_HOME: str = ""
+REAL_HOME: str = ""     # the human's real home, set only for an attempt that ran in the box. (A `~` in a boxed trace is read as
+#                         this and not as the empty box home: the safe way to fail.)
 
 
 def call_strings(ev) -> list:
@@ -578,7 +580,7 @@ def _outside(cand: str, program: bool, base) -> bool:
     roots = ({base, os.path.realpath(base)} if base else set()) | set(BOX_ROOTS)
     if any(p == r or p.startswith(r + "/") for r in roots):
         return False
-    if BOX_HOME and (p == BOX_HOME or p.startswith(BOX_HOME + "/")):
+    if REAL_HOME and (p == REAL_HOME or p.startswith(REAL_HOME + "/")):
         return True
     return os.path.lexists(p) or bool(glob.glob(p))
 
@@ -643,15 +645,15 @@ def outside_in(key: str, text: str, copies, extra=()):
 def check_trace(path: Path, copies, extra=(), box=None):
     """(status, proof): ok | left (proof is the offending trace line) | missing. `box` is the folder that holds the
     copy and the box home of an attempt that ran in the box: a path inside it is not "left its copy" (BD-148)."""
-    global BOX_ROOTS, BOX_HOME
+    global BOX_ROOTS, REAL_HOME
     if box:
         home = os.path.expanduser("~")
         BOX_ROOTS = tuple({str(box), os.path.realpath(box)})
-        BOX_HOME = "" if home in ("", "/") else os.path.realpath(home)
+        REAL_HOME = "" if home in ("", "/") else os.path.realpath(home)
     try:
         return _check_trace(path, copies, extra)
     finally:
-        BOX_ROOTS, BOX_HOME = (), ""
+        BOX_ROOTS, REAL_HOME = (), ""
 
 
 def _check_trace(path: Path, copies, extra=()):
@@ -710,12 +712,15 @@ def secrets_add(auth: Path, out: Path) -> int:
     return 0
 
 
-def _refreshed(path: Path) -> str:
+def _refreshed(path: Path):
+    """The `last_refresh` time of a login file as an aware datetime, or the earliest possible one."""
+    floor = datetime.min.replace(tzinfo=timezone.utc)
     try:
         v = json.loads(path.read_text(encoding="utf-8")).get("last_refresh")
-    except (OSError, ValueError, AttributeError):
-        return ""
-    return v if isinstance(v, str) else ""
+        t = datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except (OSError, ValueError, AttributeError, TypeError):
+        return floor
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
 def auth_back(snapshot: Path, box: Path, real: Path) -> int:
@@ -749,6 +754,7 @@ def auth_back(snapshot: Path, box: Path, real: Path) -> int:
     if cur is not None and cur != snap and _refreshed(box) <= _refreshed(real):
         print("kept")                        # the real file moved on by itself and is not older than the box's
         return 0
+    real = real.resolve()                    # a symlinked login file keeps its link: the target is replaced
     tmp = real.with_name(f".{real.name}.{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
@@ -757,6 +763,13 @@ def auth_back(snapshot: Path, box: Path, real: Path) -> int:
             fh.flush()
             os.fsync(fh.fileno())
         os.chmod(tmp, 0o600)
+        try:                                 # read again just before the swap: the window left is the swap itself
+            again = real.read_bytes()
+        except OSError:
+            again = None
+        if again != cur:
+            print("kept")
+            return 0
         os.replace(tmp, real)
     finally:
         if tmp.exists():

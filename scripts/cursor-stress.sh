@@ -71,23 +71,39 @@ agent_real=""; [[ -n "$agent_path" ]] && agent_real="$(readlink -f "$agent_path"
 # of the program itself (symlinks resolved) and, when it is a script, the install prefix of its interpreter (for
 # node under nvm, the folder above bin/). Anything under /usr, /bin or /lib is in the box already.
 prog_dirs() {
-  local p r interp ir sb pre
+  local p r interp ir sb pre a
   p="$1"; [[ "$p" == */* ]] || p="$(command -v "$p" 2>/dev/null || true)"
   [[ -n "$p" && -e "$p" ]] || return 0
   r="$(readlink -f "$p")"
-  dirname "$r"
+  safe_dir "$(dirname "$r")"
   if [[ "$(head -c 2 "$r" 2>/dev/null)" == "#!" ]]; then
     sb="$(head -n 1 "$r" | cut -c3-)"
     set -- $sb
-    interp="$1"; [[ "${interp##*/}" == env && -n "${2:-}" ]] && interp="$2"
+    interp="$1"
+    if [[ "${interp##*/}" == env ]]; then       # `#!/usr/bin/env [-S] [options] NAME`: the first word that is no option
+      interp=""; shift
+      for a in "$@"; do [[ "$a" == -* || "$a" == *=* ]] || { interp="$a"; break; }; done
+    fi
     [[ "$interp" == */* ]] || interp="$(command -v "$interp" 2>/dev/null || true)"
     if [[ -n "$interp" && -e "$interp" ]]; then
       ir="$(readlink -f "$interp")"
-      dirname "$ir"
+      safe_dir "$(dirname "$ir")"
       pre="$(dirname "$(dirname "$ir")")"
-      [[ "${ir%/*}" == */bin && "$pre" != / && "$pre" != /usr ]] && echo "$pre"
+      [[ "${ir%/*}" == */bin ]] && safe_dir "$pre"
     fi
   fi
+}
+
+# safe_dir DIR: print DIR if it may be bound into the box. Never the system's own folders (already in the box, and a docker
+# or podman image must keep its own), never / and never a folder that is or holds the real home, the fleet's home or this
+# repository: binding one of those would show the box what the empty home is there to hide.
+safe_dir() {
+  local d="$1" x
+  case "$d" in ""|/|/usr|/usr/*|/bin|/bin/*|/sbin|/sbin/*|/lib|/lib/*|/lib32|/lib32/*|/lib64|/lib64/*) return 0 ;; esac
+  for x in "$HOME" "$fleet_home" "$here"; do
+    [[ -n "$x" && ( "$x" == "$d" || "$x" == "$d"/* ) ]] && return 0
+  done
+  echo "$d"
 }
 
 # box_cmd USE_KEY CWD HOME [EXTRA_RW_DIR...]: set BOXCMD to the command prefix; the program to run

@@ -633,11 +633,12 @@ codex_box_start() {   # codex_box_start HOME SNAPSHOT_FILE
 codex_box_done() {   # codex_box_done HOME SNAPSHOT_FILE
   local home="$1" snap="$2"
   python3 -I "$score" secrets-add "$home/.codex/auth.json" "$work/secrets"
-  python3 -I "$score" auth-back "$snap" "$home/.codex/auth.json" "$CODEX_AUTH" > "$snap.back" 2>/dev/null
+  python3 -I "$score" auth-back "$snap" "$home/.codex/auth.json" "$CODEX_AUTH" > "$snap.back" 2>"$snap.back.err" \
+    || echo "cursor-gauntlet: WARNING: the refreshed Codex login could not be written back ($(tail -n 1 "$snap.back.err" | cut -c1-200)); the box home is kept at $home" >&2
   # the next run in this home (the debrief) starts from what is now the real login
   ( umask 077; cat "$CODEX_AUTH" > "$snap"; cat "$CODEX_AUTH" > "$home/.codex/auth.json" ) 2>/dev/null
   [[ "$(cat "$snap.back" 2>/dev/null)" == written ]] && echo "cursor-gauntlet: Codex refreshed its login in the box: written back to the real login file"
-  rm -f "$snap.back"
+  rm -f "$snap.back" "$snap.back.err"
 }
 
 other_attempt() {   # other_attempt MODEL N: the attempt, then the box home (with its login) is deleted
