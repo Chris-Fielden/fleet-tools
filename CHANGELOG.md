@@ -6,6 +6,12 @@ Versions are the `ship-YYYY.MM.DD.N` tags that mark known-good points for rollba
 
 ## [Unreleased]
 
+## [ship-2026.10.30.2] - 2026-10-30
+
+### Changed
+
+- BD-148: Gauntlet: run Codex in the box
+
 ## [ship-2026.10.30.1] - 2026-10-30
 
 ### Changed
