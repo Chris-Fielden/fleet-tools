@@ -288,8 +288,8 @@ record P12c "bad model name" "$?" "$work/P12c.out" "$work/P12c.err" json
 
 fi   # PROBE_REVIEW_ONLY
 
-### BD-136: the review probes a-e. They decide whether a Cursor review COUNTS as a vote.
-# They run the way a fleet review runs (the way the removed fleet Cursor review ran): the key from the key file in
+### BD-136: the review probes a-e. Since BD-145 they are diagnostic evidence only (no review counts).
+# They run the way a fleet review runs (the way a read-only review runs): the key from the key file in
 # the command's environment only, an empty throwaway HOME, the fleet's own hook file
 # (fleet/cursor_hook.py). The result file holds the CLI version and pass/fail per probe: no hook
 # payloads, no email, no key. Any probe that could not prove its point is a fail.
