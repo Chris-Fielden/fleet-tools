@@ -46,7 +46,11 @@ if name == "codex" and args[:1] == ["sandbox"]:       # `codex sandbox -- CMD...
     if cfg.get("sandbox_fail"):
         sys.stderr.write("bwrap: No permissions to create new namespace\\n")
         sys.exit(1)
-    sys.exit(subprocess.run(args[args.index("--") + 1:]).returncode)
+    cmd = args[args.index("--") + 1:] if "--" in args else args[1:]
+    if args[1:2] == ["linux"]:                        # codex-cli 0.160.0 has no such word: it tries to run a program "linux"
+        sys.stderr.write("Failed to execvp linux: No such file or directory\\n")
+        sys.exit(101)
+    sys.exit(subprocess.run(cmd).returncode)
 prompt = args[args.index("-p") + 1] if "-p" in args else args[-1]
 home = os.environ.get("HOME", "")
 home_files = sorted(os.path.relpath(os.path.join(r, f), home) for r, d, fs in os.walk(home) for f in fs) if home else []

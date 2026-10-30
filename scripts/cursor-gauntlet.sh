@@ -267,7 +267,8 @@ if want cursor && [[ -n "$box_found" && -n "$agent_path" && -n "$key" ]]; then
 fi
 
 # the box starts Codex, and Codex's own read-only sandbox starts inside it (nothing is spent): `codex --version`, then
-# `codex sandbox -- sh -c 'echo ...'` (Codex's own command that runs a command in its Linux sandbox)
+# `codex sandbox -- sh -c 'echo ...'` (Codex's own command that runs a command in its Linux sandbox). Checked on the
+# installed codex-cli 0.160.0: there is no `linux` word; `codex sandbox linux -- ...` tries to run a program named "linux".
 codex_real=""
 if want codex && [[ -n "$box_found" ]] && command -v "$CODEX" >/dev/null 2>&1; then
   codex_real="$(readlink -f "$(command -v "$CODEX")")"
@@ -631,10 +632,15 @@ codex_box_start() {   # codex_box_start HOME SNAPSHOT_FILE
 # codex_box_done HOME: after a Codex run in the box. Its login tokens go on the scrub list first (a refreshed one too), then a
 # login Codex refreshed in the box is written back to the real file, atomically, mode 600.
 codex_box_done() {   # codex_box_done HOME SNAPSHOT_FILE
-  local home="$1" snap="$2"
+  local home="$1" snap="$2" where
   python3 -I "$score" secrets-add "$home/.codex/auth.json" "$work/secrets"
-  python3 -I "$score" auth-back "$snap" "$home/.codex/auth.json" "$CODEX_AUTH" > "$snap.back" 2>"$snap.back.err" \
-    || echo "cursor-gauntlet: WARNING: the refreshed Codex login could not be written back ($(tail -n 1 "$snap.back.err" | cut -c1-200)); the box home is kept at $home" >&2
+  if ! python3 -I "$score" auth-back "$snap" "$home/.codex/auth.json" "$CODEX_AUTH" > "$snap.back" 2>"$snap.back.err"; then
+    # the write-back failed: the refreshed login must not be lost with the box home, so it is saved beside the real one
+    if ( umask 077; cat "$home/.codex/auth.json" > "$CODEX_AUTH.refreshed" ) 2>/dev/null; then where="$CODEX_AUTH.refreshed"; else where="nowhere (it is lost)"; fi
+    echo "cursor-gauntlet: WARNING: the refreshed Codex login could not be written back ($(tail -n 1 "$snap.back.err" | cut -c1-200)); saved at: $where" >&2
+    rm -f "$snap.back" "$snap.back.err"
+    return 0
+  fi
   # the next run in this home (the debrief) starts from what is now the real login
   ( umask 077; cat "$CODEX_AUTH" > "$snap"; cat "$CODEX_AUTH" > "$home/.codex/auth.json" ) 2>/dev/null
   [[ "$(cat "$snap.back" 2>/dev/null)" == written ]] && echo "cursor-gauntlet: Codex refreshed its login in the box: written back to the real login file"

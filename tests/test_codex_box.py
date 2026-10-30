@@ -270,3 +270,14 @@ def test_an_env_shebang_with_options_still_finds_its_interpreter(rig, tmp_path):
                    stdin=subprocess.DEVNULL, capture_output=True, text=True, env=e, timeout=60)
     log = [json.loads(x) for x in (rig.boxbin / "bwrap.log").read_text().splitlines()][-1]["box"]
     assert str(inst.parent) in [log[i + 1] for i, a in enumerate(log) if a == "--ro-bind"]
+
+
+def test_a_failed_write_back_says_so_and_where_the_refreshed_login_went(rig):
+    real_auth(rig).chmod(0o400)
+    real_auth(rig).parent.chmod(0o500)          # the real file cannot be replaced
+    try:
+        res = rig.go(models="codex", codex={"rotate": json.dumps(ROTATED)})
+    finally:
+        real_auth(rig).parent.chmod(0o700)
+    assert "could not be written back" in res.stderr and "saved at:" in res.stderr
+    assert "fake-ROTATED" not in res.stderr and "fake-ROTATED" not in res.stdout      # no token value in any message
